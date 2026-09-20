@@ -13,20 +13,20 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked
 Goal: a reproducible development environment where multiple simulated drones can
 be launched and observed. No real hardware.
 
-- [ ] **P0-01** Monorepo skeleton: directories per `CLAUDE.md` layout, `README`,
+- [x] **P0-01** Monorepo skeleton: directories per `CLAUDE.md` layout, `README`,
       `.gitignore` (exclude `.env`, `*.bin`, `*.tlog`, `logs/`, SITL artifacts).
       *Done when:* `tree -L 2` matches the documented layout.
 
-- [ ] **P0-02** Git hygiene: `.githooks/commit-msg` strips AI attribution
+- [x] **P0-02** Git hygiene: `.githooks/commit-msg` strips AI attribution
       trailers, `.claude/settings.json` disables attribution, `make hooks`
       installs via `core.hooksPath`.
       *Done when:* a commit containing `Co-Authored-By: Claude` comes out clean.
 
-- [ ] **P0-03** `docker-compose.dev.yml`: PostgreSQL 16 + PostGIS 3.4,
+- [x] **P0-03** `docker-compose.dev.yml`: PostgreSQL 16 + PostGIS 3.4,
       TimescaleDB, Redis 7, NATS. Healthchecks on all four. Named volumes.
       *Done when:* `make up` reaches healthy on all services from a cold start.
 
-- [ ] **P0-04** SITL launcher `sim/run_sitl.sh` — N instances, unique SYSID per
+- [~] **P0-04** SITL launcher `sim/run_sitl.sh` — N instances, unique SYSID per
       instance, configurable home location, distinct UDP out ports.
       *Done when:* `make sim N=10` gives 10 vehicles with distinct SYSIDs.
       *Partial:* CI smoke test proves the launcher works. Visual confirmation in
@@ -39,15 +39,15 @@ be launched and observed. No real hardware.
       *Done when:* `make sim N=3` runs locally and all three vehicles appear in
       QGC on the Windows side.
 
-- [ ] **P0-05** Python tooling: `ruff`, `mypy` config, `pytest` with async
+- [x] **P0-05** Python tooling: `ruff`, `mypy` config, `pytest` with async
       support, shared `pyproject.toml` conventions.
       *Done when:* `make lint` and `make test` pass on an empty repo.
 
-- [ ] **P0-06** CI pipeline (GitHub Actions): lint, typecheck, unit tests on
+- [~] **P0-06** CI pipeline (GitHub Actions): lint, typecheck, unit tests on
       every push; SITL integration job on PR to `main`.
       *Done when:* CI is green on the P0 branch.
 
-- [ ] **P0-07** Structured logging and config loading shared library
+- [x] **P0-07** Structured logging and config loading shared library
       (`common/`): JSON logs, env-based config with validation, no bare prints.
       *Done when:* every service imports it and no service reads `os.environ`
       directly.
