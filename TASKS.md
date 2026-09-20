@@ -13,35 +13,56 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked
 Goal: a reproducible development environment where multiple simulated drones can
 be launched and observed. No real hardware.
 
-- [ ] **P0-01** Monorepo skeleton: directories per `CLAUDE.md` layout, `README`,
+- [x] **P0-01** Monorepo skeleton: directories per `CLAUDE.md` layout, `README`,
       `.gitignore` (exclude `.env`, `*.bin`, `*.tlog`, `logs/`, SITL artifacts).
       *Done when:* `tree -L 2` matches the documented layout.
+      Adds `common/` (P0-07) and `.gitattributes`, which pins scripts to LF so
+      a Windows checkout still produces files that run in CI.
 
-- [ ] **P0-02** Git hygiene: `.githooks/commit-msg` strips AI attribution
+- [x] **P0-02** Git hygiene: `.githooks/commit-msg` strips AI attribution
       trailers, `.claude/settings.json` disables attribution, `make hooks`
       installs via `core.hooksPath`.
       *Done when:* a commit containing `Co-Authored-By: Claude` comes out clean.
+      Verified against a scratch message file. Patterns are anchored to the
+      start of a line so body prose quoting a marker is not deleted with it.
 
-- [ ] **P0-03** `docker-compose.dev.yml`: PostgreSQL 16 + PostGIS 3.4,
+- [x] **P0-03** `docker-compose.dev.yml`: PostgreSQL 16 + PostGIS 3.4,
       TimescaleDB, Redis 7, NATS. Healthchecks on all four. Named volumes.
       *Done when:* `make up` reaches healthy on all services from a cold start.
+      Verified from cold volumes; PostGIS 3.4.3 and TimescaleDB 2.30.1
+      confirmed installed, both databases UTC.
 
-- [ ] **P0-04** SITL launcher `sim/run_sitl.sh` — N instances, unique SYSID per
+- [~] **P0-04** SITL launcher `sim/run_sitl.sh` — N instances, unique SYSID per
       instance, configurable home location, distinct UDP out ports.
       *Done when:* `make sim N=10` gives 10 vehicles, all visible in QGC.
+      Written and verified at N=10 against stub SITL and MAVProxy processes:
+      SYSID 1..10, distinct TCP and UDP ports, ground spacing measured against
+      PostGIS. **Not yet run against real ArduPilot or QGC** — `sim_vehicle.py`
+      is not installed on the development machine. The CI `sitl` job builds
+      ArduCopter and exercises it; this closes when that job has passed once.
 
-- [ ] **P0-05** Python tooling: `ruff`, `mypy` config, `pytest` with async
+- [x] **P0-05** Python tooling: `ruff`, `mypy` config, `pytest` with async
       support, shared `pyproject.toml` conventions.
       *Done when:* `make lint` and `make test` pass on an empty repo.
+      Note: mypy's `strict` is a global flag and leaks out of a per-module
+      override, so the bundle is expanded flag by flag to keep it on gateway,
+      dispatch, airspace and common only.
 
-- [ ] **P0-06** CI pipeline (GitHub Actions): lint, typecheck, unit tests on
+- [~] **P0-06** CI pipeline (GitHub Actions): lint, typecheck, unit tests on
       every push; SITL integration job on PR to `main`.
       *Done when:* CI is green on the P0 branch.
+      Written and lint-clean under actionlint; jobs for lint, unit tests,
+      shellcheck, the dev stack, and SITL on PRs into `main`. **Not yet run** —
+      nothing has been pushed. This closes on the first green run.
 
-- [ ] **P0-07** Structured logging and config loading shared library
+- [x] **P0-07** Structured logging and config loading shared library
       (`common/`): JSON logs, env-based config with validation, no bare prints.
       *Done when:* every service imports it and no service reads `os.environ`
       directly.
+      Both halves are enforced by tests rather than convention:
+      `tests/test_no_direct_environ.py` parses every service module, and
+      `tests/test_env_example.py` boots all five services from
+      `infra/.env.example`.
 
 ---
 
