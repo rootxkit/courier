@@ -15,6 +15,13 @@ to a Gateway on the Windows side, tests run in two places, paths do not match,
 and `make` has to be installed separately on Windows. Each issue is small. The
 sum is not.
 
+`make` on Windows carries one more wrinkle worth naming. The `Makefile` declares
+`SHELL := /bin/bash` because its recipes are POSIX shell, so the targets need
+Git Bash or WSL — a native `make.exe` driven from PowerShell or `cmd` has no
+`/bin/bash` to find. The alternative is a Windows shell fallback inside the
+`Makefile`, which would be dead code the moment this migration lands. One more
+small thing that disappears entirely rather than being worked around.
+
 The exception is if you are on Windows 10, where mirrored networking is
 unavailable — there the split is genuinely painful, which is an argument for
 moving everything into WSL rather than against it.
