@@ -19,6 +19,7 @@ Configure QGC first:
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import socket
 import sys
@@ -33,8 +34,10 @@ DEFAULT_PORT = 14445
 MAVLINK_V1_MAGIC = 0xFE
 MAVLINK_V2_MAGIC = 0xFD
 
-# Only the messages this project cares about. Anything else is reported by
-# numeric ID, which is enough to notice that it is arriving.
+# Fallback names, used only when pymavlink is not importable — listen mode has
+# to run on a bare ground-station Python. When pymavlink IS available its
+# dialect is authoritative and this table is not consulted, so an entry here
+# going stale cannot mislead anyone on a development machine.
 MESSAGE_NAMES = {
     0: "HEARTBEAT",
     1: "SYS_STATUS",
@@ -67,8 +70,24 @@ MESSAGE_NAMES = {
     253: "STATUSTEXT",
 }
 
-# Messages the telemetry pipeline depends on. Their absence is a finding.
-REQUIRED = {0, 1, 24, 33, 74, 147, 253}
+# Messages the telemetry pipeline depends on that the autopilot streams at a
+# configured rate. If one of these is absent, the relevant SR*_ parameter is
+# too low and that is a finding.
+REQUIRED_STREAMS = {0, 1, 24, 33, 74, 147}
+
+# Messages the pipeline also depends on, but which the autopilot emits only
+# when something happens: STATUSTEXT when the FC has something to say,
+# MISSION_ITEM_REACHED when a waypoint is passed. A quiet, parked aircraft
+# produces neither, so their absence says nothing about stream configuration.
+# Reporting them as MISSING sends someone chasing SR*_ parameters that were
+# never the problem.
+EVENT_DRIVEN = {253, 46}
+
+# A rate needs enough samples across a long enough window to mean anything.
+# Below these thresholds the probe prints "-" rather than a number, because a
+# number here would be read as a measurement.
+MIN_SAMPLES_FOR_RATE = 3
+MIN_SPAN_FOR_RATE_S = 0.5
 
 PARAM_VALUE_MSGID = 22
 
@@ -101,6 +120,63 @@ REQUIRED_CORRELATIONS = 3
 # tools/tests/test_mavlink_probe.py rather than trusted from memory.
 _PARAM_ID_START = 8
 _PARAM_ID_END = 24
+
+
+@functools.cache
+def _dialect_message_names() -> dict[int, str]:
+    """Message names straight from pymavlink, or {} if it is not installed.
+
+    pymavlink's dialect is the reference for MAVLink names (CLAUDE.md rule 4),
+    so resolving against it at runtime beats a hand-maintained table that
+    drifts. The import is optional and local because listen mode must keep
+    working on a machine that has nothing but the standard library.
+    """
+    try:
+        from pymavlink.dialects.v20 import ardupilotmega as dialect
+    except ImportError:
+        return {}
+
+    # msgname, not name: name is deprecated and warns on every access, which
+    # under our warnings-as-errors test config would be a failure.
+    names: dict[int, str] = {}
+    for msgid, message_class in dialect.mavlink_map.items():
+        names[int(msgid)] = str(message_class.msgname)
+    return names
+
+
+def resolve_message_name(msgid: int) -> str:
+    """Name a message ID, falling back to '#id' when nothing knows it."""
+    dynamic = _dialect_message_names().get(msgid)
+    if dynamic is not None:
+        return dynamic
+    static = MESSAGE_NAMES.get(msgid)
+    if static is not None:
+        return static
+    return f"#{msgid}"
+
+
+def compute_rate_hz(count: int, span_s: float) -> float | None:
+    """Return an observed message rate, or None when it cannot be supported.
+
+    Two samples a millisecond apart are not a 54 kHz stream; they are one event
+    observed twice. Dividing by a near-zero span turns a burst of event-driven
+    messages into an absurd rate that looks like a measurement, so a rate is
+    only reported when there are enough samples across a long enough window.
+    """
+    if count < MIN_SAMPLES_FOR_RATE or span_s < MIN_SPAN_FOR_RATE_S:
+        return None
+    return (count - 1) / span_s
+
+
+def classify_absences(seen: set[int]) -> tuple[set[int], set[int]]:
+    """Split what did not arrive into findings and non-findings.
+
+    Returns (missing_streams, unobserved_events). The first is actionable: a
+    stream the pipeline needs is not configured to arrive. The second is not,
+    and must never be presented as though it were — an event that did not
+    happen is not a misconfiguration.
+    """
+    return REQUIRED_STREAMS - seen, EVENT_DRIVEN - seen
 
 
 def payload_of(frame: bytes) -> bytes | None:
@@ -261,23 +337,34 @@ def cmd_listen(args: argparse.Namespace) -> int:
         print(f"Unparseable     {unparseable} frames")
     print()
 
-    per_sys: dict[int, list[tuple[int, int, float]]] = defaultdict(list)
+    per_sys: dict[int, list[tuple[int, int, float | None]]] = defaultdict(list)
     for (sysid, msgid), count in counts.items():
-        span = max(last_seen[(sysid, msgid)] - first_seen[(sysid, msgid)], 1e-6)
-        rate = (count - 1) / span if count > 1 else 0.0
-        per_sys[sysid].append((msgid, count, rate))
+        span_s = last_seen[(sysid, msgid)] - first_seen[(sysid, msgid)]
+        per_sys[sysid].append((msgid, count, compute_rate_hz(count, span_s)))
 
     for sysid in sorted(per_sys):
         print(f"SYSID {sysid}")
-        print(f"  {'message':<24} {'count':>7} {'Hz':>7}")
+        # Sized to the block's content: resolved MAVLink names run past 24
+        # characters (GIMBAL_DEVICE_ATTITUDE_STATUS is 29), and a misaligned
+        # column is harder to read than a wide one.
+        width = max(24, *(len(resolve_message_name(m)) for m, _, _ in per_sys[sysid]))
+        print(f"  {'message':<{width}} {'count':>7} {'Hz':>7}")
         for msgid, count, rate in sorted(per_sys[sysid], key=lambda r: -r[1]):
-            name = MESSAGE_NAMES.get(msgid, f"#{msgid}")
-            print(f"  {name:<24} {count:>7} {rate:>7.2f}")
-        missing = REQUIRED - {m for m, _, _ in per_sys[sysid]}
-        if missing:
-            names = ", ".join(sorted(MESSAGE_NAMES.get(m, str(m)) for m in missing))
+            rate_text = "-" if rate is None else f"{rate:.2f}"
+            name = resolve_message_name(msgid)
+            print(f"  {name:<{width}} {count:>7} {rate_text:>7}")
+        missing_streams, unobserved_events = classify_absences(
+            {m for m, _, _ in per_sys[sysid]}
+        )
+        if missing_streams:
+            names = ", ".join(sorted(resolve_message_name(m) for m in missing_streams))
             print(f"  MISSING (required by the pipeline): {names}")
             print("  Raise the relevant SR*_ stream rate parameters.")
+        if unobserved_events:
+            names = ", ".join(
+                sorted(resolve_message_name(m) for m in unobserved_events)
+            )
+            print(f"  not observed (event-driven, absence is not a finding): {names}")
         print()
 
     if args.json:
@@ -294,9 +381,11 @@ def cmd_listen(args: argparse.Namespace) -> int:
                 {
                     "sysid": sysid,
                     "msgid": msgid,
-                    "name": MESSAGE_NAMES.get(msgid, f"#{msgid}"),
+                    "name": resolve_message_name(msgid),
                     "count": count,
-                    "rate_hz": round(rate, 3),
+                    # null, not 0.0: too few samples to say, which is not the
+                    # same claim as "it arrived at zero hertz".
+                    "rate_hz": None if rate is None else round(rate, 3),
                 }
                 for sysid in sorted(per_sys)
                 for msgid, count, rate in sorted(per_sys[sysid])

@@ -14,17 +14,27 @@ gets recorded as telemetry-only forever without anyone learning why.
 
 from __future__ import annotations
 
+import warnings
+
 import pytest
 from pymavlink.dialects.v10 import ardupilotmega as mav1
 from pymavlink.dialects.v20 import ardupilotmega as mav2
 
 from tools.mavlink_probe import (
+    EVENT_DRIVEN,
     MAVLINK_V1_MAGIC,
     MAVLINK_V2_MAGIC,
+    MESSAGE_NAMES,
+    MIN_SAMPLES_FOR_RATE,
+    MIN_SPAN_FOR_RATE_S,
     PARAM_VALUE_MSGID,
+    REQUIRED_STREAMS,
+    classify_absences,
+    compute_rate_hz,
     decode_header,
     extract_param_id,
     payload_of,
+    resolve_message_name,
     split_frames,
 )
 
@@ -334,3 +344,170 @@ def test_param_value_survives_a_realistic_coalesced_datagram() -> None:
 def test_magic_constants_match_the_reference_encoder() -> None:
     assert heartbeat_v2()[0] == MAVLINK_V2_MAGIC
     assert heartbeat_v1()[0] == MAVLINK_V1_MAGIC
+
+
+# --- classify_absences ------------------------------------------------------
+
+STATUSTEXT = 253
+MISSION_ITEM_REACHED = 46
+HEARTBEAT = 0
+GLOBAL_POSITION_INT = 33
+
+
+def test_statustext_is_not_treated_as_a_stream() -> None:
+    """The regression this split exists for.
+
+    STATUSTEXT arrives when the flight controller has something to say. On a
+    parked, healthy aircraft it never arrives, and calling that MISSING sends
+    someone tuning SR*_ parameters that were never the problem.
+    """
+    assert STATUSTEXT not in REQUIRED_STREAMS
+    assert STATUSTEXT in EVENT_DRIVEN
+
+
+def test_mission_item_reached_is_event_driven() -> None:
+    """It fires on waypoint completion, so a stationary vehicle emits none."""
+    assert MISSION_ITEM_REACHED not in REQUIRED_STREAMS
+    assert MISSION_ITEM_REACHED in EVENT_DRIVEN
+
+
+def test_the_two_groups_are_disjoint() -> None:
+    assert not REQUIRED_STREAMS & EVENT_DRIVEN
+
+
+@pytest.mark.parametrize("msgid", sorted(REQUIRED_STREAMS | EVENT_DRIVEN))
+def test_every_classified_message_can_be_named_in_a_report(msgid: int) -> None:
+    """An operator reading the output should see a name, not a bare number."""
+    assert msgid in MESSAGE_NAMES
+
+
+def test_quiet_link_produces_no_findings() -> None:
+    """Every stream present and no events: nothing is wrong, so say nothing."""
+    missing, unobserved = classify_absences(set(REQUIRED_STREAMS))
+
+    assert missing == set()
+    assert unobserved == EVENT_DRIVEN
+
+
+def test_an_absent_stream_is_a_finding() -> None:
+    seen = set(REQUIRED_STREAMS) - {GLOBAL_POSITION_INT}
+
+    missing, _ = classify_absences(seen)
+
+    assert missing == {GLOBAL_POSITION_INT}
+
+
+def test_observed_events_are_not_reported_as_unobserved() -> None:
+    seen = set(REQUIRED_STREAMS) | {STATUSTEXT}
+
+    missing, unobserved = classify_absences(seen)
+
+    assert missing == set()
+    assert unobserved == {MISSION_ITEM_REACHED}
+
+
+def test_a_silent_link_reports_every_stream_missing() -> None:
+    missing, unobserved = classify_absences(set())
+
+    assert missing == REQUIRED_STREAMS
+    assert unobserved == EVENT_DRIVEN
+
+
+def test_unrelated_traffic_does_not_satisfy_a_requirement() -> None:
+    """Seeing plenty of some other message is not evidence the streams are on."""
+    missing, _ = classify_absences({HEARTBEAT, 30, 32, 241})
+
+    assert HEARTBEAT not in missing
+    assert missing == REQUIRED_STREAMS - {HEARTBEAT}
+
+
+# --- compute_rate_hz --------------------------------------------------------
+
+
+def test_two_samples_in_the_same_millisecond_produce_no_rate() -> None:
+    """The defect seen on hardware: COMMAND_ACK twice, reported as 54 kHz.
+
+    Dividing by a near-zero span turns one event observed twice into a number
+    that reads like a measurement. There is no rate here to report.
+    """
+    assert compute_rate_hz(count=2, span_s=0.001) is None
+
+
+def test_two_samples_far_apart_still_produce_no_rate() -> None:
+    """Two samples describe one interval, which is not a rate."""
+    assert compute_rate_hz(count=2, span_s=60.0) is None
+
+
+def test_zero_span_produces_no_rate() -> None:
+    assert compute_rate_hz(count=10, span_s=0.0) is None
+
+
+def test_burst_within_the_minimum_span_produces_no_rate() -> None:
+    """A STATUSTEXT burst at boot is not a stream, however many arrive."""
+    assert compute_rate_hz(count=25, span_s=0.2) is None
+
+
+def test_a_genuine_stream_produces_a_rate() -> None:
+    """40 samples across 10s is 39 intervals: 3.9 Hz."""
+    assert compute_rate_hz(count=40, span_s=10.0) == pytest.approx(3.9)
+
+
+def test_rate_uses_intervals_not_samples() -> None:
+    """n samples bound n-1 intervals; using n inflates every rate."""
+    assert compute_rate_hz(count=11, span_s=10.0) == pytest.approx(1.0)
+
+
+def test_rate_is_reported_at_the_threshold() -> None:
+    assert compute_rate_hz(count=MIN_SAMPLES_FOR_RATE, span_s=MIN_SPAN_FOR_RATE_S) == (
+        pytest.approx((MIN_SAMPLES_FOR_RATE - 1) / MIN_SPAN_FOR_RATE_S)
+    )
+
+
+@pytest.mark.parametrize(
+    ("count", "span_s"),
+    [(MIN_SAMPLES_FOR_RATE - 1, 10.0), (10, MIN_SPAN_FOR_RATE_S - 0.01)],
+)
+def test_rate_is_withheld_just_below_each_threshold(count: int, span_s: float) -> None:
+    assert compute_rate_hz(count=count, span_s=span_s) is None
+
+
+# --- resolve_message_name ---------------------------------------------------
+
+# Seen on real hardware during the first P1-00 run, and previously printed as
+# bare numeric IDs. The expected names are asserted against pymavlink's dialect
+# rather than trusted from the incident report.
+HARDWARE_MESSAGE_IDS = [77, 111, 152, 163, 178, 226, 245, 281, 285, 11039]
+
+
+@pytest.mark.parametrize("msgid", HARDWARE_MESSAGE_IDS)
+def test_hardware_message_ids_resolve_to_names(msgid: int) -> None:
+    name = resolve_message_name(msgid)
+
+    assert name == mav2.mavlink_map[msgid].msgname
+    assert not name.startswith("#"), f"{msgid} still reports as a bare ID"
+
+
+@pytest.mark.parametrize("msgid", sorted(REQUIRED_STREAMS | EVENT_DRIVEN))
+def test_pipeline_messages_resolve_consistently(msgid: int) -> None:
+    """The static fallback must agree with the dialect, not contradict it."""
+    assert resolve_message_name(msgid) == mav2.mavlink_map[msgid].msgname
+    assert MESSAGE_NAMES[msgid] == mav2.mavlink_map[msgid].msgname
+
+
+def test_unknown_id_falls_back_to_a_bare_marker() -> None:
+    unknown = 64999
+    assert unknown not in mav2.mavlink_map
+
+    assert resolve_message_name(unknown) == f"#{unknown}"
+
+
+def test_resolution_does_not_warn() -> None:
+    """`name` is deprecated and warns per access; `msgname` must be used.
+
+    pytest runs with filterwarnings = ["error"], so a regression to `.name`
+    fails here rather than quietly emitting thousands of warnings during a
+    60-second capture.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert resolve_message_name(0) == "HEARTBEAT"
