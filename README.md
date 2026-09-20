@@ -31,8 +31,15 @@ docs/          Architecture, runbooks, decision records
 
 ## Getting started
 
-Requires Python 3.12+, Docker with Compose v2, and GNU Make. On Windows use Git
-Bash or WSL — the Makefile and the SITL scripts are POSIX shell.
+**The supported environment is WSL2 — follow
+[`docs/DEV_SETUP_WSL.md`](docs/DEV_SETUP_WSL.md).**
+
+The toolchain this project lives on is POSIX-native: ArduPilot's `waf` build,
+`sim_vehicle.py`, `mavlink-router`, MAVProxy. Each is a separate fight on
+Windows, and from Phase 1 onward they are used daily. QGroundControl stays on
+Windows and connects over UDP; it does not care where the other end lives.
+
+Once set up:
 
 ```bash
 make hooks           # install the commit-msg hook (do this first)
@@ -52,7 +59,55 @@ make sim N=10                           # 10 vehicles, SYSID 1..10
 make sim-stop
 ```
 
+Probing a QGC forwarding link, to answer P1-00:
+
+```bash
+make probe                    # inventory message types and rates
+make probe-roundtrip          # is the channel bidirectional?
+```
+
 Run `make help` for the full target list.
+
+**`make` targets need a POSIX shell.** The `Makefile` declares
+`SHELL := /bin/bash` because its recipes are POSIX shell, so run them from WSL
+or Git Bash. A native Windows `make.exe` driven from PowerShell or `cmd` has no
+`/bin/bash` to find. There is deliberately no Windows shell fallback in the
+`Makefile`: WSL2 is the supported path, and the fallback would be dead code.
+
+<details>
+<summary><strong>Windows without make</strong></summary>
+
+A stopgap while migrating to WSL2. Everything here is the raw command the
+equivalent target wraps, in PowerShell. In Git Bash, swap `\` for `/`.
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python -m pip install -e '.[dev]'
+
+git config core.hooksPath .githooks                                  # make hooks
+docker compose -f infra\docker-compose.dev.yml up -d --wait          # make up
+docker compose -f infra\docker-compose.dev.yml down                  # make down
+.\.venv\Scripts\mypy                                                 # make lint
+.\.venv\Scripts\ruff check .                                         #   ...
+.\.venv\Scripts\ruff format --check .                                #   ...
+.\.venv\Scripts\ruff format .                                        # make fmt
+.\.venv\Scripts\pytest -m 'not sitl'                                 # make test
+.\.venv\Scripts\python tools\mavlink_probe.py listen                 # make probe
+```
+
+`make sim` has no Windows equivalent: it needs ArduPilot's `sim_vehicle.py`,
+which is the main reason the supported environment is WSL2.
+
+**Do not "fix" the `python3` fallback in the `Makefile` to match Linux.** When
+no `.venv` is present the `Makefile` falls back to `python` on Windows and
+`python3` elsewhere, and that asymmetry is deliberate. Windows ships a
+`python3.exe` App Execution Alias that is not an interpreter: it prints a
+Microsoft Store advertisement and exits non-zero. Anything invoking it reports a
+confusing failure rather than a missing interpreter — this cost real debugging
+time once already, when it silently swallowed the SITL launcher's child
+processes and surfaced as a bogus "SITL did not open its TCP port" error.
+
+</details>
 
 ## Conventions
 
