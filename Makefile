@@ -30,8 +30,34 @@ else
 VENV_BIN := $(VENV)/bin
 endif
 
+# The probe also runs on the ground-station PC, which has QGC and a vehicle but
+# is not a development machine and may have no venv. Use the venv interpreter
+# when it is there and fall back to a bare one otherwise.
+#
+# The fallback is `python` on Windows, not `python3`: Windows ships a
+# python3.exe App Execution Alias that is not an interpreter — it prints a
+# Microsoft Store advertisement and exits non-zero, which reads as a confusing
+# failure rather than a missing interpreter.
+ifeq ($(OS),Windows_NT)
+PROBE_FALLBACK_PYTHON := python
+else
+PROBE_FALLBACK_PYTHON := python3
+endif
+PROBE_PYTHON := $(if $(wildcard $(VENV_BIN)/python*),$(VENV_BIN)/python,$(PROBE_FALLBACK_PYTHON))
+
+PROBE := $(PROBE_PYTHON) tools/mavlink_probe.py
+
+# Left empty so the probe's own defaults stay the single source of truth;
+# set any of them on the command line to override.
+PROBE_HOST ?=
+PROBE_PORT ?=
+PROBE_JSON ?=
+PROBE_SECONDS ?= 30
+PROBE_PARAM ?= SYSID_THISMAV
+PROBE_OPTS := $(if $(PROBE_HOST),--host $(PROBE_HOST)) $(if $(PROBE_PORT),--port $(PROBE_PORT))
+
 .PHONY: help hooks up down stop ps logs reset psql psql-telemetry sim sim-stop \
-        venv lint fmt typecheck test test-cov test-sitl clean
+        venv lint fmt typecheck test test-cov test-sitl clean probe probe-roundtrip
 
 help: ## Show this help
 	@echo "Courier — available targets:"
@@ -75,6 +101,12 @@ sim: ## Launch N SITL vehicles (make sim N=10)
 
 sim-stop: ## Stop every SITL vehicle
 	./sim/stop_sitl.sh
+
+probe: ## Inventory what QGC forwarding delivers (PROBE_SECONDS=30, PROBE_JSON=path)
+	$(PROBE) listen $(PROBE_OPTS) --seconds $(PROBE_SECONDS) $(if $(PROBE_JSON),--json $(PROBE_JSON))
+
+probe-roundtrip: ## Test whether the QGC forwarding socket is bidirectional
+	$(PROBE) roundtrip $(PROBE_OPTS) --param $(PROBE_PARAM)
 
 $(VENV_BIN)/python:
 	$(PYTHON) -m venv $(VENV)
