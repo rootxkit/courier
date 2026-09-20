@@ -1,0 +1,148 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "courier"
+version = "0.1.0"
+description = "Drone courier platform: dispatch, airspace deconfliction and telemetry"
+requires-python = ">=3.12"
+dependencies = [
+    # Environment configuration is validated at startup rather than read
+    # ad hoc; see common/config.py.
+    "pydantic>=2.7",
+    "pydantic-settings>=2.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+]
+sitl = [
+    # Reading MAVLink from simulated vehicles in the integration job. Message
+    # and field names are taken from the dialect definitions shipped here.
+    "pymavlink>=2.4.40",
+]
+
+[tool.setuptools]
+# Each service is a top-level package rather than a src/ layout, so the
+# directory names in CLAUDE.md and the import names are the same thing.
+packages = ["common", "agent", "gateway", "api", "dispatch", "airspace"]
+
+# --- ruff -------------------------------------------------------------------
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+extend-exclude = ["sim/out", ".venv"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",    # pycodestyle
+    "F",         # pyflakes
+    "I",         # import sorting
+    "N",         # pep8-naming
+    "UP",        # pyupgrade
+    "B",         # bugbear
+    "A",         # shadowed builtins
+    "C4",        # comprehensions
+    "DTZ",       # naive datetimes — every timestamp here is UTC-aware
+    "T20",       # no print(): logging goes through common.logging
+    "SIM",       # simplify
+    "PTH",       # pathlib over os.path
+    "RUF",
+]
+ignore = [
+    "E501",      # line length is the formatter's job
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests may shadow builtins in fixtures and assert on private helpers.
+"**/tests/**" = ["A", "B008"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "parents"
+
+[tool.ruff.format]
+docstring-code-format = true
+
+# --- mypy -------------------------------------------------------------------
+
+[tool.mypy]
+python_version = "3.12"
+files = ["common", "agent", "gateway", "api", "dispatch", "airspace"]
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_reexport = true
+show_error_codes = true
+
+# gateway, dispatch and airspace are safety-relevant: a type error there is a
+# build failure, not a warning. common is included because those three import
+# it, so a loose type in common defeats the point of checking them strictly.
+#
+# `strict = true` is NOT used here. In mypy it is a global flag, and setting it
+# inside a per-module override silently turns strict on for every module —
+# verified against mypy 2.3.1, where an untyped def in api/ was reported under
+# an override naming only gateway. The bundle is expanded instead so it applies
+# where it is meant to and nowhere else. The remaining strict flags
+# (warn_redundant_casts, warn_unused_ignores, no_implicit_reexport,
+# warn_unused_configs) are already on globally above.
+[[tool.mypy.overrides]]
+module = ["common.*", "gateway.*", "dispatch.*", "airspace.*"]
+disallow_any_generics = true
+disallow_subclassing_any = true
+disallow_untyped_calls = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+warn_return_any = true
+strict_equality = true
+extra_checks = true
+
+# --- pytest -----------------------------------------------------------------
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = [
+    "tests",
+    "common",
+    "agent",
+    "gateway",
+    "api",
+    "dispatch",
+    "airspace",
+]
+python_files = ["test_*.py"]
+asyncio_mode = "auto"
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "-ra",
+]
+markers = [
+    "sitl: integration test requiring running SITL vehicles (not run by default)",
+]
+filterwarnings = ["error"]
+
+# --- coverage ---------------------------------------------------------------
+
+[tool.coverage.run]
+branch = true
+source = ["common", "gateway", "dispatch", "airspace"]
+
+[tool.coverage.report]
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@overload",
+]
+# TASKS.md sets 80% on gateway, dispatch and airspace. Those modules have no
+# behaviour yet, so a threshold now would only measure the absence of code.
+# Raise this to 80 with the first real module (P1-02).
+fail_under = 0

@@ -1,0 +1,14 @@
+# Normalise to LF in the repository; check out native line endings by default.
+* text=auto
+
+# Anything executed by a shell must stay LF, including on Windows checkouts.
+# A CRLF shebang line makes the script unrunnable on Linux and in CI.
+*.sh          text eol=lf
+.githooks/*   text eol=lf
+Makefile      text eol=lf
+*.yml         text eol=lf
+*.yaml        text eol=lf
+
+# Binary flight artifacts, should any ever be committed deliberately.
+*.bin         binary
+*.tlog        binary

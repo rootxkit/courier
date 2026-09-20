@@ -1,0 +1,120 @@
+# Local development stack.
+#
+# Four services, all health-checked so that `make up` can block on readiness
+# rather than on a guess: PostGIS for relational state, a separate TimescaleDB
+# for the telemetry hypertable, Redis for live drone state, NATS for the bus.
+#
+# Telemetry is a separate database from the start. It has a different write
+# pattern (high-rate append-only), a different retention policy, and losing it
+# must never take orders and missions with it.
+#
+# Everything is parameterised through the environment; copy infra/.env.example
+# to .env at the repository root. The defaults below are development-only.
+#
+# Relative paths below resolve against the Compose project directory, which is
+# this file's directory. Do not invoke with --project-directory pointing
+# elsewhere: the initdb bind mounts would silently resolve to a non-existent
+# path, Docker would create it empty, and the extensions would never be
+# installed. The Makefile invokes Compose correctly.
+#
+# Verified on first bring-up: postgis 3.4.3 / PostgreSQL 16 on `postgres`;
+# timescaledb 2.30.1 + postgis 3.6.4 on `timescale`.
+
+name: courier
+
+services:
+  postgres:
+    image: postgis/postgis:16-3.4
+    container_name: courier-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-courier}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-courier_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-courier}
+      # Deterministic collation, so index ordering matches across machines.
+      POSTGRES_INITDB_ARGS: "--locale=C.UTF-8 --encoding=UTF8"
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./initdb/postgres:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 20s
+    restart: unless-stopped
+
+  timescale:
+    # The -ha image bundles TimescaleDB and PostGIS on PostgreSQL 16;
+    # drone_state carries a geometry column, so both are required.
+    image: timescale/timescaledb-ha:pg16
+    container_name: courier-timescale
+    environment:
+      POSTGRES_USER: ${TIMESCALE_USER:-courier}
+      POSTGRES_PASSWORD: ${TIMESCALE_PASSWORD:-courier_dev}
+      POSTGRES_DB: ${TIMESCALE_DB:-courier_telemetry}
+    ports:
+      - "${TIMESCALE_PORT:-5433}:5432"
+    volumes:
+      - ts_data:/home/postgres/pgdata
+      - ./initdb/timescale:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 36
+      start_period: 40s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: courier-redis
+    # appendonly keeps live state across a restart of the dev stack. Redis is
+    # a cache of truth held elsewhere, so this is convenience, not durability.
+    command: >
+      redis-server
+      --appendonly yes
+      --save 60 1000
+      --maxmemory ${REDIS_MAXMEMORY:-256mb}
+      --maxmemory-policy noeviction
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+
+  nats:
+    image: nats:2.10-alpine
+    container_name: courier-nats
+    # JetStream is on so that replayed telemetry after a relay dropout has
+    # somewhere to land; -m exposes the monitoring port the healthcheck uses.
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    ports:
+      - "${NATS_PORT:-4222}:4222"
+      - "${NATS_MONITOR_PORT:-8222}:8222"
+    volumes:
+      - nats_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -S -O - http://127.0.0.1:8222/healthz 2>&1 | grep -q '200 OK'"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  pg_data:
+    name: courier_pg_data
+  ts_data:
+    name: courier_ts_data
+  redis_data:
+    name: courier_redis_data
+  nats_data:
+    name: courier_nats_data
