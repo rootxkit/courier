@@ -22,6 +22,11 @@ dev = [
     "pytest-asyncio>=0.23",
     "pytest-cov>=5.0",
 ]
+sitl = [
+    # Reading MAVLink from simulated vehicles in the integration job. Message
+    # and field names are taken from the dialect definitions shipped here.
+    "pymavlink>=2.4.40",
+]
 
 [tool.setuptools]
 # Each service is a top-level package rather than a src/ layout, so the

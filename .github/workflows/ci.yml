@@ -1,0 +1,191 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+    branches: [main]
+
+# A superseded run on the same branch has nothing left to tell us.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  lint:
+    name: Lint and typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install workspace
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+
+      - name: ruff check
+        run: ruff check --output-format=github .
+
+      - name: ruff format
+        run: ruff format --check .
+
+      # gateway, dispatch and airspace are safety-relevant, so a type error
+      # here is a build failure rather than a warning.
+      - name: mypy
+        run: mypy
+
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install workspace
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+
+      - name: pytest
+        run: pytest -m 'not sitl' --cov --cov-report=term-missing
+
+  shell:
+    name: Shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The SITL launcher and the commit-msg hook are executable code on the
+      # critical path of every developer's day; they get linted too.
+      - name: shellcheck
+        run: shellcheck sim/run_sitl.sh sim/stop_sitl.sh .githooks/commit-msg
+
+      - name: Scripts are executable
+        run: |
+          for f in sim/run_sitl.sh sim/stop_sitl.sh .githooks/commit-msg; do
+            test -x "$f" || { echo "$f is not executable"; exit 1; }
+          done
+
+  compose:
+    name: Dev stack reaches healthy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # P0-03's acceptance criterion, run for real: cold volumes to all four
+      # services healthy. --wait fails the step if any healthcheck does not
+      # pass, so no assertion is needed beyond the exit code.
+      - name: make up
+        run: make up
+
+      - name: Extensions are installed
+        run: |
+          docker exec courier-postgres psql -U courier -d courier \
+            -tAc "SELECT 1 FROM pg_extension WHERE extname = 'postgis'" | grep -q 1
+          docker exec courier-timescale psql -U courier -d courier_telemetry \
+            -tAc "SELECT 1 FROM pg_extension WHERE extname = 'timescaledb'" | grep -q 1
+
+      - name: make down
+        if: always()
+        run: make down
+
+  sitl:
+    name: SITL integration
+    # Expensive: it builds ArduPilot. Restricted to pull requests into main,
+    # which is where a regression in the flight path must be caught.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # Pin the firmware line the fleet actually flies. When the fleet moves,
+      # this moves with it — the SITL that gates merges must be the SITL that
+      # matches the aircraft.
+      ARDUPILOT_REF: Copter-4.5
+      SITL_INSTANCE_COUNT: "3"
+      # CI test area. Real operating coordinates live in configuration, never
+      # in the repository; this is a simulation fixture and nothing else.
+      SITL_HOME: "41.7151,44.8271,450,0"
+      SITL_SYSID_BASE: "1"
+      SITL_OUT_PORT_BASE: "14560"
+      # No QGC in CI, so there is nothing to fan out to.
+      SITL_QGC_PORT: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Checkout ArduPilot
+        uses: actions/checkout@v4
+        with:
+          repository: ArduPilot/ardupilot
+          ref: ${{ env.ARDUPILOT_REF }}
+          path: ardupilot
+          submodules: recursive
+
+      - name: Record ArduPilot revision
+        id: ardupilot
+        working-directory: ardupilot
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache ArduPilot build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ardupilot/build
+            ~/.ccache
+          key: ardupilot-${{ runner.os }}-${{ steps.ardupilot.outputs.sha }}
+
+      - name: Install build and MAVLink tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ccache g++ gawk make wget
+          python -m pip install --upgrade pip
+          python -m pip install empy==3.3.4 pexpect future pymavlink MAVProxy
+
+      - name: Build ArduCopter SITL
+        working-directory: ardupilot
+        run: |
+          ./waf configure --board sitl
+          ./waf copter
+
+      - name: Install workspace
+        run: |
+          python -m pip install -e '.[dev,sitl]'
+
+      - name: Launch SITL vehicles
+        env:
+          SIM_VEHICLE: ${{ github.workspace }}/ardupilot/Tools/autotest/sim_vehicle.py
+        run: ./sim/run_sitl.sh -n "$SITL_INSTANCE_COUNT"
+
+      - name: SITL integration tests
+        run: pytest -m sitl -v
+
+      - name: Stop SITL vehicles
+        if: always()
+        run: ./sim/stop_sitl.sh
+
+      - name: Upload SITL logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sitl-logs
+          path: sim/out/
+          retention-days: 7

@@ -31,7 +31,7 @@ VENV_BIN := $(VENV)/bin
 endif
 
 .PHONY: help hooks up down stop ps logs reset psql psql-telemetry sim sim-stop \
-        venv lint fmt typecheck test test-cov clean
+        venv lint fmt typecheck test test-cov test-sitl clean
 
 help: ## Show this help
 	@echo "Courier — available targets:"
@@ -99,6 +99,11 @@ test: venv ## Run unit tests (SITL integration tests excluded)
 
 test-cov: venv ## Run unit tests with a coverage report
 	$(VENV_BIN)/pytest -m 'not sitl' --cov --cov-report=term-missing
+
+test-sitl: venv ## Run integration tests against already-running SITL vehicles
+	@test -n "$${SITL_INSTANCE_COUNT:-}" \
+		|| { echo "test-sitl: set SITL_INSTANCE_COUNT to the number of running vehicles" >&2; exit 1; }
+	$(VENV_BIN)/pytest -m sitl -v
 
 clean: ## Remove caches, build output and the virtualenv
 	rm -rf $(VENV) .mypy_cache .ruff_cache .pytest_cache .coverage htmlcov \
