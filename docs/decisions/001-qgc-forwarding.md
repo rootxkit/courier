@@ -17,6 +17,7 @@ assumption; run `tools/mavlink_probe.py` and paste real output.
 | Ground station OS | |
 | Vehicle SYSID | |
 | Test date | |
+| Probe commit (`git rev-parse --short HEAD`) | |
 
 ## Method
 
@@ -30,6 +31,42 @@ python tools/mavlink_probe.py roundtrip --param SYSID_THISMAV
 
 Propellers removed. The aircraft does not need to fly, or even be on battery —
 USB power is enough.
+
+## Tool provenance — which probe produced these numbers
+
+**Any roundtrip result produced before commit `c05ee6e` is void.** Record the
+probe commit in the table above so a later reader can tell which implementation
+the findings came from.
+
+The first implementation of `roundtrip` read `param_id` at PARAM_VALUE payload
+offset 4. It is at offset 8: MAVLink orders payload fields by descending type
+size, so `param_value` (4 bytes), `param_count` (2) and `param_index` (2)
+precede it. The old slice returned the count and index bytes instead of a name,
+so the comparison against the requested parameter never matched under any
+circumstances.
+
+That version could therefore only ever print `TELEMETRY-ONLY`. It was not
+capable of detecting a bidirectional link, and it would not have failed or
+warned while being incapable of it — it returned the answer we expected, which
+is why the defect survived review. **An expected result is not evidence.** The
+only way to tell that version's output from a real measurement is the commit it
+came from, which is why the table records one.
+
+The same version also sliced payload bounds backwards from the end of the frame
+(`frame[10:-2]`), which silently consumes signature bytes on a signed MAVLink v2
+frame.
+
+Scope of the damage, for the avoidance of doubt:
+
+- **`roundtrip` results are void.** Both defects lived in `cmd_roundtrip`.
+- **`listen` results are unaffected.** `cmd_listen` only calls `split_frames`
+  and `decode_header`. `split_frames` accounted for the 13-byte signature block
+  correctly from the first version, and `decode_header` reads fixed header
+  offsets that signing does not move. Neither ever sliced a payload.
+
+Fixed in `c05ee6e`, with the offset now pinned by a test that builds frames with
+pymavlink rather than asserting against hand-written bytes
+(`tools/tests/test_mavlink_probe.py`).
 
 ## Finding 1 — message inventory and rates
 
