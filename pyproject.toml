@@ -70,6 +70,12 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # Tests may shadow builtins in fixtures and assert on private helpers.
 "**/tests/**" = ["A", "B008"]
+# tools/ holds CLI diagnostics whose stdout IS the deliverable: the operator
+# runs them at the ground station and pastes the output into a decision record.
+# Structured JSON logging would defeat the purpose, and listen mode must stay
+# standard-library only so it runs on a machine with no venv. T201 only — every
+# other rule applies here as it does everywhere else.
+"tools/**" = ["T201"]
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "parents"
@@ -81,7 +87,7 @@ docstring-code-format = true
 
 [tool.mypy]
 python_version = "3.12"
-files = ["common", "agent", "gateway", "api", "dispatch", "airspace"]
+files = ["common", "agent", "gateway", "api", "dispatch", "airspace", "tools"]
 warn_unused_configs = true
 warn_redundant_casts = true
 warn_unused_ignores = true
@@ -99,8 +105,15 @@ show_error_codes = true
 # where it is meant to and nowhere else. The remaining strict flags
 # (warn_redundant_casts, warn_unused_ignores, no_implicit_reexport,
 # warn_unused_configs) are already on globally above.
+# pymavlink ships neither stubs nor a py.typed marker. It is the reference for
+# MAVLink message and field names (CLAUDE.md rule 4), so it is not replaceable;
+# the import is untyped and the code around it is not.
 [[tool.mypy.overrides]]
-module = ["common.*", "gateway.*", "dispatch.*", "airspace.*"]
+module = ["pymavlink.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["common.*", "gateway.*", "dispatch.*", "airspace.*", "tools.*"]
 disallow_any_generics = true
 disallow_subclassing_any = true
 disallow_untyped_calls = true
@@ -124,6 +137,7 @@ testpaths = [
     "api",
     "dispatch",
     "airspace",
+    "tools",
 ]
 python_files = ["test_*.py"]
 asyncio_mode = "auto"
@@ -141,7 +155,7 @@ filterwarnings = ["error"]
 
 [tool.coverage.run]
 branch = true
-source = ["common", "gateway", "dispatch", "airspace"]
+source = ["common", "gateway", "dispatch", "airspace", "tools"]
 
 [tool.coverage.report]
 exclude_also = [
