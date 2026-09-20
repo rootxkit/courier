@@ -20,7 +20,9 @@ SHELL := /bin/bash
 ENV_FILE := $(wildcard .env)
 COMPOSE := docker compose -f infra/docker-compose.dev.yml $(if $(ENV_FILE),--env-file $(ENV_FILE))
 
-.PHONY: help hooks up down stop ps logs reset psql psql-telemetry
+N ?= 1
+
+.PHONY: help hooks up down stop ps logs reset psql psql-telemetry sim sim-stop
 
 help: ## Show this help
 	@echo "Courier — available targets:"
@@ -58,3 +60,9 @@ psql: ## Open a psql shell on the relational database
 
 psql-telemetry: ## Open a psql shell on the telemetry database
 	$(COMPOSE) exec timescale psql -U $${TIMESCALE_USER:-courier} -d $${TIMESCALE_DB:-courier_telemetry}
+
+sim: ## Launch N SITL vehicles (make sim N=10)
+	./sim/run_sitl.sh -n $(N)
+
+sim-stop: ## Stop every SITL vehicle
+	./sim/stop_sitl.sh
