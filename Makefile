@@ -22,7 +22,16 @@ COMPOSE := docker compose -f infra/docker-compose.dev.yml $(if $(ENV_FILE),--env
 
 N ?= 1
 
-.PHONY: help hooks up down stop ps logs reset psql psql-telemetry sim sim-stop
+PYTHON ?= $(shell command -v python3 2>/dev/null || command -v python)
+VENV := .venv
+ifeq ($(OS),Windows_NT)
+VENV_BIN := $(VENV)/Scripts
+else
+VENV_BIN := $(VENV)/bin
+endif
+
+.PHONY: help hooks up down stop ps logs reset psql psql-telemetry sim sim-stop \
+        venv lint fmt typecheck test test-cov clean
 
 help: ## Show this help
 	@echo "Courier — available targets:"
@@ -66,3 +75,32 @@ sim: ## Launch N SITL vehicles (make sim N=10)
 
 sim-stop: ## Stop every SITL vehicle
 	./sim/stop_sitl.sh
+
+$(VENV_BIN)/python:
+	$(PYTHON) -m venv $(VENV)
+	$(VENV_BIN)/python -m pip install --quiet --upgrade pip
+	$(VENV_BIN)/python -m pip install --quiet -e '.[dev]'
+
+venv: $(VENV_BIN)/python ## Create .venv and install the workspace with dev extras
+
+fmt: venv ## Format and apply safe lint fixes
+	$(VENV_BIN)/ruff format .
+	$(VENV_BIN)/ruff check --fix .
+
+lint: venv typecheck ## Lint and typecheck everything
+	$(VENV_BIN)/ruff check .
+	$(VENV_BIN)/ruff format --check .
+
+typecheck: venv ## mypy, strict on the safety-relevant modules
+	$(VENV_BIN)/mypy
+
+test: venv ## Run unit tests (SITL integration tests excluded)
+	$(VENV_BIN)/pytest -m 'not sitl'
+
+test-cov: venv ## Run unit tests with a coverage report
+	$(VENV_BIN)/pytest -m 'not sitl' --cov --cov-report=term-missing
+
+clean: ## Remove caches, build output and the virtualenv
+	rm -rf $(VENV) .mypy_cache .ruff_cache .pytest_cache .coverage htmlcov \
+	       coverage.xml build dist ./*.egg-info sim/out
+	find . -type d -name __pycache__ -prune -exec rm -rf {} +
