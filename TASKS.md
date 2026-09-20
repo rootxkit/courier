@@ -13,56 +13,44 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked
 Goal: a reproducible development environment where multiple simulated drones can
 be launched and observed. No real hardware.
 
-- [x] **P0-01** Monorepo skeleton: directories per `CLAUDE.md` layout, `README`,
+- [ ] **P0-01** Monorepo skeleton: directories per `CLAUDE.md` layout, `README`,
       `.gitignore` (exclude `.env`, `*.bin`, `*.tlog`, `logs/`, SITL artifacts).
       *Done when:* `tree -L 2` matches the documented layout.
-      Adds `common/` (P0-07) and `.gitattributes`, which pins scripts to LF so
-      a Windows checkout still produces files that run in CI.
 
-- [x] **P0-02** Git hygiene: `.githooks/commit-msg` strips AI attribution
+- [ ] **P0-02** Git hygiene: `.githooks/commit-msg` strips AI attribution
       trailers, `.claude/settings.json` disables attribution, `make hooks`
       installs via `core.hooksPath`.
       *Done when:* a commit containing `Co-Authored-By: Claude` comes out clean.
-      Verified against a scratch message file. Patterns are anchored to the
-      start of a line so body prose quoting a marker is not deleted with it.
 
-- [x] **P0-03** `docker-compose.dev.yml`: PostgreSQL 16 + PostGIS 3.4,
+- [ ] **P0-03** `docker-compose.dev.yml`: PostgreSQL 16 + PostGIS 3.4,
       TimescaleDB, Redis 7, NATS. Healthchecks on all four. Named volumes.
       *Done when:* `make up` reaches healthy on all services from a cold start.
-      Verified from cold volumes; PostGIS 3.4.3 and TimescaleDB 2.30.1
-      confirmed installed, both databases UTC.
 
-- [~] **P0-04** SITL launcher `sim/run_sitl.sh` — N instances, unique SYSID per
+- [ ] **P0-04** SITL launcher `sim/run_sitl.sh` — N instances, unique SYSID per
       instance, configurable home location, distinct UDP out ports.
-      *Done when:* `make sim N=10` gives 10 vehicles, all visible in QGC.
-      Written and verified at N=10 against stub SITL and MAVProxy processes:
-      SYSID 1..10, distinct TCP and UDP ports, ground spacing measured against
-      PostGIS. **Not yet run against real ArduPilot or QGC** — `sim_vehicle.py`
-      is not installed on the development machine. The CI `sitl` job builds
-      ArduCopter and exercises it; this closes when that job has passed once.
+      *Done when:* `make sim N=10` gives 10 vehicles with distinct SYSIDs.
+      *Partial:* CI smoke test proves the launcher works. Visual confirmation in
+      QGC still outstanding — close that once local SITL exists (P0-08), because
+      a SYSID collision would pass CI and fail in the console.
 
-- [x] **P0-05** Python tooling: `ruff`, `mypy` config, `pytest` with async
+- [ ] **P0-08** WSL2 development environment per `docs/DEV_SETUP_WSL.md`:
+      mirrored networking, Docker integration, repo on the WSL filesystem,
+      ArduPilot SITL built locally.
+      *Done when:* `make sim N=3` runs locally and all three vehicles appear in
+      QGC on the Windows side.
+
+- [ ] **P0-05** Python tooling: `ruff`, `mypy` config, `pytest` with async
       support, shared `pyproject.toml` conventions.
       *Done when:* `make lint` and `make test` pass on an empty repo.
-      Note: mypy's `strict` is a global flag and leaks out of a per-module
-      override, so the bundle is expanded flag by flag to keep it on gateway,
-      dispatch, airspace and common only.
 
-- [~] **P0-06** CI pipeline (GitHub Actions): lint, typecheck, unit tests on
+- [ ] **P0-06** CI pipeline (GitHub Actions): lint, typecheck, unit tests on
       every push; SITL integration job on PR to `main`.
       *Done when:* CI is green on the P0 branch.
-      Written and lint-clean under actionlint; jobs for lint, unit tests,
-      shellcheck, the dev stack, and SITL on PRs into `main`. **Not yet run** —
-      nothing has been pushed. This closes on the first green run.
 
-- [x] **P0-07** Structured logging and config loading shared library
+- [ ] **P0-07** Structured logging and config loading shared library
       (`common/`): JSON logs, env-based config with validation, no bare prints.
       *Done when:* every service imports it and no service reads `os.environ`
       directly.
-      Both halves are enforced by tests rather than convention:
-      `tests/test_no_direct_environ.py` parses every service module, and
-      `tests/test_env_example.py` boots all five services from
-      `infra/.env.example`.
 
 ---
 
@@ -71,12 +59,10 @@ be launched and observed. No real hardware.
 Goal: telemetry from many vehicles reaches the database and a browser map.
 
 - [ ] **P1-00** Verify QGC forwarding behaviour empirically before building on
-      it. Enable forwarding to `127.0.0.1:14445`, confirm which message types
-      arrive and at what rate, and test whether anything injected back on that
-      socket reaches the vehicle. Record the result in
-      `docs/decisions/001-qgc-forwarding.md`.
-      *Done when:* the document states, with evidence, what the link can and
-      cannot do. Everything downstream depends on this being accurate.
+      it. Run `tools/mavlink_probe.py listen` and `roundtrip` against the real
+      aircraft and fill in `docs/decisions/001-qgc-forwarding.md`.
+      *Done when:* the decision record contains measured output, not
+      assumptions. Everything downstream depends on this being accurate.
 
 - [ ] **P1-01** Ground relay process: read UDP 14445, authenticate, forward to
       Gateway over TLS WebSocket, disk-backed queue that replays after an
