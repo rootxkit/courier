@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Strip AI attribution trailers from commit messages.
+#
+# This is a safety net, not a licence: CLAUDE.md requires that these lines are
+# never written in the first place. Installed via `make hooks`, which sets
+# core.hooksPath to .githooks.
+set -euo pipefail
+
+MSG_FILE="$1"
+
+# Remove attribution lines. Every pattern is anchored to the start of a line:
+# these markers only ever appear as their own trailer, and an unanchored match
+# silently mangles body prose that happens to mention one of them.
+sed -E -i.bak \
+  -e '/^Co-[Aa]uthored-[Bb]y: Claude/d' \
+  -e '/^Co-[Aa]uthored-[Bb]y: .*noreply@anthropic\.com/d' \
+  -e '/^Assisted-[Bb]y: Claude/d' \
+  -e '/^[[:space:]]*(🤖[[:space:]]*)?[Gg]enerated with \[?Claude Code/d' \
+  -e '/^Claude-Session:/d' \
+  -e '/^[[:space:]]*🤖/d' \
+  "$MSG_FILE"
+
+rm -f "${MSG_FILE}.bak"
+
+# Collapse any trailing blank lines left behind.
+awk 'BEGIN{blank=0}
+     /^[[:space:]]*$/ {blank++; next}
+     {while (blank-- > 0) print ""; blank=0; print}
+     END{}' "$MSG_FILE" > "${MSG_FILE}.tmp"
+mv "${MSG_FILE}.tmp" "$MSG_FILE"
+
+# Reject an empty message.
+if ! grep -q '[^[:space:]]' "$MSG_FILE"; then
+  echo "commit-msg: message is empty after stripping attribution" >&2
+  exit 1
+fi
+
+# Warn, but do not block, when the subject carries no task ID. Some commits
+# legitimately have none; most should.
+if ! grep -qE '\[[A-Z]+[0-9]+[A-Za-z]*-[0-9]+\]' "$MSG_FILE"; then
+  echo "commit-msg: warning — no task ID (e.g. [P0-01]) found in the message" >&2
+fi

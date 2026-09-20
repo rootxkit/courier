@@ -53,5 +53,5 @@ app-customer/.expo/
 .DS_Store
 Thumbs.db
 
-# Claude Code local overrides
+# Local per-developer tool overrides
 .claude/settings.local.json
