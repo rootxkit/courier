@@ -5,6 +5,17 @@
 sim/sitl.env
 !sim/sitl.env.example
 
+# Ground relay: the bearer token lives in its own file so a configuration can
+# be shared without it. Never commit one.
+*.token
+relay.toml
+!relay.example.toml
+
+# Ground relay durable queue (SQLite, plus its WAL sidecars)
+relay-queue.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
 # Flight and telemetry artifacts
 *.bin
 *.BIN

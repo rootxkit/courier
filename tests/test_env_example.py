@@ -12,7 +12,6 @@ from pathlib import Path
 
 import pytest
 
-from agent.config import AgentSettings
 from airspace.config import AirspaceSettings
 from api.config import ApiSettings
 from common.config import Settings, load_settings
@@ -22,8 +21,11 @@ from gateway.config import GatewaySettings
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ENV_EXAMPLE = REPO_ROOT / "infra" / ".env.example"
 
+# The agent is deliberately absent. It is the ground relay, configured from
+# TOML rather than the environment, because it is edited by a pilot on a laptop
+# and not by an operator with a deployment pipeline. Its example configuration
+# is agent/relay.example.toml and its own tests cover it.
 SERVICE_SETTINGS: tuple[type[Settings], ...] = (
-    AgentSettings,
     GatewaySettings,
     ApiSettings,
     DispatchSettings,

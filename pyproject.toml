@@ -12,6 +12,10 @@ dependencies = [
     # ad hoc; see common/config.py.
     "pydantic>=2.7",
     "pydantic-settings>=2.2",
+    # The ground relay's uplink. relay-v1 is a WebSocket protocol, and the
+    # relay must run on a pilot's bare Windows laptop where a C toolchain is
+    # not available, so a pure-Python client matters.
+    "websockets>=13",
 ]
 
 [project.optional-dependencies]
@@ -113,7 +117,14 @@ module = ["pymavlink.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = ["common.*", "gateway.*", "dispatch.*", "airspace.*", "tools.*"]
+module = [
+    "common.*",
+    "gateway.*",
+    "dispatch.*",
+    "airspace.*",
+    "tools.*",
+    "agent.*",
+]
 disallow_any_generics = true
 disallow_subclassing_any = true
 disallow_untyped_calls = true
@@ -155,7 +166,7 @@ filterwarnings = ["error"]
 
 [tool.coverage.run]
 branch = true
-source = ["common", "gateway", "dispatch", "airspace", "tools"]
+source = ["common", "gateway", "dispatch", "airspace", "tools", "agent"]
 
 [tool.coverage.report]
 exclude_also = [
