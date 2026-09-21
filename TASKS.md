@@ -72,38 +72,51 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
 - [ ] **P1-01** Ground relay process: read UDP 14445, authenticate, forward to
       Gateway over TLS WebSocket, disk-backed queue that replays after an
       internet dropout. Runs as a Windows service or tray app on the ground PC.
-      Two requirements settled by P1-00's measurements:
-      **(a) Classify sources by HEARTBEAT identity, per `(sysid, compid)`.**
-      QGC forwards its own heartbeat back into the stream, and a gimbal or
-      companion computer may heartbeat under the vehicle's SYSID with a
-      different component ID. Never register a ground station or a component as
-      a vehicle. Classify on the HEARTBEAT `type` and `autopilot` fields, never
-      on the SYSID number — `GCS_SYSTEM_ID` is a user setting — and never on
-      message volume, since a just-booted aircraft has sent one HEARTBEAT and
-      nothing else. Ambiguity resolves to vehicle. `tools/mavlink_probe.py` has
-      a working implementation to lift.
-      **(b) Stream-rate budget: forward an explicit allow-list, drop the rest.**
-      About 80% of the observed stream exists because QGC asked for it, to feed
-      its own instrument panels. Document which messages the relay forwards and
-      which it drops, with the reason. This cuts the ground station's uplink
-      cost, and — the more important half — it means the Gateway's input is
-      defined by us rather than by whichever QGC screen the pilot has open or
-      whatever the next QGC release decides to request.
+      **The relay is lossless and dumb.** It forwards every datagram it
+      receives, unmodified and unparsed. It does not filter, does not identify
+      vehicles, and does not interpret MAVLink at all.
+      Filtering here would be irreversible: the messages the hot path does not
+      want — `ATTITUDE`, `VIBRATION`, `EKF_STATUS_REPORT`, `ESC_TELEMETRY` —
+      are exactly the ones an incident investigation needs, and P10-03 flight
+      replay cannot reconstruct what was never sent. The relay's uplink is
+      internet, where ~2.8 KiB/s per aircraft is negligible; the bandwidth
+      constraint is the radio link, which is a vehicle-side concern (P1-01b).
+      The wire contract is [`docs/protocols/relay-v1.md`](docs/protocols/relay-v1.md).
       *Done when:* pulling the network cable for 2 minutes results in zero lost
-      telemetry rows once it reconnects, no non-vehicle endpoint is ever
-      registered as a drone, and the forwarded message set matches the
-      documented budget.
+      telemetry rows once it reconnects, and the relay conforms to relay-v1.
 
 - [ ] **P1-01b** QGC setup documentation: forwarding configuration, stream rate
       tuning (`SR*_` parameters), multi-vehicle SYSID assignment, radio `NETID`
       separation. Written so a pilot can follow it without help.
-      *Done when:* a second person sets up a ground station from the doc alone.
+      Includes the **radio-link stream-rate budget**. This is where bandwidth
+      is actually scarce, and it is set in the vehicle's `SR1_*`/`SR2_*`
+      parameters on the telemetry port — not in software downstream. ADR-001
+      measured `SR0_*` over USB at 2.8 KiB/s for one aircraft; the radio port
+      has its own rates and must be measured separately before any
+      multi-aircraft flight.
+      *Done when:* a second person sets up a ground station from the doc alone,
+      and the documented budget is backed by a measurement of the radio port.
 
-- [ ] **P1-02** Gateway ingest: async UDP listener, MAVLink parse, vehicle
-      identification by SYSID. Handle `HEARTBEAT`, `GLOBAL_POSITION_INT`,
-      `SYS_STATUS`, `BATTERY_STATUS`, `GPS_RAW_INT`, `VFR_HUD`, `STATUSTEXT`,
-      `EKF_STATUS_REPORT`.
-      *Done when:* 10 SITL vehicles are parsed concurrently without drops.
+- [ ] **P1-02** Gateway ingest: async UDP listener plus the relay-v1 WebSocket
+      endpoint, MAVLink parse, vehicle identification. Handle `HEARTBEAT`,
+      `GLOBAL_POSITION_INT`, `SYS_STATUS`, `BATTERY_STATUS`, `GPS_RAW_INT`,
+      `VFR_HUD`, `STATUSTEXT`, `EKF_STATUS_REPORT`.
+      **Classify sources by HEARTBEAT identity, per `(sysid, compid)`.** The
+      relay forwards everything it hears, which includes QGC's own heartbeat,
+      and a gimbal or companion computer may heartbeat under the vehicle's
+      SYSID with a different component ID. Never register a ground station or a
+      component as a vehicle. Classify on the HEARTBEAT `type` and `autopilot`
+      fields — never on the SYSID number, since `GCS_SYSTEM_ID` is a user
+      setting, and never on message volume, since a just-booted aircraft has
+      sent one HEARTBEAT and nothing else, which is exactly when it must stay
+      visible. Ambiguity resolves to vehicle. `tools/mavlink_probe.py` has a
+      working implementation to lift.
+      **Decide what enters the hot path.** `drone_state` takes the messages the
+      pipeline needs; everything else goes to the raw archive for P10-03 replay
+      and incident investigation. Nothing here may depend on a specific stream
+      rate — QGC's own settings determine what `SR0_*` emits, and they change.
+      *Done when:* 10 SITL vehicles are parsed concurrently without drops, and
+      no non-vehicle endpoint is ever registered as a drone.
 
 - [ ] **P1-03** Unit conversion at the parser boundary: 1e7 lat/lon scaling,
       mm→m altitude, cm/s→m/s velocity. Both AGL and AMSL preserved separately.

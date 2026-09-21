@@ -225,13 +225,13 @@ port must be measured separately before any multi-aircraft flight is planned;
 until then, treat 2.8 KiB/s as an upper bound on what a radio would carry, not
 as the figure itself.
 
-### Most of this stream is not wanted
+### Most of this stream is not needed on the hot path
 
-Of the 31 message types arriving, the Gateway needs six streams plus two
-event-driven messages. The rest is roughly 80% of the traffic and exists
-because QGC asked for it, to drive its own instrument panels:
+Of the 31 message types arriving, the pipeline's live path needs six streams
+plus two event-driven messages. The remainder — roughly 80% of the traffic —
+arrives because QGC asked for it, to drive its own instrument panels:
 
-| Not needed by the Gateway | Rate (Hz) |
+| Not needed on the hot path; retained in the raw archive | Rate (Hz) |
 |---|---|
 | ATTITUDE | 10.00 |
 | AHRS2 | 10.00 |
@@ -250,28 +250,39 @@ because QGC asked for it, to drive its own instrument panels:
 | SCALED_PRESSURE | 2.00 |
 | SYSTEM_TIME, POWER_STATUS, TIMESYNC, EXTENDED_SYS_STATE, NAV_CONTROLLER_OUTPUT | 1–2 each |
 
-The relay must therefore filter rather than forward wholesale. See P1-01. Two
-consequences follow:
+**None of this is dropped.** "Not needed on the hot path" is not the same as
+unwanted. `ATTITUDE`, `VIBRATION`, `EKF_STATUS_REPORT` and `ESC_TELEMETRY` are
+precisely what an incident investigation reads after a crash, and P10-03 flight
+replay cannot reconstruct a message that was never recorded. The split is
+between what drives live state and what is archived, not between keep and
+discard:
 
-1. **Uplink cost.** The relay pushes telemetry over the ground station's
-   internet connection. Forwarding everything costs roughly five times what
-   forwarding the needed set costs, for no benefit.
-2. **Insulation.** What QGC requests is outside our control and changes when a
-   pilot opens a different screen or a new QGC version ships. If the Gateway
-   consumes whatever happens to arrive, its input is defined by a third party's
-   UI. A fixed forward-list makes the Gateway's input a decision of ours.
+- **The relay forwards everything, unmodified.** Its uplink is the ground
+  station's internet connection, where 2.8 KiB/s per aircraft is negligible.
+  Filtering there would be an irreversible decision taken at the point in the
+  system with the least information about what will later matter.
+- **The Gateway decides what enters `drone_state`** and what goes only to the
+  raw archive. That decision is reversible, made where there is context, and —
+  importantly — must not depend on any particular stream rate. What QGC
+  requests is outside our control and changes when a pilot opens a different
+  screen or a new QGC version ships.
 
-If the radio-port measurement shows thin headroom, the options are to reduce
-`SR1_*`/`SR2_*` rates at the vehicle, or to give each aircraft its own USB
-radio on a distinct `NETID`. Reducing rates at the vehicle is better: it saves
-the air time, whereas relay-side filtering only saves the uplink.
+The bandwidth constraint lives on the **radio link**, not the uplink, and its
+budget belongs in the vehicle's `SR1_*`/`SR2_*` parameters and the P1-01b setup
+document. If the radio-port measurement shows thin headroom, the options are to
+reduce those rates at the vehicle or to give each aircraft its own USB radio on
+a distinct `NETID`. Reducing rates at the vehicle is the only option that
+actually saves air time.
 
 ## Consequences
 
-- **P1-01 (relay):** forward a fixed allow-list, not the whole stream; classify
-  endpoints by HEARTBEAT identity so QGC's own heartbeat is never registered as
-  an aircraft. Both are now explicit requirements on the task. Budget ~2.8 KiB/s
-  per vehicle before filtering, well under 1 KiB/s after.
+- **P1-01 (relay):** lossless and dumb — forward every datagram unmodified, and
+  do not parse MAVLink at all. Budget ~2.8 KiB/s per vehicle on the uplink. The
+  wire contract is `docs/protocols/relay-v1.md`.
+- **P1-02 (Gateway):** classify endpoints by HEARTBEAT identity per
+  `(sysid, compid)`, so QGC's own heartbeat is never registered as an aircraft;
+  decide what enters `drone_state` and what is archived, without depending on
+  any particular stream rate.
 - **P3-06 (progress inference):** `MISSION_CURRENT` arrives at 2 Hz, so the
   main inference signal is available. `MISSION_ITEM_REACHED` was not observed
   and could not be, with the aircraft parked — confirm it on the first mission
@@ -288,8 +299,10 @@ Build Phase 1 on the forwarded stream as a **telemetry-only** channel, which is
 what the architecture already assumed; finding 2 did not change that assumption
 and was not able to test it. Every message the pipeline needs is present at
 usable rates over USB, so nothing is blocked on vehicle configuration. The
-relay filters to a fixed allow-list rather than forwarding wholesale, both to
-cut the uplink cost and so that the Gateway's input is defined by us rather
-than by whatever QGC's current screen happens to request. Before any
-multi-aircraft flight, the radio port must be measured on its own `SR*_`
-parameters — the figures here are USB and flatter the radio.
+relay forwards the stream whole and unmodified: its uplink is internet, where
+the cost is negligible, and discarding telemetry at the ground station would
+throw away the data that P10-03 replay and any crash investigation depend on.
+The Gateway, which has the context to decide reversibly, separates what drives
+live state from what is merely archived. Before any multi-aircraft flight, the
+radio port must be measured on its own `SR*_` parameters — the figures here are
+USB and flatter the radio.
