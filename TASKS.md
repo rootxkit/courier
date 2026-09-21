@@ -135,9 +135,20 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
 - [ ] **P1-06** NATS publication: `telemetry.{drone_id}`, `events.{type}`.
       *Done when:* a test subscriber receives every position update.
 
-- [ ] **P1-07** Gateway authentication: per-vehicle token, unauthenticated
-      packets dropped and rate-limit-logged.
-      *Done when:* a spoofed SYSID without a valid token is rejected.
+- [ ] **P1-07** Gateway authentication: **per-station bearer token** on the
+      relay-v1 upgrade request, plus a server-side policy check binding
+      `(station_id, sysid)`. Unauthenticated packets dropped and
+      rate-limit-logged.
+      Revised from "per-vehicle token" by `docs/protocols/relay-v1.md` §3. A
+      ground station relays whatever its radio hears, so it cannot hold one
+      credential per aircraft; it authenticates as itself. Which vehicles a
+      station may carry is policy the server evaluates, not an assertion the
+      station is trusted to make. The security property is unchanged — a
+      spoofed SYSID is rejected — but it is enforced where the policy lives,
+      and a compromised ground station cannot mint vehicles it was never
+      assigned. Direct UDP sources (SITL, bench testing) keep their own path.
+      *Done when:* a spoofed SYSID is rejected, and a valid station presenting
+      a vehicle it is not assigned is rejected and logged.
 
 - [ ] **P1-08** WebSocket endpoint + minimal map page: MapLibre, one marker per
       drone, heading arrow, battery label.
@@ -469,6 +480,12 @@ Each row is a task and a SITL test. None may be skipped.
       dispatch performance.
 - [ ] **P10-03** **Flight replay**: any past mission replayed on the map with
       telemetry scrubbing. Essential for incident review — do not defer this.
+      **Render gaps explicitly.** Telemetry can be missing for reasons the
+      system already knows about — a relay `gap` from queue cap, an intake
+      drop, a station that went unreachable (`relay-v1.md` §11). Replay must
+      show the track stopping and say why, never interpolate across a hole. A
+      smooth line through missing data invents evidence, which in an accident
+      investigation is worse than showing nothing.
 - [ ] **P10-04** Automatic `.bin` dataflash log retrieval and archival after
       each flight.
 - [ ] **P10-05** Maintenance tracking: flight hours, battery cycles, propeller

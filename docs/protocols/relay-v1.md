@@ -1,6 +1,6 @@
 # relay-v1 — ground relay to Gateway
 
-- **Status:** DRAFT — under review; no implementation exists yet
+- **Status:** APPROVED — reviewed 2026-09-21; implementation in progress (P1-01)
 - **Version:** `1`
 - **Tasks:** produced by P1-01 (relay), consumed by P1-02 (Gateway)
 
@@ -30,8 +30,16 @@ unexplainable accident.
 **The relay is receive-only toward the aircraft.** Its UDP socket is used for
 `recvfrom` and nothing else. At Stage 0 the server cannot affect flight, and
 this is where that guarantee is enforced physically rather than promised.
-Nothing in this protocol carries a message travelling towards a vehicle, and
-v2 must not add one without revisiting `ARCHITECTURE.md` §3.
+Nothing in this protocol carries a message travelling towards a vehicle.
+
+This prohibition is absolute and is **not** a placeholder for a future command
+path. When a command channel arrives it does not come through here: P3B-01
+replaces QGC forwarding with `mavlink-router`, and commands become a separate
+component with its own review (`ARCHITECTURE.md` §2, Stage 1). Adding a send
+path to this socket would therefore require a protocol version bump and a
+deliberate re-examination of the Stage 0 safety argument — which is exactly the
+friction that should stand in the way. A capability that no code can express is
+worth more than one that merely nobody currently calls.
 
 ## 2. Transport
 
@@ -217,7 +225,8 @@ in the flight record, which is the exact failure this design exists to prevent.
   "type": "status",
   "queue_depth": 1240,
   "queue_bytes": 2310450,
-  "dropped_total": 0,
+  "dropped_intake_total": 0,
+  "dropped_cap_total": 0,
   "last_datagram_age_ms": 38,
   "uptime_s": 7321,
   "monotonic_ns": 992847110000000,
@@ -229,9 +238,14 @@ in the flight record, which is the exact failure this design exists to prevent.
 |---|---|
 | `queue_depth` | Records on disk awaiting acknowledgement |
 | `queue_bytes` | Bytes those records occupy |
-| `dropped_total` | Records discarded since the epoch began, persisted across restarts |
+| `dropped_intake_total` | Datagrams dropped before a `seq` was assigned, because the in-memory intake queue was full. Persisted across restarts |
+| `dropped_cap_total` | Records discarded from disk because the queue hit its size cap. Persisted across restarts |
 | `last_datagram_age_ms` | Milliseconds since a datagram last arrived on the UDP socket |
 | `uptime_s` | Seconds since the relay started |
+
+The two drop counters are separate because they are different failures with
+different remedies, and because only one of them is visible as a `gap` — see
+§11.
 
 **`last_datagram_age_ms` is the field that matters.** `ARCHITECTURE.md` §3
 separates two failure domains that a naive implementation renders identically:
@@ -303,19 +317,37 @@ increase in the complexity of the one component whose job is not to lose data.
 or stream rates rise by an order of magnitude, the trade changes, and then the
 change is justified by numbers rather than by discomfort.
 
-## 11. Gaps
+## 11. Loss accounting
 
-The relay's queue is capped (default 1 GiB). At the cap it drops the oldest
-records and increments `dropped_total`; it never blocks intake, because
-blocking intake would lose live telemetry to protect old telemetry.
+A flight record with a hole in it is only dangerous when nobody can tell the
+hole is there. This section enumerates every way a datagram can fail to reach
+the Gateway, and how each one is made visible.
 
-This means the server may ask for data the relay no longer holds — when
-`resume_from_seq` is below `oldest_seq_held` in the same epoch. That is a
-**permanent gap**, and it must be recorded rather than papered over.
+| # | Loss | Has a `seq`? | How it is visible |
+|---|---|---|---|
+| 1 | Radio or QGC never delivered it | no | No datagrams arrive; `last_datagram_age_ms` climbs (§8) |
+| 2 | Intake: in-memory queue full | **no** | `dropped_intake_total` increases |
+| 3 | Cap: disk queue at its size limit | yes | `gap` message, and `dropped_cap_total` increases |
+| 4 | Relay crashed with records still in memory | no | `uptime_s` resets |
+| 5 | Not yet acknowledged when the link dropped | yes | None — retransmitted on reconnect (§7). Not a loss |
 
-The relay reports it explicitly before sending data:
+### The queue is capped, deliberately
+
+Default 1 GiB, configurable. At the cap the relay drops the **oldest** records
+and increments `dropped_cap_total`. It never blocks intake: blocking would
+discard live telemetry in order to preserve old telemetry, which is backwards.
+
+The cap is not negotiable in either direction. An uncapped queue is an
+unbounded file on the pilot's laptop, and a full disk can take QGC down with
+it — **P7-11**, the most serious Stage 0 failure mode, where the pilot loses
+their control surface mid-flight. Telemetry completeness is not worth buying at
+the price of the pilot's ability to fly the aircraft.
 
 ### `gap` — relay to server, text
+
+Sent when `resume_from_seq < oldest_seq_held` for the current epoch: the server
+is asking for records the cap has already discarded. The relay sends this
+**before** any data frame, then resumes from `oldest_seq_held`.
 
 ```json
 {
@@ -323,22 +355,55 @@ The relay reports it explicitly before sending data:
   "epoch": "9f2c1b7d4e6a58039ab1c2d3e4f50617",
   "from_seq": 58120,
   "to_seq": 61099,
-  "reason": "queue_capacity"
+  "reason": "queue_cap"
 }
 ```
 
-`from_seq` is inclusive, `to_seq` exclusive: the records in `[from_seq, to_seq)`
-no longer exist anywhere and will never arrive. The Gateway records the gap
-against the station and the time range, so that a later investigator reading a
-hole in the flight record can tell "this was dropped at the ground station,
-here is when and why" from "we have no idea".
+`from_seq` is **inclusive**, `to_seq` is **exclusive**. The missing records are
+`[from_seq, to_seq)`, that is `from_seq` through `to_seq - 1` inclusive. With
+`resume_from_seq = 58120` and `oldest_seq_held = 61099`, the relay sends
+`from_seq = 58120`, `to_seq = 61099`, meaning 58120 through 61098 are gone.
+They exist nowhere and will never arrive.
 
-The relay then resumes from `oldest_seq_held`.
+`reason` is `"queue_cap"`. It is an open string so later reasons can be added
+without a version bump.
 
-> **Open for review.** This message is not in the original specification for
-> this protocol. It was added because the queue cap and `resume_from_seq`
-> together make the case reachable, and silence would make a hole in a flight
-> record indistinguishable from a bug. Remove it only by removing the cap.
+### Protocol error: the server asks for records that never existed
+
+If `resume_from_seq > newest_seq_held + 1`, the server is claiming records the
+relay never sent. This is **not** a gap — it is a protocol error, and the two
+must not be conflated, because a gap says "data was lost" while this says "one
+of us is confused about which epoch or station we are talking about".
+
+The relay logs the discrepancy with both sequence numbers, closes the
+connection, and does not send data. It does not silently rebase onto the
+server's number: continuing would write records under sequence numbers that
+mean something different at each end, which is worse than stopping.
+
+Reconnection then proceeds with normal backoff. If the condition persists it is
+an operator problem, and the logs say so.
+
+### Intake drops cannot produce a `gap`
+
+Loss #2 happens before a sequence number is assigned, so there is no gap in the
+sequence to report — the numbering is contiguous across an intake drop, and
+`gap` is structurally incapable of describing it.
+
+**Do not solve this by pre-allocating sequence numbers at intake.** It would
+mean assigning `seq` on the UDP thread and reconciling allocated-but-never-
+written numbers on restart, which is a large complexity increase in the one
+component whose job is not to lose data, for a loss that should not occur at
+all in normal operation.
+
+Instead, `status` carries `dropped_intake_total` every second. The Gateway
+takes deltas between consecutive `status` messages, which localises any intake
+loss to a one-second window. That is enough for an investigator to say "between
+these two timestamps, this station dropped 40 datagrams it never got to disk",
+which is the question that actually gets asked after an incident.
+
+Loss #4 is visible the same way: `uptime_s` going backwards between two
+`status` messages means the relay restarted, and any records still in its
+memory at that moment were lost.
 
 ## 12. Reconnection
 
@@ -364,11 +429,17 @@ For P1-02, conformance means:
 4. Send a cumulative `ack` carrying the epoch, at least once per second while
    data is flowing.
 5. Deduplicate on `(station_id, epoch, seq)`.
-6. Record `gap` messages as first-class events against the station.
-7. Treat three consecutive missed `status` messages as the station being
+6. **Record every `gap` as an event** against the station, with its sequence
+   range and the wall-clock window it falls in. P10-03 flight replay must
+   render these holes explicitly rather than interpolating across them: a
+   replay that draws a smooth track through missing data is worse than one that
+   shows the track stopping, because it invents evidence.
+7. Track `dropped_intake_total` deltas between consecutive `status` messages
+   and record them as events too (§11). These losses have no `gap`.
+8. Treat three consecutive missed `status` messages as the station being
    unreachable, and surface that **differently** from a station reporting a
    rising `last_datagram_age_ms` (§8).
-8. Parse MAVLink only after all of the above. Nothing in this protocol requires
+9. Parse MAVLink only after all of the above. Nothing in this protocol requires
    the transport layer to understand the payload.
 
 ## 14. Versioning
