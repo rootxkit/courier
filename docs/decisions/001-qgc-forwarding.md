@@ -1,7 +1,7 @@
 # 001 — QGC MAVLink forwarding: what the link can and cannot do
 
-- **Status:** PROPOSED — fill in from measured results, then mark ACCEPTED
-- **Date:** _(date of the test)_
+- **Status:** PROPOSED — findings 1 and 3 measured; finding 2 unresolved, see below
+- **Date:** 2026-09-21
 - **Task:** P1-00
 
 Everything in Phase 1 and Phase 3 rests on this. Do not fill it in from
@@ -11,13 +11,18 @@ assumption; run `tools/mavlink_probe.py` and paste real output.
 
 | | |
 |---|---|
-| QGroundControl version | _(Help → About, exact build)_ |
-| Vehicle / autopilot | _(e.g. ArduCopter 4.5.x on Pixhawk 6C)_ |
-| Radio link | _(SiK 915 MHz / RFD900x / USB direct)_ |
-| Ground station OS | |
-| Vehicle SYSID | |
-| Test date | |
-| Probe commit (`git rev-parse --short HEAD`) | |
+| QGroundControl version | **TO FILL** — Help → About. The executable's version resource reads `0.0.0.0`, so it cannot be read programmatically |
+| Vehicle / autopilot | ArduPilot, SYSID 1, component 1. Exact firmware **TO FILL** |
+| Radio link | **USB direct** — so the rates below are `SR0_*` on `SERIAL0`, not the radio port |
+| Ground station OS | Windows 11 Pro 10.0.26200 |
+| Vehicle SYSID | 1 (component 1) |
+| GCS SYSID | 255 (component 190). Set by `GCS_SYSTEM_ID` in `QGroundControl.ini` — a user setting, not a fixed value |
+| Test date | 2026-09-21 |
+| Probe commit | `a20a3b4` |
+
+The link being USB direct is the most important caveat in this document. Every
+rate below is what `SERIAL0` is configured to emit, which is not what the radio
+port will emit. See finding 3.
 
 ## Method
 
@@ -70,72 +75,221 @@ pymavlink rather than asserting against hand-written bytes
 
 ## Finding 1 — message inventory and rates
 
-_(paste the `listen` output)_
+60-second capture. Full data in [`001-listen.json`](001-listen.json).
 
 ```
+Duration        60.0s
+Datagrams       5134  (2.8 KiB/s)
+Source(s)       127.0.0.1:50459
+Vehicles        [1]
 
+SYSID 1 / COMP 1 - vehicle
+  message                         count      Hz
+  AHRS2                             601   10.00
+  ATTITUDE                          600   10.00
+  VFR_HUD                           600   10.00
+  AHRS                              180    3.00
+  GLOBAL_POSITION_INT               180    3.00
+  SYSTEM_TIME                       180    3.00
+  TERRAIN_REPORT                    180    3.00
+  GIMBAL_DEVICE_ATTITUDE_STATUS     180    3.00
+  EKF_STATUS_REPORT                 180    3.00
+  VIBRATION                         180    3.00
+  RPM                               180    3.00
+  BATTERY_STATUS                    180    3.00
+  ESC_TELEMETRY_1_TO_4              180    3.00
+  SYS_STATUS                        120    2.00
+  POWER_STATUS                      120    2.00
+  MEMINFO                           120    2.00
+  NAV_CONTROLLER_OUTPUT             120    2.00
+  MISSION_CURRENT                   120    2.00
+  SERVO_OUTPUT_RAW                  120    2.00
+  RC_CHANNELS                       120    2.00
+  RAW_IMU                           120    2.00
+  SCALED_PRESSURE                   120    2.00
+  GPS_RAW_INT                       120    2.00
+  MCU_STATUS                        120    2.00
+  HEARTBEAT                          60    1.00
+  EXTENDED_SYS_STATE                 60    1.00
+  GIMBAL_MANAGER_STATUS              12    0.20
+  COMMAND_ACK                        10    0.20
+  TIMESYNC                            6    0.10
+  STATUSTEXT                          4    0.10
+  PARAM_VALUE                         2       -
+  not observed (event-driven, absence is not a finding): MISSION_ITEM_REACHED
+
+SYSID 255 / COMP 190 - ground station
+  message                    count      Hz
+  HEARTBEAT                     59    1.00
 ```
+
+**Every message the pipeline requires is present.** Nothing had to be enabled.
 
 | Message | Rate (Hz) | Needed by | Present |
 |---|---|---|---|
-| HEARTBEAT | | liveness, mode | |
-| GLOBAL_POSITION_INT | | position, tracking | |
-| SYS_STATUS | | battery percent | |
-| BATTERY_STATUS | | energy budget | |
-| GPS_RAW_INT | | fix quality, sat count | |
-| VFR_HUD | | ground speed, climb | |
-| MISSION_CURRENT | | progress inference (P3-06) | |
-| MISSION_ITEM_REACHED | | waypoint completion (P3-06) | |
-| STATUSTEXT | | FC messages, failsafe reasons | |
-| EKF_STATUS_REPORT | | health alerting (P7-10) | |
+| HEARTBEAT | 1.00 | liveness, mode | yes |
+| GLOBAL_POSITION_INT | 3.00 | position, tracking | yes |
+| SYS_STATUS | 2.00 | battery percent | yes |
+| BATTERY_STATUS | 3.00 | energy budget | yes |
+| GPS_RAW_INT | 2.00 | fix quality, sat count | yes |
+| VFR_HUD | 10.00 | ground speed, climb | yes |
+| MISSION_CURRENT | 2.00 | progress inference (P3-06) | yes |
+| MISSION_ITEM_REACHED | — | waypoint completion (P3-06) | not observed — event-driven, vehicle was parked and flew no mission |
+| STATUSTEXT | 0.10 | FC messages, failsafe reasons | yes, 4 in 60 s |
+| EKF_STATUS_REPORT | 3.00 | health alerting (P7-10) | yes |
 
-Anything missing is raised with the `SR0_*` / `SR1_*` parameters on the relevant
-telemetry port. Record which parameters were changed and to what:
+No `SR*_` parameters were changed. Nothing needed raising.
 
-```
+`MISSION_ITEM_REACHED` is the one entry not directly confirmed. It is emitted
+on waypoint completion, and this capture was of a stationary aircraft running
+no mission, so its absence carries no information either way. **It must be
+re-confirmed during the first SITL or live mission run**, because P3-06's
+progress inference depends on it; if it turns out not to be forwarded, the
+inference falls back to position proximity alone and is materially weaker.
 
-```
+### Endpoints observed
+
+Two, correctly distinguished by HEARTBEAT identity rather than by SYSID:
+
+| SYSID | Component | Classified | Note |
+|---|---|---|---|
+| 1 | 1 | vehicle | the autopilot |
+| 255 | 190 | ground station | QGC itself; 190 is `MAV_COMP_ID_MISSIONPLANNER` |
+
+QGC's own heartbeat is forwarded back into the stream. **The relay and the
+Gateway must not register it as an aircraft.** Its SYSID comes from
+`GCS_SYSTEM_ID` in `QGroundControl.ini`, so 255 is a default, not a guarantee,
+and filtering on the number rather than on the HEARTBEAT `type` field would be
+wrong. See P1-01.
+
+No separate gimbal component appeared. `GIMBAL_DEVICE_ATTITUDE_STATUS` and
+`GIMBAL_MANAGER_STATUS` arrive from SYSID 1 / component 1, i.e. the autopilot
+is relaying them rather than the gimbal heartbeating in its own right. A
+different airframe may well differ, which is the reason classification is keyed
+on `(sysid, compid)` rather than SYSID alone.
 
 ## Finding 2 — is the channel bidirectional?
 
-_(paste the `roundtrip` output)_
+```
+Waiting for a frame on 127.0.0.1:14445 to learn the peer...
+Peer 127.0.0.1:50459, vehicle SYSID 1
 
+Baseline: listening 15s without injecting anything.
+  unsolicited PARAM_VALUE: 1 (0 matching SYSID_THISMAV)
+
+RESULT: INCONCLUSIVE.
 ```
 
-```
+**Conclusion: UNTESTED. Not telemetry-only, not bidirectional — unknown.**
 
-**Conclusion:** _(TELEMETRY-ONLY / BIDIRECTIONAL)_
+The probe refused to answer, and that refusal is the finding. `PARAM_VALUE`
+arrives on the forwarded stream without anyone asking for it: once during the
+15-second baseline, and twice during the 60-second capture in finding 1. QGC
+requests parameters on its own schedule.
 
-If bidirectional, it is still not to be relied on. It is undocumented, varies by
-QGC build, and would make the server able to affect flight through a path
-nobody designed for that. The plan treats the channel as telemetry-only
-regardless; this finding only records the observed behaviour.
+That makes the obvious experiment invalid. Inject a `PARAM_REQUEST_READ`, see a
+`PARAM_VALUE`, and you cannot tell whether it is a reply or traffic that was
+going to arrive regardless. The probe therefore measures a silent baseline
+first and stops when the baseline is not silent, rather than producing a
+number that would look like a measurement.
+
+To resolve it, quiet the ground station first — close other GCS instances, let
+QGC finish its initial parameter download, and leave it idle on the flight view
+for a couple of minutes — then re-run. Until then this stays UNTESTED.
+
+**This does not block anything.** The plan treats the channel as telemetry-only
+by design, and every safety argument in `ARCHITECTURE.md` §3 depends on the
+server *not* being able to reach the aircraft. A positive result here would not
+change what we build; it would only inform P3B timing. Even if the channel
+turned out to be bidirectional, it is undocumented and varies by QGC build, so
+it would remain something to route around rather than to use.
+
+**Do not record this as telemetry-only.** A one-way link and an untested link
+look identical from here, and writing down the convenient one is how the
+original version of this probe came to be believed for a whole session.
 
 ## Finding 3 — bandwidth
 
 | | |
 |---|---|
-| Observed throughput | _(KiB/s from the probe)_ |
-| Radio link capacity | _(57.6 kbps ≈ 7 KiB/s for SiK default)_ |
-| Headroom | |
-| Max vehicles on one radio net at these rates | |
+| Observed throughput | **2.8 KiB/s** for one vehicle (5134 datagrams / 60 s) |
+| Link measured | **USB direct on `SERIAL0`** — these are `SR0_*` rates |
+| Radio link capacity | 57.6 kbps ≈ 7 KiB/s for a SiK default, before protocol overhead |
+| Headroom on a SiK link | one vehicle comfortably; two at the margin |
+| Max vehicles on one radio net at these rates | **2**, and that is optimistic |
 
-If headroom is thin, either reduce stream rates or give each vehicle its own USB
-radio on a distinct `NETID`.
+**This measurement does not describe the radio.** It was taken over USB, so it
+reflects `SR0_*` on `SERIAL0`. The telemetry radio is a different port with its
+own `SR1_*` or `SR2_*` parameters, which ArduPilot defaults lower. The radio
+port must be measured separately before any multi-aircraft flight is planned;
+until then, treat 2.8 KiB/s as an upper bound on what a radio would carry, not
+as the figure itself.
+
+### Most of this stream is not wanted
+
+Of the 31 message types arriving, the Gateway needs six streams plus two
+event-driven messages. The rest is roughly 80% of the traffic and exists
+because QGC asked for it, to drive its own instrument panels:
+
+| Not needed by the Gateway | Rate (Hz) |
+|---|---|
+| ATTITUDE | 10.00 |
+| AHRS2 | 10.00 |
+| AHRS | 3.00 |
+| RAW_IMU | 2.00 |
+| VIBRATION | 3.00 |
+| RPM | 3.00 |
+| ESC_TELEMETRY_1_TO_4 | 3.00 |
+| MEMINFO | 2.00 |
+| MCU_STATUS | 2.00 |
+| GIMBAL_DEVICE_ATTITUDE_STATUS | 3.00 |
+| GIMBAL_MANAGER_STATUS | 0.20 |
+| TERRAIN_REPORT | 3.00 |
+| SERVO_OUTPUT_RAW | 2.00 |
+| RC_CHANNELS | 2.00 |
+| SCALED_PRESSURE | 2.00 |
+| SYSTEM_TIME, POWER_STATUS, TIMESYNC, EXTENDED_SYS_STATE, NAV_CONTROLLER_OUTPUT | 1–2 each |
+
+The relay must therefore filter rather than forward wholesale. See P1-01. Two
+consequences follow:
+
+1. **Uplink cost.** The relay pushes telemetry over the ground station's
+   internet connection. Forwarding everything costs roughly five times what
+   forwarding the needed set costs, for no benefit.
+2. **Insulation.** What QGC requests is outside our control and changes when a
+   pilot opens a different screen or a new QGC version ships. If the Gateway
+   consumes whatever happens to arrive, its input is defined by a third party's
+   UI. A fixed forward-list makes the Gateway's input a decision of ours.
+
+If the radio-port measurement shows thin headroom, the options are to reduce
+`SR1_*`/`SR2_*` rates at the vehicle, or to give each aircraft its own USB
+radio on a distinct `NETID`. Reducing rates at the vehicle is better: it saves
+the air time, whereas relay-side filtering only saves the uplink.
 
 ## Consequences
 
-Fill in what this means for:
-
-- **P1-01 (relay):** which messages to forward, expected data rate, buffer sizing
-- **P3-06 (progress inference):** whether `MISSION_CURRENT` and
-  `MISSION_ITEM_REACHED` actually arrive; if not, inference falls back to
-  position proximity alone and is weaker
-- **P3B timing:** if the manual loop is more painful than expected, or if
-  bandwidth limits vehicle count sooner than planned, `mavlink-router` moves up
-- **P5-14 (pilot delay):** telemetry latency is an input to the tolerable-delay
-  calculation
+- **P1-01 (relay):** forward a fixed allow-list, not the whole stream; classify
+  endpoints by HEARTBEAT identity so QGC's own heartbeat is never registered as
+  an aircraft. Both are now explicit requirements on the task. Budget ~2.8 KiB/s
+  per vehicle before filtering, well under 1 KiB/s after.
+- **P3-06 (progress inference):** `MISSION_CURRENT` arrives at 2 Hz, so the
+  main inference signal is available. `MISSION_ITEM_REACHED` was not observed
+  and could not be, with the aircraft parked — confirm it on the first mission
+  run before relying on it.
+- **P3B timing:** unchanged. Finding 2 is unresolved, and the manual loop has
+  not yet been exercised enough to know whether it is painful. Bandwidth is not
+  currently the binding constraint on a single aircraft.
+- **P5-14 (pilot delay):** not addressed by this test. Latency was not measured
+  — only rates and message presence. A separate measurement is needed.
 
 ## Decision
 
-_(one paragraph: what we build on the basis of the above)_
+Build Phase 1 on the forwarded stream as a **telemetry-only** channel, which is
+what the architecture already assumed; finding 2 did not change that assumption
+and was not able to test it. Every message the pipeline needs is present at
+usable rates over USB, so nothing is blocked on vehicle configuration. The
+relay filters to a fixed allow-list rather than forwarding wholesale, both to
+cut the uplink cost and so that the Gateway's input is defined by us rather
+than by whatever QGC's current screen happens to request. Before any
+multi-aircraft flight, the radio port must be measured on its own `SR*_`
+parameters — the figures here are USB and flatter the radio.
