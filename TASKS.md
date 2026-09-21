@@ -58,17 +58,41 @@ be launched and observed. No real hardware.
 
 Goal: telemetry from many vehicles reaches the database and a browser map.
 
-- [ ] **P1-00** Verify QGC forwarding behaviour empirically before building on
+- [~] **P1-00** Verify QGC forwarding behaviour empirically before building on
       it. Run `tools/mavlink_probe.py listen` and `roundtrip` against the real
       aircraft and fill in `docs/decisions/001-qgc-forwarding.md`.
       *Done when:* the decision record contains measured output, not
       assumptions. Everything downstream depends on this being accurate.
+      *Partial:* findings 1 and 3 measured over USB direct. Outstanding —
+      QGC version and firmware in the environment table; finding 2 is UNTESTED,
+      re-run `roundtrip` with the ground station quiet; radio-port rates
+      (`SR1_*`/`SR2_*`) must be measured separately before any multi-aircraft
+      flight; `MISSION_ITEM_REACHED` to be confirmed on the first mission run.
 
 - [ ] **P1-01** Ground relay process: read UDP 14445, authenticate, forward to
       Gateway over TLS WebSocket, disk-backed queue that replays after an
       internet dropout. Runs as a Windows service or tray app on the ground PC.
+      Two requirements settled by P1-00's measurements:
+      **(a) Classify sources by HEARTBEAT identity, per `(sysid, compid)`.**
+      QGC forwards its own heartbeat back into the stream, and a gimbal or
+      companion computer may heartbeat under the vehicle's SYSID with a
+      different component ID. Never register a ground station or a component as
+      a vehicle. Classify on the HEARTBEAT `type` and `autopilot` fields, never
+      on the SYSID number — `GCS_SYSTEM_ID` is a user setting — and never on
+      message volume, since a just-booted aircraft has sent one HEARTBEAT and
+      nothing else. Ambiguity resolves to vehicle. `tools/mavlink_probe.py` has
+      a working implementation to lift.
+      **(b) Stream-rate budget: forward an explicit allow-list, drop the rest.**
+      About 80% of the observed stream exists because QGC asked for it, to feed
+      its own instrument panels. Document which messages the relay forwards and
+      which it drops, with the reason. This cuts the ground station's uplink
+      cost, and — the more important half — it means the Gateway's input is
+      defined by us rather than by whichever QGC screen the pilot has open or
+      whatever the next QGC release decides to request.
       *Done when:* pulling the network cable for 2 minutes results in zero lost
-      telemetry rows once it reconnects.
+      telemetry rows once it reconnects, no non-vehicle endpoint is ever
+      registered as a drone, and the forwarded message set matches the
+      documented budget.
 
 - [ ] **P1-01b** QGC setup documentation: forwarding configuration, stream rate
       tuning (`SR*_` parameters), multi-vehicle SYSID assignment, radio `NETID`
