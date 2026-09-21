@@ -1,0 +1,379 @@
+"""The ground relay process (P1-01), implementing relay-v1.
+
+    UDP 127.0.0.1:14445
+      -> intake thread      (never touches disk or network)
+      -> bounded memory queue
+      -> writer thread      -> SQLite, WAL
+      -> sender task        -> WSS
+
+The shape follows one rule: **the intake thread must never wait for anything**.
+A datagram missed while a thread blocked on a disk flush or a TCP retransmit is
+gone for good, and no amount of downstream reliability recovers it. So intake
+does exactly two things — receive, and hand off — and if the hand-off would
+block, it counts a drop and carries on.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import queue as queue_module
+import random
+import ssl
+import threading
+import time
+from typing import Any
+
+import websockets
+from websockets.asyncio.client import ClientConnection
+
+from agent.config import RelayConfig
+from agent.framing import Record, encode_records
+from agent.queue import DurableQueue
+from agent.udp import ReceiveOnlyUDPSocket
+from common.logging import BoundLogger, bind, get_logger
+
+__all__ = ["PROTOCOL_VERSION", "RELAY_VERSION", "ProtocolError", "Relay"]
+
+PROTOCOL_VERSION = 1
+RELAY_VERSION = "0.1.0"
+
+# relay-v1 §6: flush on whichever comes first.
+BATCH_INTERVAL_S = 0.1
+BATCH_MAX_BYTES = 64 * 1024
+
+# relay-v1 §8.
+STATUS_INTERVAL_S = 1.0
+
+# relay-v1 §12.
+BACKOFF_INITIAL_S = 0.5
+BACKOFF_MAX_S = 10.0
+BACKOFF_FACTOR = 2.0
+
+
+class ProtocolError(RuntimeError):
+    """The peer said something that cannot be reconciled with our state."""
+
+
+class FatalAuthError(RuntimeError):
+    """The token was rejected. Retrying will not help."""
+
+
+def _first_exception(group: BaseExceptionGroup[BaseException]) -> BaseException:
+    """Pull the original failure out of a TaskGroup's ExceptionGroup.
+
+    asyncio.TaskGroup wraps whatever ended a session, so a dropped connection
+    arrives as an ExceptionGroup rather than as ConnectionClosed. Without
+    unwrapping, the reconnect logic below cannot tell an ordinary disconnect
+    from a real fault, and logs every dropped link as "unexpected".
+    """
+    for exception in group.exceptions:
+        if isinstance(exception, BaseExceptionGroup):
+            return _first_exception(exception)
+        return exception
+    return group
+
+
+def _now_pair() -> tuple[int, int]:
+    """Sample the monotonic and wall clocks together (relay-v1 §9).
+
+    Taken as a pair so the Gateway can tell a clock correction from elapsed
+    time: the monotonic clock cannot jump, so a change in the difference
+    between them is the wall clock being stepped.
+    """
+    return time.monotonic_ns(), time.time_ns()
+
+
+class Relay:
+    """Owns the intake threads and the uplink session."""
+
+    def __init__(
+        self,
+        config: RelayConfig,
+        durable_queue: DurableQueue,
+        token: str,
+        log: BoundLogger | None = None,
+    ) -> None:
+        self._config = config
+        self._queue = durable_queue
+        self._token = token
+        self._log = log or bind(
+            get_logger("agent.relay"),
+            station_id=config.station_id,
+            epoch=durable_queue.epoch,
+        )
+
+        self._intake: queue_module.Queue[tuple[int, bytes]] = queue_module.Queue(
+            maxsize=config.intake_queue_size
+        )
+        self._stop = threading.Event()
+        self._threads: list[threading.Thread] = []
+
+        self._started_monotonic = time.monotonic()
+        self._last_datagram_monotonic: float | None = None
+        self._pending_intake_drops = 0
+        self._counters_lock = threading.Lock()
+
+    # --- intake -----------------------------------------------------------
+
+    def _intake_loop(self, udp: ReceiveOnlyUDPSocket) -> None:
+        """Receive and hand off. Nothing else belongs in this loop."""
+        while not self._stop.is_set():
+            datagram = udp.receive()
+            if datagram is None:
+                continue
+
+            received_at = time.time_ns()
+            with self._counters_lock:
+                self._last_datagram_monotonic = time.monotonic()
+
+            try:
+                self._intake.put_nowait((received_at, datagram))
+            except queue_module.Full:
+                # Dropping here is the correct outcome: blocking would stall
+                # the socket and lose datagrams we cannot even count.
+                with self._counters_lock:
+                    self._pending_intake_drops += 1
+
+    def _writer_loop(self) -> None:
+        """Drain the memory queue into SQLite in batches."""
+        while not self._stop.is_set() or not self._intake.empty():
+            batch: list[tuple[int, bytes]] = []
+            deadline = time.monotonic() + BATCH_INTERVAL_S
+
+            while time.monotonic() < deadline and len(batch) < 1000:
+                timeout = max(deadline - time.monotonic(), 0.0)
+                try:
+                    batch.append(self._intake.get(timeout=timeout))
+                except queue_module.Empty:
+                    break
+
+            if batch:
+                self._queue.append(batch)
+
+            drops = self._take_pending_drops()
+            if drops:
+                self._queue.record_intake_drops(drops)
+                self._log.warning(
+                    "intake queue full, datagrams dropped",
+                    extra={"dropped": drops},
+                )
+
+    def _take_pending_drops(self) -> int:
+        with self._counters_lock:
+            drops = self._pending_intake_drops
+            self._pending_intake_drops = 0
+        return drops
+
+    def start_intake(self) -> ReceiveOnlyUDPSocket:
+        udp = ReceiveOnlyUDPSocket(self._config.bind_host, self._config.bind_port)
+        self._log.info(
+            "listening for forwarded MAVLink",
+            extra={"host": self._config.bind_host, "port": self._config.bind_port},
+        )
+        for target, name in (
+            (lambda: self._intake_loop(udp), "intake"),
+            (self._writer_loop, "writer"),
+        ):
+            thread = threading.Thread(target=target, name=f"relay-{name}", daemon=True)
+            thread.start()
+            self._threads.append(thread)
+        return udp
+
+    def stop(self) -> None:
+        self._stop.set()
+        for thread in self._threads:
+            thread.join(timeout=5.0)
+
+    # --- status -----------------------------------------------------------
+
+    def _last_datagram_age_ms(self) -> int | None:
+        with self._counters_lock:
+            last = self._last_datagram_monotonic
+        if last is None:
+            return None
+        return int((time.monotonic() - last) * 1000)
+
+    def _status_message(self) -> dict[str, Any]:
+        monotonic_ns, utc_ns = _now_pair()
+        return {
+            "type": "status",
+            "queue_depth": self._queue.depth,
+            "queue_bytes": self._queue.total_bytes,
+            "dropped_intake_total": self._queue.dropped_intake_total,
+            "dropped_cap_total": self._queue.dropped_cap_total,
+            "last_datagram_age_ms": self._last_datagram_age_ms(),
+            "uptime_s": int(time.monotonic() - self._started_monotonic),
+            "monotonic_ns": monotonic_ns,
+            "utc_ns": utc_ns,
+        }
+
+    def _hello_message(self) -> dict[str, Any]:
+        monotonic_ns, utc_ns = _now_pair()
+        return {
+            "type": "hello",
+            "station_id": self._config.station_id,
+            "epoch": self._queue.epoch,
+            "relay_version": RELAY_VERSION,
+            "protocol_version": PROTOCOL_VERSION,
+            "oldest_seq_held": self._queue.oldest_seq_held,
+            "newest_seq_held": self._queue.newest_seq_held,
+            "monotonic_ns": monotonic_ns,
+            "utc_ns": utc_ns,
+        }
+
+    # --- uplink -----------------------------------------------------------
+
+    async def run_uplink(self) -> None:
+        """Connect, ship, reconnect. Runs until cancelled."""
+        backoff = BACKOFF_INITIAL_S
+        while not self._stop.is_set():
+            try:
+                await self._session()
+                backoff = BACKOFF_INITIAL_S
+            except FatalAuthError:
+                # Retrying a rejected credential just floods the log.
+                self._log.error("token rejected by the Gateway; not retrying")
+                raise
+            except asyncio.CancelledError:
+                raise
+            except (OSError, ProtocolError, websockets.WebSocketException) as error:
+                self._log.warning(
+                    "uplink session ended",
+                    extra={"error": str(error), "retry_in_s": round(backoff, 2)},
+                )
+            except Exception as error:
+                self._log.error(
+                    "unexpected uplink failure",
+                    extra={"error": repr(error), "retry_in_s": round(backoff, 2)},
+                )
+
+            # Jitter matters once more than one station exists: without it a
+            # Gateway restart brings them all back at the same instant, each
+            # draining a backlog.
+            await asyncio.sleep(backoff * (0.5 + random.random()))
+            backoff = min(backoff * BACKOFF_FACTOR, BACKOFF_MAX_S)
+
+    def _ssl_context(self) -> ssl.SSLContext | None:
+        """Trust settings for the uplink, or None for a loopback ws:// link."""
+        if not self._config.uses_tls:
+            return None
+        if self._config.ca_path is not None:
+            # A development CA, per the P1-01 hardware runbook. Certificate
+            # verification stays on: the point of the CA is to keep it on.
+            return ssl.create_default_context(cafile=str(self._config.ca_path))
+        return ssl.create_default_context()
+
+    async def _session(self) -> None:
+        url = str(self._config.gateway_url)
+        if not self._config.uses_tls:
+            # The configuration validator has already established that this is
+            # loopback, so nothing is crossing a network.
+            self._log.info("uplink is plaintext loopback", extra={"url": url})
+
+        try:
+            connection = await websockets.connect(
+                url,
+                additional_headers={"Authorization": f"Bearer {self._token}"},
+                ssl=self._ssl_context(),
+            )
+        except websockets.InvalidStatus as error:
+            if error.response.status_code in (401, 403):
+                raise FatalAuthError(str(error)) from error
+            raise
+
+        async with connection:
+            resume_from = await self._handshake(connection)
+            self._log.info("uplink established", extra={"resume_from_seq": resume_from})
+
+            try:
+                async with asyncio.TaskGroup() as tasks:
+                    tasks.create_task(self._send_loop(connection, resume_from))
+                    tasks.create_task(self._status_loop(connection))
+                    tasks.create_task(self._receive_loop(connection))
+            except BaseExceptionGroup as group:
+                failure = _first_exception(group)
+                if isinstance(failure, Exception):
+                    raise failure from None
+                raise
+
+    async def _handshake(self, connection: ClientConnection) -> int:
+        await connection.send(json.dumps(self._hello_message()))
+        welcome = json.loads(await connection.recv())
+        if welcome.get("type") != "welcome":
+            raise ProtocolError(f"expected welcome, got {welcome.get('type')!r}")
+
+        resume_from = int(welcome["resume_from_seq"])
+        oldest = self._queue.oldest_seq_held
+        newest = self._queue.newest_seq_held
+
+        # relay-v1 §11: the server claims records we never sent. Not a gap -
+        # the two ends disagree about what they are discussing, and rebasing
+        # onto their number would write records whose sequence means something
+        # different at each end.
+        if resume_from > newest + 1:
+            raise ProtocolError(
+                f"server resumed from {resume_from} but this epoch has never "
+                f"produced past {newest}"
+            )
+
+        # relay-v1 §11: the cap already discarded what the server wants.
+        if resume_from < oldest:
+            await connection.send(
+                json.dumps(
+                    {
+                        "type": "gap",
+                        "epoch": self._queue.epoch,
+                        "from_seq": resume_from,
+                        "to_seq": oldest,
+                        "reason": "queue_cap",
+                    }
+                )
+            )
+            self._log.warning(
+                "reporting an unrecoverable gap",
+                extra={"from_seq": resume_from, "to_seq": oldest},
+            )
+            resume_from = oldest
+
+        return resume_from
+
+    async def _send_loop(self, connection: ClientConnection, resume_from: int) -> None:
+        next_seq = resume_from
+        while True:
+            records: list[Record] = await asyncio.to_thread(
+                self._queue.read_from, next_seq, max_bytes=BATCH_MAX_BYTES
+            )
+            if not records:
+                await asyncio.sleep(BATCH_INTERVAL_S)
+                continue
+
+            await connection.send(encode_records(records))
+            next_seq = records[-1].seq + 1
+
+    async def _status_loop(self, connection: ClientConnection) -> None:
+        while True:
+            await connection.send(json.dumps(self._status_message()))
+            await asyncio.sleep(STATUS_INTERVAL_S)
+
+    async def _receive_loop(self, connection: ClientConnection) -> None:
+        async for raw in connection:
+            if isinstance(raw, bytes):
+                # The Gateway has nothing binary to say to us.
+                continue
+            message = json.loads(raw)
+            if message.get("type") != "ack":
+                # Unknown types are ignored, not rejected (relay-v1 §2).
+                continue
+            if message.get("epoch") != self._queue.epoch:
+                # A late ack from a previous epoch must not delete records it
+                # does not describe (relay-v1 §7).
+                continue
+            deleted = await asyncio.to_thread(
+                self._queue.acknowledge, int(message["seq"])
+            )
+            if deleted:
+                self._log.debug(
+                    "records acknowledged",
+                    extra={"through_seq": message["seq"], "deleted": deleted},
+                )

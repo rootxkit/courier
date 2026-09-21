@@ -1,0 +1,319 @@
+{
+  "host": "127.0.0.1",
+  "port": 14445,
+  "duration_s": 60.02,
+  "datagrams": 5134,
+  "bytes": 172370,
+  "sources": [
+    "127.0.0.1:50459"
+  ],
+  "unparseable_frames": 0,
+  "endpoints": [
+    {
+      "sysid": 1,
+      "compid": 1,
+      "kind": "vehicle"
+    },
+    {
+      "sysid": 255,
+      "compid": 190,
+      "kind": "gcs"
+    }
+  ],
+  "vehicles": [
+    {
+      "sysid": 1,
+      "compid": 1
+    }
+  ],
+  "messages": [
+    {
+      "sysid": 1,
+      "compid": 1,
+      "kind": "vehicle",
+      "msgid": 0,
+      "name": "HEARTBEAT",
+      "count": 60,
+      "rate_hz": 1.0
+    },
+    {
+      "sysid": 1,
+      "compid": 1,
+      "kind": "vehicle",
+      "msgid": 1,
+      "name": "SYS_STATUS",
+      "count": 120,
+      "rate_hz": 2.0
+    },
+    {
+      "sysid": 1,
+      "compid": 1,
+      "kind": "vehicle",
+      "msgid": 2,
+      "name": "SYSTEM_TIME",
+      "count": 180,
+      "rate_hz": 3.003
+    },
+    {
+      "sysid": 1,
+      "compid": 1,
+      "kind": "vehicle",
+      "msgid": 22,
+      "name": "PARAM_VALUE",
+      "count": 2,
+      "rate_hz": null
+    },
+    {
+      "sysid": 1,
+      "compid": 1,
+      "kind": "vehicle",
+      "msgid": 24,
+      "name": "GPS_RAW_INT",
+      "count": 120,
+      "rate_hz": 2.0
+    },
+    {
+      "sysid": 1,
+      "compid": 1,
+      "kind": "vehicle",
+      "msgid": 27,
+      "name": "RAW_IMU",
+      "count": 120,
+      "rate_hz": 2.0
+    },
+    {
+      "sysid": 1,
+      "compid": 1,
+      "kind": "vehicle",
+      "msgid": 29,
+      "name": "SCALED_PRESSURE",
+      "count": 120,
+      "rate_hz": 2.0
+    },
+    {
+      "sysid": 1,
+      "compid": 1,
+      "kind": "vehicle",
+      "msgid": 30,
+      "name": "ATTITUDE",
+      "count": 600,
+      "rate_hz": 10.0
+    },
+    {
+      "sysid": 1,
+      "compid": 1,
+      "kind": "vehicle",
+      "msgid": 33,
+      "name": "GLOBAL_POSITION_INT",
+      "count": 180,
+      "rate_hz": 3.003
+    },
+    {
+      "sysid": 1,
+      "compid": 1,
+      "kind": "vehicle",
+      "msgid": 36,
+      "name": "SERVO_OUTPUT_RAW",
+      "count": 120,
+      "rate_hz": 2.0
+    },
+    {
+      "sysid": 1,
+      "compid": 1,
+      "kind": "vehicle",
+      "msgid": 42,
+      "name": "MISSION_CURRENT",
+      "count": 120,
+      "rate_hz": 2.0
+    },
+    {
+      "sysid": 1,
+      "compid": 1,
+      "kind": "vehicle",
+      "msgid": 62,
+      "name": "NAV_CONTROLLER_OUTPUT",
+      "count": 120,
+      "rate_hz": 2.0
+    },
+    {
+      "sysid": 1,
+      "compid": 1,
+      "kind": "vehicle",
+      "msgid": 65,
+      "name": "RC_CHANNELS",
+      "count": 120,
+      "rate_hz": 2.0
+    },
+    {
+      "sysid": 1,
+      "compid": 1,
+      "kind": "vehicle",
+      "msgid": 74,
+      "name": "VFR_HUD",
+      "count": 600,
+      "rate_hz": 10.0
+    },
+    {
+      "sysid": 1,
+      "compid": 1,
+      "kind": "vehicle",
+      "msgid": 77,
+      "name": "COMMAND_ACK",
+      "count": 10,
+      "rate_hz": 0.205
+    },
+    {
+      "sysid": 1,
+      "compid": 1,
+      "kind": "vehicle",
+      "msgid": 111,
+      "name": "TIMESYNC",
+      "count": 6,
+      "rate_hz": 0.1
+    },
+    {
+      "sysid": 1,
+      "compid": 1,
+      "kind": "vehicle",
+      "msgid": 125,
+      "name": "POWER_STATUS",
+      "count": 120,
+      "rate_hz": 2.0
+    },
+    {
+      "sysid": 1,
+      "compid": 1,
+      "kind": "vehicle",
+      "msgid": 136,
+      "name": "TERRAIN_REPORT",
+      "count": 180,
+      "rate_hz": 3.003
+    },
+    {
+      "sysid": 1,
+      "compid": 1,
+      "kind": "vehicle",
+      "msgid": 147,
+      "name": "BATTERY_STATUS",
+      "count": 180,
+      "rate_hz": 3.003
+    },
+    {
+      "sysid": 1,
+      "compid": 1,
+      "kind": "vehicle",
+      "msgid": 152,
+      "name": "MEMINFO",
+      "count": 120,
+      "rate_hz": 2.0
+    },
+    {
+      "sysid": 1,
+      "compid": 1,
+      "kind": "vehicle",
+      "msgid": 163,
+      "name": "AHRS",
+      "count": 180,
+      "rate_hz": 3.003
+    },
+    {
+      "sysid": 1,
+      "compid": 1,
+      "kind": "vehicle",
+      "msgid": 178,
+      "name": "AHRS2",
+      "count": 601,
+      "rate_hz": 10.0
+    },
+    {
+      "sysid": 1,
+      "compid": 1,
+      "kind": "vehicle",
+      "msgid": 193,
+      "name": "EKF_STATUS_REPORT",
+      "count": 180,
+      "rate_hz": 3.003
+    },
+    {
+      "sysid": 1,
+      "compid": 1,
+      "kind": "vehicle",
+      "msgid": 226,
+      "name": "RPM",
+      "count": 180,
+      "rate_hz": 3.003
+    },
+    {
+      "sysid": 1,
+      "compid": 1,
+      "kind": "vehicle",
+      "msgid": 241,
+      "name": "VIBRATION",
+      "count": 180,
+      "rate_hz": 3.003
+    },
+    {
+      "sysid": 1,
+      "compid": 1,
+      "kind": "vehicle",
+      "msgid": 245,
+      "name": "EXTENDED_SYS_STATE",
+      "count": 60,
+      "rate_hz": 1.0
+    },
+    {
+      "sysid": 1,
+      "compid": 1,
+      "kind": "vehicle",
+      "msgid": 253,
+      "name": "STATUSTEXT",
+      "count": 4,
+      "rate_hz": 0.097
+    },
+    {
+      "sysid": 1,
+      "compid": 1,
+      "kind": "vehicle",
+      "msgid": 281,
+      "name": "GIMBAL_MANAGER_STATUS",
+      "count": 12,
+      "rate_hz": 0.2
+    },
+    {
+      "sysid": 1,
+      "compid": 1,
+      "kind": "vehicle",
+      "msgid": 285,
+      "name": "GIMBAL_DEVICE_ATTITUDE_STATUS",
+      "count": 180,
+      "rate_hz": 3.003
+    },
+    {
+      "sysid": 1,
+      "compid": 1,
+      "kind": "vehicle",
+      "msgid": 11030,
+      "name": "ESC_TELEMETRY_1_TO_4",
+      "count": 180,
+      "rate_hz": 3.003
+    },
+    {
+      "sysid": 1,
+      "compid": 1,
+      "kind": "vehicle",
+      "msgid": 11039,
+      "name": "MCU_STATUS",
+      "count": 120,
+      "rate_hz": 2.0
+    },
+    {
+      "sysid": 255,
+      "compid": 190,
+      "kind": "gcs",
+      "msgid": 0,
+      "name": "HEARTBEAT",
+      "count": 59,
+      "rate_hz": 0.999
+    }
+  ]
+}

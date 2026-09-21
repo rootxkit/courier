@@ -103,7 +103,16 @@ Do not add a dependency without a one-line justification in the commit body.
 
 **Python**
 - `ruff` for lint and format, `mypy --strict` on `gateway/`, `dispatch/`,
-  `airspace/`. These three are safety-relevant; type errors are build failures.
+  `airspace/`, `common/`, `agent/` and `tools/`. Type errors there are build
+  failures. The first three are safety-relevant; `common/` because they import
+  it, `agent/` because the ground relay enforces the Stage 0 guarantee and is
+  where telemetry is lost for good if it is lost at all, and `tools/` because
+  the diagnostics produce the evidence decisions rest on. The authoritative
+  list is the strict override in `pyproject.toml`, and
+  `tests/test_layout.py` fails if the two disagree.
+  Note that mypy's `strict` flag is global: setting it inside a per-module
+  override silently enables strict everywhere, so the bundle is expanded
+  flag by flag.
 - `pytest`, with `pytest-asyncio`. Target 80% coverage on the three modules
   above, best-effort elsewhere.
 - No bare `except:`. Log with structured context (`drone_id`, `mission_id`).

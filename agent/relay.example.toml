@@ -1,0 +1,59 @@
+# Ground relay configuration.
+#
+# Copy to relay.toml next to it, or pass --config <path>, and edit.
+# Start the relay with:  python -m agent --config relay.toml
+
+# Identifies this ground station to the Gateway. The Gateway operator issues
+# it along with the token; it is not something to invent locally.
+station_id = "tbilisi-base-1"
+
+# relay-v1 endpoint. Must be wss:// to anything but this machine: the bearer
+# token is sent as a request header, and on a shared LAN a plaintext ws:// link
+# hands it to anyone listening. The relay refuses to start otherwise.
+gateway_url = "wss://gateway.example.org/relay/v1"
+
+# Optional. A PEM bundle for a development CA, when the far end serves a
+# self-signed certificate - see docs/runbooks/p1-01-hardware-test.md. Leave it
+# out in production, where the system trust store is what you want.
+# Certificate verification is never disabled; that is the point of the CA.
+#ca_path = "dev-ca.crt"
+
+# Path to a file containing ONLY the bearer token.
+#
+# It lives in a separate file on purpose: this configuration can then be read
+# over someone's shoulder, pasted into a support thread, or committed as an
+# example without leaking a credential. Keep the token file out of version
+# control - *.token is gitignored.
+token_path = "relay.token"
+
+# Where the durable queue lives. Telemetry accumulates here whenever the
+# uplink is down, and is deleted only once the Gateway confirms it is stored.
+queue_path = "relay-queue.sqlite3"
+
+# The loopback socket QGroundControl forwards to.
+# QGC: Application Settings -> General -> MAVLink -> Enable MAVLink forwarding
+bind_host = "127.0.0.1"
+bind_port = 14445
+
+# Cap on the durable queue, in bytes. Default 1 GiB.
+#
+# Capacity arithmetic, from the rates measured in ADR-001:
+#
+#   one aircraft            ~2.8 KiB/s
+#   three aircraft          ~8.4 KiB/s
+#   1 GiB / 8.4 KiB/s       ~124,000 s  = about 34 hours
+#
+# So 1 GiB is roughly a day and a half of total disconnection with three
+# aircraft flying, or four days with one. Beyond the cap the oldest records
+# are dropped, counted, and reported to the Gateway as a gap.
+#
+# The cap is not optional. An unbounded queue is an unbounded file on this
+# laptop, and a full disk can take QGroundControl down with it - which is the
+# pilot losing their control surface mid-flight (P7-11). Telemetry is not
+# worth that trade.
+queue_max_bytes = 1073741824
+
+# Datagrams held in memory between the network thread and the disk writer.
+# Bounded so that a stalled disk drops datagrams instead of exhausting memory.
+# Drops here are counted as dropped_intake_total and reported every second.
+intake_queue_size = 10000

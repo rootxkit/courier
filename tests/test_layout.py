@@ -45,11 +45,13 @@ TYPE_CHECKED_DIRS = INSTALLED_PACKAGES + UNINSTALLED_PYTHON_DIRS
 NON_PYTHON_DIRS = ("web-pilot", "app-customer", "infra", "sim", "docs")
 
 # mypy --strict applies to these. CLAUDE.md names gateway, dispatch and
-# airspace as safety-relevant; common is included because they import it, and
-# tools because the probe produces the evidence an architectural decision
-# rests on (P1-00) — a silent parsing bug there is not cheaper than one in a
-# service, it is just harder to notice.
-STRICT_DIRS = ("common", "gateway", "dispatch", "airspace", "tools")
+# airspace as safety-relevant. common is included because they import it;
+# tools because the probe produces the evidence an architectural decision rests
+# on (P1-00), where a silent parsing bug is not cheaper than one in a service,
+# only harder to notice; and agent because the ground relay is where the Stage
+# 0 guarantee — that the server cannot reach the aircraft — is enforced, and
+# where telemetry is lost for good if it is lost at all.
+STRICT_DIRS = ("common", "gateway", "dispatch", "airspace", "tools", "agent")
 
 # The per-module half of mypy's --strict bundle. The rest of the bundle is set
 # globally and so is not repeated in the override.
