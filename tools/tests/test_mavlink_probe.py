@@ -14,25 +14,34 @@ gets recorded as telemetry-only forever without anyone learning why.
 
 from __future__ import annotations
 
+import ast
 import warnings
+from pathlib import Path
 
 import pytest
 from pymavlink.dialects.v10 import ardupilotmega as mav1
 from pymavlink.dialects.v20 import ardupilotmega as mav2
 
+from tools import mavlink_probe
 from tools.mavlink_probe import (
     EVENT_DRIVEN,
+    HEARTBEAT_PAYLOAD_LEN,
+    MAV_AUTOPILOT_INVALID,
+    MAV_TYPE_GCS,
     MAVLINK_V1_MAGIC,
     MAVLINK_V2_MAGIC,
     MESSAGE_NAMES,
     MIN_SAMPLES_FOR_RATE,
     MIN_SPAN_FOR_RATE_S,
+    NON_VEHICLE_MAV_TYPES,
     PARAM_VALUE_MSGID,
     REQUIRED_STREAMS,
     classify_absences,
+    classify_source,
     compute_rate_hz,
     decode_header,
     extract_param_id,
+    parse_heartbeat,
     payload_of,
     resolve_message_name,
     split_frames,
@@ -499,6 +508,217 @@ def test_unknown_id_falls_back_to_a_bare_marker() -> None:
     assert unknown not in mav2.mavlink_map
 
     assert resolve_message_name(unknown) == f"#{unknown}"
+
+
+# --- source classification --------------------------------------------------
+
+
+def heartbeat_from(
+    mav_type: int, autopilot: int, sysid: int = SYSID, compid: int = COMPID
+) -> bytes:
+    link = _v2_link(sysid, compid)
+    message = mav2.MAVLink_heartbeat_message(
+        type=mav_type,
+        autopilot=autopilot,
+        base_mode=0,
+        custom_mode=0,
+        system_status=mav2.MAV_STATE_STANDBY,
+        mavlink_version=3,
+    )
+    return bytes(message.pack(link))
+
+
+def test_heartbeat_field_order_is_what_the_offsets_assume() -> None:
+    """Pin the layout against the reference, as for PARAM_VALUE.
+
+    If MAVLink's field ordering is ever misremembered, this says what the real
+    layout is instead of letting a plausible-looking byte be read as a type.
+    """
+    ordered = mav2.mavlink_map[0].ordered_fieldnames
+
+    assert ordered[0] == "custom_mode"  # uint32, sorts first
+    assert ordered[1] == "type"
+    assert ordered[2] == "autopilot"
+
+
+def test_heartbeat_offsets_match_the_reference_encoder() -> None:
+    """custom_mode occupies 4 bytes, so type is at 4 and autopilot at 5."""
+    frame = heartbeat_from(mav2.MAV_TYPE_GCS, mav2.MAV_AUTOPILOT_INVALID)
+    payload = payload_of(frame)
+
+    assert payload is not None
+    assert len(payload) == HEARTBEAT_PAYLOAD_LEN
+    assert payload[4] == mav2.MAV_TYPE_GCS
+    assert payload[5] == mav2.MAV_AUTOPILOT_INVALID
+
+
+def test_enum_constants_match_the_reference() -> None:
+    assert MAV_TYPE_GCS == mav2.MAV_TYPE_GCS
+    assert MAV_AUTOPILOT_INVALID == mav2.MAV_AUTOPILOT_INVALID
+
+
+@pytest.mark.parametrize("msgid_name", sorted(NON_VEHICLE_MAV_TYPES))
+def test_non_vehicle_types_exist_in_the_dialect(msgid_name: int) -> None:
+    """Every value pinned here must be a real MAV_TYPE, not a typo."""
+    known = {getattr(mav2, name) for name in dir(mav2) if name.startswith("MAV_TYPE_")}
+
+    assert msgid_name in known
+
+
+def test_parse_heartbeat_reads_type_and_autopilot() -> None:
+    frame = heartbeat_from(mav2.MAV_TYPE_QUADROTOR, mav2.MAV_AUTOPILOT_ARDUPILOTMEGA)
+
+    assert parse_heartbeat(frame) == (
+        mav2.MAV_TYPE_QUADROTOR,
+        mav2.MAV_AUTOPILOT_ARDUPILOTMEGA,
+    )
+
+
+def test_parse_heartbeat_rejects_a_truncated_frame() -> None:
+    assert parse_heartbeat(heartbeat_from(mav2.MAV_TYPE_GCS, 0)[:-5]) is None
+
+
+def test_a_ground_station_is_not_a_vehicle() -> None:
+    """The case that prompted this: QGC audited for missing vehicle streams."""
+    assert classify_source(mav2.MAV_TYPE_GCS, mav2.MAV_AUTOPILOT_INVALID) == "gcs"
+
+
+def test_a_gcs_is_classified_by_type_not_by_sysid() -> None:
+    """SYSID 255 is a convention and a user setting, not a guarantee.
+
+    A ground station on SYSID 1 must still classify as a ground station, and a
+    vehicle on SYSID 255 must still classify as a vehicle.
+    """
+    gcs = heartbeat_from(mav2.MAV_TYPE_GCS, mav2.MAV_AUTOPILOT_INVALID, sysid=1)
+    vehicle = heartbeat_from(
+        mav2.MAV_TYPE_QUADROTOR, mav2.MAV_AUTOPILOT_ARDUPILOTMEGA, sysid=255
+    )
+
+    gcs_identity = parse_heartbeat(gcs)
+    vehicle_identity = parse_heartbeat(vehicle)
+    assert gcs_identity is not None
+    assert vehicle_identity is not None
+
+    assert classify_source(*gcs_identity) == "gcs"
+    assert classify_source(*vehicle_identity) == "vehicle"
+
+
+def test_a_gimbal_is_a_component() -> None:
+    """This airframe has one, and it heartbeats under the vehicle's SYSID."""
+    assert classify_source(mav2.MAV_TYPE_GIMBAL, mav2.MAV_AUTOPILOT_INVALID) == (
+        "component"
+    )
+
+
+def test_a_companion_computer_is_a_component() -> None:
+    """From Stage 2 our own agent is one of these; it is not an aircraft."""
+    assert (
+        classify_source(mav2.MAV_TYPE_ONBOARD_CONTROLLER, mav2.MAV_AUTOPILOT_INVALID)
+        == "component"
+    )
+
+
+def test_an_invalid_autopilot_means_a_component_whatever_the_type() -> None:
+    """The MAVLink convention for a non-autopilot component."""
+    assert classify_source(mav2.MAV_TYPE_GENERIC, mav2.MAV_AUTOPILOT_INVALID) == (
+        "component"
+    )
+
+
+@pytest.mark.parametrize(
+    "mav_type",
+    [
+        mav2.MAV_TYPE_QUADROTOR,
+        mav2.MAV_TYPE_HEXAROTOR,
+        mav2.MAV_TYPE_OCTOROTOR,
+        mav2.MAV_TYPE_FIXED_WING,
+        mav2.MAV_TYPE_VTOL_QUADROTOR,
+        mav2.MAV_TYPE_HELICOPTER,
+    ],
+)
+def test_airframes_are_vehicles(mav_type: int) -> None:
+    assert classify_source(mav_type, mav2.MAV_AUTOPILOT_ARDUPILOTMEGA) == "vehicle"
+
+
+def test_a_just_booted_vehicle_is_still_a_vehicle() -> None:
+    """A vehicle that has sent only a HEARTBEAT must not be filtered out.
+
+    Classifying on traffic volume rather than identity would hide an aircraft
+    at exactly the moment it appears — which is why the heuristic is the
+    HEARTBEAT payload and not the message inventory.
+    """
+    frame = heartbeat_from(mav2.MAV_TYPE_QUADROTOR, mav2.MAV_AUTOPILOT_ARDUPILOTMEGA)
+    identity = parse_heartbeat(frame)
+
+    assert identity is not None
+    assert classify_source(*identity) == "vehicle"
+
+
+def test_an_unknown_type_defaults_to_vehicle() -> None:
+    """Ambiguity resolves towards the aircraft.
+
+    Registering a ground station as an aircraft is a nuisance. Failing to
+    register an aircraft is the direction that gets someone hurt.
+    """
+    unknown_type = 200
+    assert unknown_type not in NON_VEHICLE_MAV_TYPES
+
+    assert classify_source(unknown_type, mav2.MAV_AUTOPILOT_ARDUPILOTMEGA) == "vehicle"
+
+
+def test_vehicle_and_gimbal_under_one_sysid_are_separate_sources() -> None:
+    """Keyed on (sysid, compid): the gimbal shares SYSID 1 with the aircraft."""
+    autopilot = heartbeat_from(
+        mav2.MAV_TYPE_QUADROTOR, mav2.MAV_AUTOPILOT_ARDUPILOTMEGA, sysid=1, compid=1
+    )
+    gimbal = heartbeat_from(
+        mav2.MAV_TYPE_GIMBAL, mav2.MAV_AUTOPILOT_INVALID, sysid=1, compid=154
+    )
+
+    autopilot_header = decode_header(autopilot)
+    gimbal_header = decode_header(gimbal)
+    assert autopilot_header is not None
+    assert gimbal_header is not None
+
+    # Same SYSID, different component: distinct sources.
+    assert autopilot_header[0] == gimbal_header[0] == 1
+    assert autopilot_header[1] != gimbal_header[1]
+
+    autopilot_identity = parse_heartbeat(autopilot)
+    gimbal_identity = parse_heartbeat(gimbal)
+    assert autopilot_identity is not None
+    assert gimbal_identity is not None
+
+    assert classify_source(*autopilot_identity) == "vehicle"
+    assert classify_source(*gimbal_identity) == "component"
+
+
+def test_printed_output_is_ascii_only() -> None:
+    """The probe's stdout is pasted into a decision record.
+
+    A Windows console in cp1252 renders an em dash as a replacement character,
+    so a non-ASCII literal reaches the ADR as mojibake. Comments and docstrings
+    are unrestricted; only what is printed has to survive the trip.
+    """
+    source = Path(mavlink_probe.__file__).read_text(encoding="utf-8")
+    offenders: list[str] = []
+
+    for node in ast.walk(ast.parse(source)):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "print"
+        ):
+            continue
+        for literal in ast.walk(node):
+            if (
+                isinstance(literal, ast.Constant)
+                and isinstance(literal.value, str)
+                and not literal.value.isascii()
+            ):
+                offenders.append(f"line {literal.lineno}: {literal.value!r}")
+
+    assert not offenders, "non-ASCII in printed output:\n" + "\n".join(offenders)
 
 
 def test_resolution_does_not_warn() -> None:

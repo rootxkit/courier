@@ -27,6 +27,7 @@ import time
 from collections import Counter, defaultdict
 from collections.abc import Callable
 from pathlib import Path
+from typing import Literal
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 14445
@@ -90,9 +91,58 @@ MIN_SAMPLES_FOR_RATE = 3
 MIN_SPAN_FOR_RATE_S = 0.5
 
 PARAM_VALUE_MSGID = 22
+HEARTBEAT_MSGID = 0
 
 MAVLINK_V1_HEADER_LEN = 6
 MAVLINK_V2_HEADER_LEN = 10
+
+# HEARTBEAT payload layout, by the same descending-type-size rule as
+# PARAM_VALUE. ordered_fieldnames is
+# ['custom_mode', 'type', 'autopilot', 'base_mode', 'system_status',
+#  'mavlink_version'], giving:
+#
+#     uint32  custom_mode      offset 0, 4 bytes
+#     uint8   type             offset 4
+#     uint8   autopilot        offset 5
+#     uint8   base_mode        offset 6
+#     uint8   system_status    offset 7
+#     uint8   mavlink_version  offset 8
+#
+# Pinned against pymavlink in tools/tests/test_mavlink_probe.py.
+HEARTBEAT_PAYLOAD_LEN = 9
+_HEARTBEAT_TYPE_OFFSET = 4
+_HEARTBEAT_AUTOPILOT_OFFSET = 5
+
+# From pymavlink's enums; pinned by test rather than trusted here.
+MAV_TYPE_GCS = 6
+MAV_AUTOPILOT_INVALID = 8
+
+# MAV_TYPE values that denote ground equipment or a peripheral rather than an
+# aircraft. A gimbal, a companion computer or an antenna tracker emits its own
+# HEARTBEAT, often under the vehicle's SYSID with a different component ID.
+NON_VEHICLE_MAV_TYPES = frozenset(
+    {
+        5,  # ANTENNA_TRACKER
+        6,  # GCS
+        18,  # ONBOARD_CONTROLLER
+        26,  # GIMBAL
+        27,  # ADSB
+        30,  # CAMERA
+        31,  # CHARGING_STATION
+        32,  # FLARM
+        33,  # SERVO
+        34,  # ODID
+        36,  # BATTERY
+        37,  # PARACHUTE
+        38,  # LOG
+        39,  # OSD
+        40,  # IMU
+        41,  # GPS
+        42,  # WINCH
+    }
+)
+
+SourceKind = Literal["vehicle", "gcs", "component", "unclassified"]
 
 # Roundtrip timing. The injection interval is deliberately longer than the
 # correlation window so the channel is quiet between attempts: if every moment
@@ -166,6 +216,34 @@ def compute_rate_hz(count: int, span_s: float) -> float | None:
     if count < MIN_SAMPLES_FOR_RATE or span_s < MIN_SPAN_FOR_RATE_S:
         return None
     return (count - 1) / span_s
+
+
+def parse_heartbeat(frame: bytes) -> tuple[int, int] | None:
+    """Return (type, autopilot) from a HEARTBEAT frame, or None."""
+    payload = payload_of(frame)
+    if payload is None:
+        return None
+    padded = payload.ljust(HEARTBEAT_PAYLOAD_LEN, b"\x00")
+    return padded[_HEARTBEAT_TYPE_OFFSET], padded[_HEARTBEAT_AUTOPILOT_OFFSET]
+
+
+def classify_source(mav_type: int, autopilot: int) -> SourceKind:
+    """Decide what a heartbeating source is, from what it says it is.
+
+    Not from its SYSID: 255 for a ground station is a convention and a user
+    setting, not a guarantee. Not from how much it transmits either — a vehicle
+    that has just booted sends a HEARTBEAT and nothing else yet, and that is
+    exactly the moment it must not be mistaken for a peripheral.
+
+    Ambiguity resolves to "vehicle". Registering a GCS as an aircraft is a
+    nuisance; failing to register an aircraft is the dangerous direction.
+    """
+    if mav_type == MAV_TYPE_GCS:
+        return "gcs"
+    # A component that is not an autopilot declares MAV_AUTOPILOT_INVALID.
+    if mav_type in NON_VEHICLE_MAV_TYPES or autopilot == MAV_AUTOPILOT_INVALID:
+        return "component"
+    return "vehicle"
 
 
 def classify_absences(seen: set[int]) -> tuple[set[int], set[int]]:
@@ -284,10 +362,14 @@ def cmd_listen(args: argparse.Namespace) -> int:
     print(f"Listening on {args.host}:{args.port} for {args.seconds}s.")
     print("Enable MAVLink forwarding in QGC if nothing arrives.\n")
 
-    counts: Counter[tuple[int, int]] = Counter()
-    first_seen: dict[tuple[int, int], float] = {}
-    last_seen: dict[tuple[int, int], float] = {}
-    sysids: set[int] = set()
+    # Keyed by (sysid, compid), not sysid: an aircraft's gimbal or companion
+    # computer heartbeats under the vehicle's SYSID with its own component ID,
+    # and merging them would audit a peripheral against a vehicle's stream
+    # requirements.
+    counts: Counter[tuple[tuple[int, int], int]] = Counter()
+    first_seen: dict[tuple[tuple[int, int], int], float] = {}
+    last_seen: dict[tuple[tuple[int, int], int], float] = {}
+    kinds: dict[tuple[int, int], SourceKind] = {}
     sources: set[str] = set()
     datagrams = 0
     total_bytes = 0
@@ -310,12 +392,17 @@ def cmd_listen(args: argparse.Namespace) -> int:
                 if header is None:
                     unparseable += 1
                     continue
-                sysid, _compid, msgid = header
-                sysids.add(sysid)
-                key = (sysid, msgid)
+                sysid, compid, msgid = header
+                source = (sysid, compid)
+                key = (source, msgid)
                 counts[key] += 1
                 first_seen.setdefault(key, now)
                 last_seen[key] = now
+
+                if msgid == HEARTBEAT_MSGID:
+                    identity = parse_heartbeat(frame)
+                    if identity is not None:
+                        kinds[source] = classify_source(*identity)
     except KeyboardInterrupt:
         print("\nInterrupted.")
     finally:
@@ -329,42 +416,72 @@ def cmd_listen(args: argparse.Namespace) -> int:
         print("  - On Windows, check that the firewall is not blocking loopback.")
         return 1
 
+    per_source: dict[tuple[int, int], list[tuple[int, int, float | None]]] = (
+        defaultdict(list)
+    )
+    for (source, msgid), count in counts.items():
+        span_s = last_seen[(source, msgid)] - first_seen[(source, msgid)]
+        per_source[source].append((msgid, count, compute_rate_hz(count, span_s)))
+
+    def kind_of(source: tuple[int, int]) -> SourceKind:
+        return kinds.get(source, "unclassified")
+
+    vehicles = [s for s in sorted(per_source) if kind_of(s) == "vehicle"]
+
     print(f"Duration        {elapsed:.1f}s")
     print(f"Datagrams       {datagrams}  ({total_bytes / elapsed / 1024:.1f} KiB/s)")
     print(f"Source(s)       {', '.join(sorted(sources))}")
-    print(f"Vehicle SYSIDs  {sorted(sysids)}")
+    print(f"Vehicles        {[sysid for sysid, _ in vehicles] or 'none'}")
     if unparseable:
         print(f"Unparseable     {unparseable} frames")
     print()
 
-    per_sys: dict[int, list[tuple[int, int, float | None]]] = defaultdict(list)
-    for (sysid, msgid), count in counts.items():
-        span_s = last_seen[(sysid, msgid)] - first_seen[(sysid, msgid)]
-        per_sys[sysid].append((msgid, count, compute_rate_hz(count, span_s)))
+    for source in sorted(per_source):
+        sysid, compid = source
+        kind = kind_of(source)
+        label = {
+            "vehicle": "vehicle",
+            "gcs": "ground station",
+            "component": "component",
+            "unclassified": "unclassified, no HEARTBEAT observed",
+        }[kind]
+        # ASCII only: this output is pasted into a decision record, and a
+        # Windows console in cp1252 renders an em dash as a replacement char.
+        print(f"SYSID {sysid} / COMP {compid} - {label}")
 
-    for sysid in sorted(per_sys):
-        print(f"SYSID {sysid}")
+        rows = per_source[source]
         # Sized to the block's content: resolved MAVLink names run past 24
         # characters (GIMBAL_DEVICE_ATTITUDE_STATUS is 29), and a misaligned
         # column is harder to read than a wide one.
-        width = max(24, *(len(resolve_message_name(m)) for m, _, _ in per_sys[sysid]))
+        width = max(24, *(len(resolve_message_name(m)) for m, _, _ in rows))
         print(f"  {'message':<{width}} {'count':>7} {'Hz':>7}")
-        for msgid, count, rate in sorted(per_sys[sysid], key=lambda r: -r[1]):
+        for msgid, count, rate in sorted(rows, key=lambda r: -r[1]):
             rate_text = "-" if rate is None else f"{rate:.2f}"
             name = resolve_message_name(msgid)
             print(f"  {name:<{width}} {count:>7} {rate_text:>7}")
-        missing_streams, unobserved_events = classify_absences(
-            {m for m, _, _ in per_sys[sysid]}
-        )
-        if missing_streams:
-            names = ", ".join(sorted(resolve_message_name(m) for m in missing_streams))
-            print(f"  MISSING (required by the pipeline): {names}")
-            print("  Raise the relevant SR*_ stream rate parameters.")
-        if unobserved_events:
-            names = ", ".join(
-                sorted(resolve_message_name(m) for m in unobserved_events)
+
+        # Only aircraft are held to the pipeline's stream requirements. A
+        # ground station or a gimbal was never going to send GLOBAL_POSITION_INT
+        # and reporting it as missing is noise that trains people to ignore the
+        # line. "unclassified" is checked too: if we could not confirm what it
+        # is, the safe assumption is that it might be an aircraft.
+        if kind in ("vehicle", "unclassified"):
+            missing_streams, unobserved_events = classify_absences(
+                {m for m, _, _ in rows}
             )
-            print(f"  not observed (event-driven, absence is not a finding): {names}")
+            if missing_streams:
+                names = ", ".join(
+                    sorted(resolve_message_name(m) for m in missing_streams)
+                )
+                print(f"  MISSING (required by the pipeline): {names}")
+                print("  Raise the relevant SR*_ stream rate parameters.")
+            if unobserved_events:
+                names = ", ".join(
+                    sorted(resolve_message_name(m) for m in unobserved_events)
+                )
+                print(
+                    f"  not observed (event-driven, absence is not a finding): {names}"
+                )
         print()
 
     if args.json:
@@ -375,11 +492,23 @@ def cmd_listen(args: argparse.Namespace) -> int:
             "datagrams": datagrams,
             "bytes": total_bytes,
             "sources": sorted(sources),
-            "sysids": sorted(sysids),
             "unparseable_frames": unparseable,
+            "endpoints": [
+                {
+                    "sysid": sysid,
+                    "compid": compid,
+                    "kind": kind_of((sysid, compid)),
+                }
+                for sysid, compid in sorted(per_source)
+            ],
+            "vehicles": [
+                {"sysid": sysid, "compid": compid} for sysid, compid in vehicles
+            ],
             "messages": [
                 {
                     "sysid": sysid,
+                    "compid": compid,
+                    "kind": kind_of((sysid, compid)),
                     "msgid": msgid,
                     "name": resolve_message_name(msgid),
                     "count": count,
@@ -387,8 +516,8 @@ def cmd_listen(args: argparse.Namespace) -> int:
                     # same claim as "it arrived at zero hertz".
                     "rate_hz": None if rate is None else round(rate, 3),
                 }
-                for sysid in sorted(per_sys)
-                for msgid, count, rate in sorted(per_sys[sysid])
+                for sysid, compid in sorted(per_source)
+                for msgid, count, rate in sorted(per_source[(sysid, compid)])
             ],
         }
         with Path(args.json).open("w", encoding="utf-8") as fh:
@@ -561,9 +690,9 @@ def cmd_roundtrip(args: argparse.Namespace) -> int:
             print("request cannot be told apart from traffic that was going to")
             print("arrive anyway. This method cannot answer the question here.")
             print()
-            print("Either quiet the ground station first — close other GCS")
+            print("Either quiet the ground station first - close other GCS")
             print("instances, let QGC finish its initial parameter download, then")
-            print("re-run — or answer the question a different way.")
+            print("re-run - or answer the question a different way.")
             print()
             print("Do NOT record this as bidirectional. Record it as untested.")
             return 3
