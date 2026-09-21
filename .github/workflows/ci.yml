@@ -62,8 +62,27 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e '.[dev]'
 
-      - name: pytest
-        run: pytest -m 'not sitl' --cov --cov-report=term-missing
+      # Branch coverage, not line coverage. A test that passes without ever
+      # executing the path it claims to cover has happened three times in this
+      # repository; an unexecuted branch arc is what makes that visible.
+      - name: pytest with branch coverage
+        run: pytest -m 'not sitl' --cov --cov-branch --cov-report=term-missing:skip-covered --cov-report=xml
+
+      # Ratchets, set just under the measured figures. They catch a regression;
+      # they are not a target. Raise them as coverage rises.
+      - name: Coverage gate - agent/
+        run: coverage report --include='agent/*' --show-missing --fail-under=83
+
+      - name: Coverage gate - tools/mavlink_probe.py
+        run: coverage report --include='tools/mavlink_probe.py' --show-missing --fail-under=35
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          retention-days: 7
 
   shell:
     name: Shell scripts

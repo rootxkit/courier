@@ -165,8 +165,16 @@ filterwarnings = ["error"]
 # --- coverage ---------------------------------------------------------------
 
 [tool.coverage.run]
+# Branch coverage, not just line coverage. Three times now a test has passed
+# while never executing the path it claimed to cover - the PARAM_VALUE offset
+# that could only ever report TELEMETRY-ONLY, and the 401 path the stub
+# rejected with a WebSocket close. Line coverage would have called all of those
+# covered. An unexecuted branch arc is the signal that catches them.
 branch = true
 source = ["common", "gateway", "dispatch", "airspace", "tools", "agent"]
+# Measuring the tests themselves inflates the total towards 100% and hides the
+# code that matters: a test file is, by construction, almost fully executed.
+omit = ["*/tests/*", "*/conftest.py"]
 
 [tool.coverage.report]
 exclude_also = [
@@ -174,7 +182,21 @@ exclude_also = [
     "raise NotImplementedError",
     "@overload",
 ]
-# TASKS.md sets 80% on gateway, dispatch and airspace. Those modules have no
-# behaviour yet, so a threshold now would only measure the absence of code.
-# Raise this to 80 with the first real module (P1-02).
-fail_under = 0
+# A ratchet, set just under the measured figure rather than at an aspiration.
+# Its job is to catch a regression, not to express a target: the number goes up
+# as coverage goes up, and never down without a reason written in the commit.
+#
+# Measured 2026-09-21 with --cov-branch and tests omitted:
+#   everything     69%
+#   agent/         84%
+#   mavlink_probe  36%
+#
+# The margin below each figure absorbs the integration tests, whose timing
+# decides whether a reconnect branch runs at all on a loaded CI machine. A gate
+# that fails at random teaches people to re-run the build, which is worse than
+# no gate.
+#
+# agent/ and tools/mavlink_probe.py are gated separately and more tightly by
+# `make cover`; see the Makefile. TASKS.md's 80% for gateway, dispatch and
+# airspace applies once those modules have behaviour (P1-02).
+fail_under = 68

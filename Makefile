@@ -56,8 +56,13 @@ PROBE_SECONDS ?= 30
 PROBE_PARAM ?= SYSID_THISMAV
 PROBE_OPTS := $(if $(PROBE_HOST),--host $(PROBE_HOST)) $(if $(PROBE_PORT),--port $(PROBE_PORT))
 
+# Coverage ratchets, set just under the figures measured on 2026-09-21.
+# Raise them when coverage rises; lowering one needs a reason in the commit.
+COVERAGE_MIN_AGENT ?= 83
+COVERAGE_MIN_PROBE ?= 35
+
 .PHONY: help hooks up down stop ps logs reset psql psql-telemetry sim sim-stop \
-        venv lint fmt typecheck test test-cov test-sitl clean probe probe-roundtrip
+        venv lint fmt typecheck test test-cov test-sitl cover clean probe probe-roundtrip
 
 help: ## Show this help
 	@echo "Courier — available targets:"
@@ -130,7 +135,16 @@ test: venv ## Run unit tests (SITL integration tests excluded)
 	$(VENV_BIN)/pytest -m 'not sitl'
 
 test-cov: venv ## Run unit tests with a coverage report
-	$(VENV_BIN)/pytest -m 'not sitl' --cov --cov-report=term-missing
+	$(VENV_BIN)/pytest -m 'not sitl' --cov --cov-branch --cov-report=term-missing
+
+cover: venv ## Branch coverage with the thresholds enforced (what CI runs)
+	$(VENV_BIN)/pytest -m 'not sitl' --cov --cov-branch --cov-report=term-missing:skip-covered --cov-report=xml
+	@echo
+	@echo "=== agent/ - uncovered lines and branch arcs ==="
+	$(VENV_BIN)/coverage report --include='agent/*' --show-missing --fail-under=$(COVERAGE_MIN_AGENT)
+	@echo
+	@echo "=== tools/mavlink_probe.py - uncovered ==="
+	$(VENV_BIN)/coverage report --include='tools/mavlink_probe.py' --show-missing --fail-under=$(COVERAGE_MIN_PROBE)
 
 test-sitl: venv ## Run integration tests against already-running SITL vehicles
 	@test -n "$${SITL_INSTANCE_COUNT:-}" \
