@@ -7,9 +7,16 @@
 # it along with the token; it is not something to invent locally.
 station_id = "tbilisi-base-1"
 
-# relay-v1 endpoint. Must be wss:// outside tests — the token crosses this
-# link, and so does the entire flight record.
+# relay-v1 endpoint. Must be wss:// to anything but this machine: the bearer
+# token is sent as a request header, and on a shared LAN a plaintext ws:// link
+# hands it to anyone listening. The relay refuses to start otherwise.
 gateway_url = "wss://gateway.example.org/relay/v1"
+
+# Optional. A PEM bundle for a development CA, when the far end serves a
+# self-signed certificate - see docs/runbooks/p1-01-hardware-test.md. Leave it
+# out in production, where the system trust store is what you want.
+# Certificate verification is never disabled; that is the point of the CA.
+#ca_path = "dev-ca.crt"
 
 # Path to a file containing ONLY the bearer token.
 #

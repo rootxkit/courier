@@ -47,11 +47,36 @@ def test_the_shipped_example_is_valid() -> None:
     assert config.uses_tls
 
 
-def test_the_example_documents_every_field() -> None:
+def test_the_example_documents_every_required_field() -> None:
     """A field absent from the example is a field nobody will know to set."""
     documented = set(tomllib.loads(EXAMPLE.read_text(encoding="utf-8")))
+    required = {
+        name for name, field in RelayConfig.model_fields.items() if field.is_required()
+    }
 
-    assert documented == set(RelayConfig.model_fields)
+    assert required <= documented
+
+
+def test_the_example_sets_nothing_that_is_not_a_field() -> None:
+    """A stray key would be silently rejected by extra='forbid' at startup."""
+    documented = set(tomllib.loads(EXAMPLE.read_text(encoding="utf-8")))
+
+    assert documented <= set(RelayConfig.model_fields)
+
+
+def test_optional_fields_appear_as_commented_examples() -> None:
+    """ca_path is off by default, but a pilot still has to know it exists.
+
+    Leaving it out entirely would mean the only way to discover it is reading
+    the source, which is not something the reader of this file does.
+    """
+    body = EXAMPLE.read_text(encoding="utf-8")
+    documented = set(tomllib.loads(body))
+
+    for name, field in RelayConfig.model_fields.items():
+        if field.is_required() or name in documented:
+            continue
+        assert f"#{name} =" in body, f"{name} is neither set nor shown commented"
 
 
 def test_configuration_is_frozen(tmp_path: Path) -> None:

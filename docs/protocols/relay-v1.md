@@ -240,7 +240,7 @@ in the flight record, which is the exact failure this design exists to prevent.
 | `queue_bytes` | Bytes those records occupy |
 | `dropped_intake_total` | Datagrams dropped before a `seq` was assigned, because the in-memory intake queue was full. Persisted across restarts |
 | `dropped_cap_total` | Records discarded from disk because the queue hit its size cap. Persisted across restarts |
-| `last_datagram_age_ms` | Milliseconds since a datagram last arrived on the UDP socket |
+| `last_datagram_age_ms` | Milliseconds since a datagram last arrived on the UDP socket, or `null` if none ever has |
 | `uptime_s` | Seconds since the relay started |
 
 The two drop counters are separate because they are different failures with
@@ -367,6 +367,15 @@ They exist nowhere and will never arrive.
 
 `reason` is `"queue_cap"`. It is an open string so later reasons can be added
 without a version bump.
+
+**A recorded gap advances the server's resume point.** Once the server has
+stored a `gap`, the sequence numbers it covers are permanently absent, and the
+server must treat them as satisfied when computing `resume_from_seq` for later
+sessions. Computing it as "highest contiguous sequence plus one" without
+accounting for gaps leaves the watermark stuck at the hole forever: every
+subsequent reconnect asks for records the relay cannot supply, and the relay
+answers with the same `gap` again, for the life of the epoch.
+
 
 ### Protocol error: the server asks for records that never existed
 

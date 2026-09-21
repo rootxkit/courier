@@ -19,6 +19,7 @@ import asyncio
 import json
 import queue as queue_module
 import random
+import ssl
 import threading
 import time
 from typing import Any
@@ -253,18 +254,28 @@ class Relay:
             await asyncio.sleep(backoff * (0.5 + random.random()))
             backoff = min(backoff * BACKOFF_FACTOR, BACKOFF_MAX_S)
 
+    def _ssl_context(self) -> ssl.SSLContext | None:
+        """Trust settings for the uplink, or None for a loopback ws:// link."""
+        if not self._config.uses_tls:
+            return None
+        if self._config.ca_path is not None:
+            # A development CA, per the P1-01 hardware runbook. Certificate
+            # verification stays on: the point of the CA is to keep it on.
+            return ssl.create_default_context(cafile=str(self._config.ca_path))
+        return ssl.create_default_context()
+
     async def _session(self) -> None:
         url = str(self._config.gateway_url)
         if not self._config.uses_tls:
-            self._log.warning(
-                "gateway_url is not wss; relay-v1 requires TLS outside tests",
-                extra={"url": url},
-            )
+            # The configuration validator has already established that this is
+            # loopback, so nothing is crossing a network.
+            self._log.info("uplink is plaintext loopback", extra={"url": url})
 
         try:
             connection = await websockets.connect(
                 url,
                 additional_headers={"Authorization": f"Bearer {self._token}"},
+                ssl=self._ssl_context(),
             )
         except websockets.InvalidStatus as error:
             if error.response.status_code in (401, 403):

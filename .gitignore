@@ -11,6 +11,16 @@ sim/sitl.env
 relay.toml
 !relay.example.toml
 
+# P1-01 hardware test artifacts: the development CA, the server certificate
+# it signs, and whatever the sink received. Keys especially - the dev CA can
+# sign anything the relay would then trust.
+relay-test/
+sink-data/
+*.crt
+*.key
+*.csr
+*.srl
+
 # Ground relay durable queue (SQLite, plus its WAL sidecars)
 relay-queue.sqlite3
 *.sqlite3-wal

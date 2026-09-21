@@ -13,11 +13,19 @@ committed as an example without leaking a credential.
 
 from __future__ import annotations
 
+import ipaddress
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
-from pydantic import AnyWebsocketUrl, BaseModel, ConfigDict, Field, ValidationError
+from pydantic import (
+    AnyWebsocketUrl,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    model_validator,
+)
 
 from agent.queue import DEFAULT_QUEUE_MAX_BYTES
 from common.config import ConfigurationError
@@ -46,10 +54,47 @@ class RelayConfig(BaseModel):
     queue_max_bytes: int = Field(default=DEFAULT_QUEUE_MAX_BYTES, gt=0)
     intake_queue_size: int = Field(default=DEFAULT_INTAKE_QUEUE_SIZE, gt=0)
 
+    # A PEM bundle for a development CA, when the Gateway or the verification
+    # sink serves a self-signed certificate. Absent means the system trust
+    # store, which is what a production deployment uses.
+    ca_path: Path | None = None
+
     @property
     def uses_tls(self) -> bool:
-        """relay-v1 §2 requires wss. Plain ws exists for tests only."""
+        """relay-v1 §2 requires wss."""
         return self.gateway_url.scheme == "wss"
+
+    @model_validator(mode="after")
+    def _plaintext_is_loopback_only(self) -> Self:
+        """Refuse ws:// to anything but this machine.
+
+        The bearer token is sent as a request header. On loopback that never
+        reaches a wire; to any other host it crosses a network in the clear,
+        and on the shared LAN of a flying site that is a credential anyone can
+        read. Loopback stays permitted because the relay and a sink on the same
+        laptop are a legitimate development setup — and because a test there is
+        not testing the network anyway.
+        """
+        if self.uses_tls:
+            return self
+        host = self.gateway_url.host or ""
+        if _is_loopback(host):
+            return self
+        raise ValueError(
+            f"gateway_url uses ws:// to {host!r}, which would send the bearer "
+            f"token across the network in plaintext. Use wss://, with ca_path "
+            f"pointing at your development CA if the certificate is "
+            f"self-signed. Plain ws:// is permitted only to localhost."
+        )
+
+
+def _is_loopback(host: str) -> bool:
+    if host in {"localhost", ""}:
+        return True
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return False
 
 
 def _describe(error: ValidationError, path: Path) -> str:
