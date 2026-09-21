@@ -684,11 +684,12 @@ def cmd_roundtrip(args: argparse.Namespace) -> int:
             print("RESULT: INCONCLUSIVE.")
             print()
             print(
-                f"PARAM_VALUE is already arriving without us asking "
-                f"({unsolicited} in {BASELINE_S:.0f}s), so a reply to an injected"
+                f"PARAM_VALUE arrived {unsolicited} time(s) in "
+                f"{BASELINE_S:.0f}s without us asking for it."
             )
-            print("request cannot be told apart from traffic that was going to")
-            print("arrive anyway. This method cannot answer the question here.")
+            print("A reply to an injected request cannot be told apart from")
+            print("traffic that was going to arrive anyway, so this method")
+            print("cannot answer the question on this setup.")
             print()
             print("Either quiet the ground station first - close other GCS")
             print("instances, let QGC finish its initial parameter download, then")
