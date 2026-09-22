@@ -72,8 +72,10 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# Tests may shadow builtins in fixtures and assert on private helpers.
-"**/tests/**" = ["A", "B008"]
+# Tests may shadow builtins in fixtures and assert on private helpers. T201
+# because a test that measures something has to be able to report the number:
+# the point of agent/tests/test_halfopen.py is the detection time it prints.
+"**/tests/**" = ["A", "B008", "T201"]
 # tools/ holds CLI diagnostics whose stdout IS the deliverable: the operator
 # runs them at the ground station and pastes the output into a decision record.
 # Structured JSON logging would defeat the purpose, and listen mode must stay

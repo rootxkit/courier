@@ -138,16 +138,19 @@ def test_coverage_is_measured_on_the_safety_relevant_directories(
     assert sorted(measured) == sorted(STRICT_DIRS)
 
 
-def test_tools_may_print_but_nothing_else_may(pyproject: dict) -> None:
-    """T201 is lifted for tools/ only.
+def test_only_tools_and_tests_may_print(pyproject: dict) -> None:
+    """T201 is lifted in exactly two places, for two different reasons.
 
-    The diagnostics print because their stdout is the deliverable — it gets
-    pasted into a decision record. Everywhere else, logging goes through
-    common/, and a print() is a log line that no incident review will find.
+    tools/ prints because its stdout IS the deliverable — it gets pasted into
+    a decision record. Tests print because a test that measures something has
+    to report the number; agent/tests/test_halfopen.py exists to produce one.
+
+    Nowhere else: in a service, logging goes through common/, and a print() is
+    a log line no incident review will ever find.
     """
     ignores = pyproject["tool"]["ruff"]["lint"]["per-file-ignores"]
     printing_allowed = {
         pattern for pattern, codes in ignores.items() if "T201" in codes
     }
 
-    assert printing_allowed == {"tools/**"}
+    assert printing_allowed == {"tools/**", "**/tests/**"}
