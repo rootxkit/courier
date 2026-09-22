@@ -38,6 +38,12 @@ __all__ = ["RelayConfig", "load_config", "read_token"]
 # pathological stall drops datagrams rather than exhausting memory.
 DEFAULT_INTAKE_QUEUE_SIZE = 10000
 
+# P7-01 alerts the operator when a link has been lost for 30 s. The relay must
+# have finished deciding its uplink is dead before then, or the operator is
+# told about a link the relay still believes is healthy - a third state nobody
+# has designed for. This bounds the sum of the keepalive settings below.
+LINK_LOSS_ALERT_S = 30.0
+
 # Fields holding a filesystem path. A relative one is resolved against the
 # configuration file's own directory, not the process's working directory.
 _PATH_FIELDS = ("token_path", "queue_path", "ca_path")
@@ -82,10 +88,58 @@ class RelayConfig(BaseModel):
     # store, which is what a production deployment uses.
     ca_path: Path | None = None
 
+    # Keepalive on the uplink. A half-open connection - bytes stop, the socket
+    # stays up, nothing is refused - is only detectable from missing pongs, and
+    # how long that takes is the sum of these three:
+    #
+    #     detection = (time to the next ping) + ping_timeout + close_timeout
+    #     worst case = ping_interval + ping_timeout + close_timeout
+    #
+    # close_timeout counts because the close handshake waits for a close frame
+    # that a dead link can never deliver. Measured on 2026-09-22; see
+    # docs/runbooks/p1-01-test-records.md.
+    uplink_ping_interval_s: float = Field(default=10.0, gt=0.0)
+    uplink_ping_timeout_s: float = Field(default=10.0, gt=0.0)
+    uplink_close_timeout_s: float = Field(default=5.0, gt=0.0)
+
+    @property
+    def worst_case_detection_s(self) -> float:
+        """Longest the relay can believe a dead uplink is alive."""
+        return (
+            self.uplink_ping_interval_s
+            + self.uplink_ping_timeout_s
+            + self.uplink_close_timeout_s
+        )
+
     @property
     def uses_tls(self) -> bool:
         """relay-v1 §2 requires wss."""
         return self.gateway_url.scheme == "wss"
+
+    @model_validator(mode="after")
+    def _detection_completes_before_the_operator_is_alerted(self) -> Self:
+        """Bound how long the relay can disagree with the Gateway.
+
+        The Gateway declares a station unreachable after three missed status
+        messages, about 3 s (relay-v1 §8). The relay takes longer, because a
+        half-open socket looks alive until a ping goes unanswered. In between,
+        the two components hold different beliefs about the same link.
+
+        That disagreement is harmless to the data - no acknowledgement can
+        arrive through a dead link, so nothing is deleted and the queue simply
+        grows - but it must be bounded, and it must close before P7-01 alerts
+        the operator. Otherwise the alert fires while the relay still thinks
+        the uplink is healthy.
+        """
+        if self.worst_case_detection_s >= LINK_LOSS_ALERT_S:
+            raise ValueError(
+                f"uplink keepalive sums to {self.worst_case_detection_s:.0f}s "
+                f"(ping_interval + ping_timeout + close_timeout), which is not "
+                f"below the {LINK_LOSS_ALERT_S:.0f}s link-loss alert in P7-01. "
+                f"The relay would still believe its uplink was healthy when the "
+                f"operator is told it is down."
+            )
+        return self
 
     @model_validator(mode="after")
     def _plaintext_is_loopback_only(self) -> Self:

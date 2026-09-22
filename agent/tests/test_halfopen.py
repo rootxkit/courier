@@ -31,11 +31,22 @@ from tools.relay_sink import RelaySink, SinkStore
 
 TOKEN = "halfopen-test-token"
 
-# The relay currently relies on the websockets client default ping settings
-# (20 s interval, 20 s timeout), so detection can take up to 40 s plus the time
-# to the next ping. Generous, because the point is to MEASURE, not to assert a
-# number we have not chosen yet.
-DETECTION_LIMIT_S = 120.0
+# The fast test overrides the keepalive to 5/5/2, bounding detection at 12 s.
+# The shipped defaults are 10/10/5, bounding it at 25 s; those are exercised by
+# the `sitl`-marked test at the end of this file, which is excluded from the
+# default run because it costs half a minute to prove a number the fast test
+# already proves the shape of.
+FAST_KEEPALIVE = {
+    "uplink_ping_interval_s": 5.0,
+    "uplink_ping_timeout_s": 5.0,
+    "uplink_close_timeout_s": 2.0,
+}
+FAST_WORST_CASE_S = 12.0
+
+# Generous headroom over the worst case: a loaded machine delays the pings
+# themselves, and a gate that fails at random is worse than no gate.
+FAST_LIMIT_S = 40.0
+DEFAULT_LIMIT_S = 70.0
 
 
 def free_port() -> int:
@@ -101,10 +112,14 @@ async def _wait_for(predicate: Any, limit_s: float, interval_s: float = 0.2) -> 
     return False
 
 
-async def test_a_half_open_uplink_is_detected_and_recovered(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Stall the link without closing it; measure how long detection takes."""
+async def _run_half_open_case(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    keepalive: dict[str, float],
+    limit_s: float,
+    label: str,
+) -> float:
+    """Stall the link without closing it; return how long detection took."""
     caplog.set_level(logging.WARNING, logger="agent.relay")
 
     sink = SinkServer(tmp_path / "sink")
@@ -123,6 +138,7 @@ async def test_a_half_open_uplink_is_detected_and_recovered(
             token_path=tmp_path / "relay.token",
             queue_path=tmp_path / "relay-queue.sqlite3",
             bind_port=udp_port,
+            **keepalive,  # type: ignore[arg-type]
         )
         durable_queue = DurableQueue(config.queue_path)
         relay = Relay(config, durable_queue, TOKEN)
@@ -161,18 +177,18 @@ async def test_a_half_open_uplink_is_detected_and_recovered(
                     record.getMessage() == "uplink session ended"
                     for record in caplog.records
                 ),
-                DETECTION_LIMIT_S,
+                limit_s,
                 interval_s=0.25,
             )
             detection_s = time.monotonic() - stalled_at
 
+            print()
             print(
-                f"\n[halfopen] detection took {detection_s:.1f}s "
-                f"(limit {DETECTION_LIMIT_S:.0f}s)"
+                f"[halfopen] {label}: detection took {detection_s:.1f}s "
+                f"(limit {limit_s:.0f}s)"
             )
             assert detected, (
-                f"the relay did not notice a dead uplink within "
-                f"{DETECTION_LIMIT_S:.0f}s"
+                f"the relay did not notice a dead uplink within {limit_s:.0f}s"
             )
 
             # Integrity is never at risk in this state: no acks arrive through
@@ -218,6 +234,35 @@ async def test_a_half_open_uplink_is_detected_and_recovered(
     assert len(stored) >= taken_in - 200
     assert state.gaps == []
     assert detection_s is not None
+    return detection_s
+
+
+async def test_a_half_open_uplink_is_detected_and_recovered(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The fast case, with keepalive overridden to 5/5/2."""
+    detection_s = await _run_half_open_case(
+        tmp_path, caplog, FAST_KEEPALIVE, FAST_LIMIT_S, "5/5/2"
+    )
+
+    assert detection_s < FAST_LIMIT_S
+
+
+@pytest.mark.sitl
+async def test_the_shipped_keepalive_defaults_detect_within_their_bound(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The numbers that actually ship: 10/10/5, bounding detection at 25 s.
+
+    Excluded from the default run by the marker - it costs about half a minute
+    - but it is the only test that exercises the values a relay is configured
+    with out of the box.
+    """
+    detection_s = await _run_half_open_case(
+        tmp_path, caplog, {}, DEFAULT_LIMIT_S, "10/10/5 (shipped defaults)"
+    )
+
+    assert detection_s < DEFAULT_LIMIT_S
 
 
 async def test_bytes_held_by_the_proxy_are_delivered_not_dropped(

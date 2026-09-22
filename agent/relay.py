@@ -276,6 +276,11 @@ class Relay:
                 url,
                 additional_headers={"Authorization": f"Bearer {self._token}"},
                 ssl=self._ssl_context(),
+                # A half-open uplink is only detectable from missing pongs.
+                # These three decide how long that takes; see RelayConfig.
+                ping_interval=self._config.uplink_ping_interval_s,
+                ping_timeout=self._config.uplink_ping_timeout_s,
+                close_timeout=self._config.uplink_close_timeout_s,
             )
         except websockets.InvalidStatus as error:
             if error.response.status_code in (401, 403):

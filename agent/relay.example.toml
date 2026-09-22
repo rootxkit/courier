@@ -76,6 +76,28 @@ bind_port = 14445
 # worth that trade.
 queue_max_bytes = 1073741824
 
+# Uplink keepalive.
+#
+# A half-open link - bytes stop, the socket stays up, nothing is refused - is
+# what a pulled cable looks like. It is only detectable from a ping that goes
+# unanswered, and how long that takes is:
+#
+#     detection  = (time to the next ping) + ping_timeout + close_timeout
+#     worst case = ping_interval + ping_timeout + close_timeout
+#
+# close_timeout counts because the close handshake waits for a frame that a
+# dead link can never deliver. Measured on 2026-09-22: the websockets defaults
+# of 20/20/10 took 48 s; these settings bound it at 25 s.
+#
+# The relay refuses to start if the three sum to 30 s or more. P7-01 alerts the
+# operator at 30 s, and the relay must have finished deciding before then.
+#
+# Raise them on a link with long latency spikes - a false disconnect costs a
+# reconnect and a resend, never data - but keep the sum under 30.
+uplink_ping_interval_s = 10.0
+uplink_ping_timeout_s = 10.0
+uplink_close_timeout_s = 5.0
+
 # Datagrams held in memory between the network thread and the disk writer.
 # Bounded so that a stalled disk drops datagrams instead of exhausting memory.
 # Drops here are counted as dropped_intake_total and reported every second.

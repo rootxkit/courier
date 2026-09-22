@@ -394,3 +394,86 @@ def test_an_unrelated_toml_error_does_not_get_the_windows_hint(
         load_config(write(tmp_path, "station_id = = ="))
 
     assert "backslash" not in str(raised.value).lower()
+
+
+# --- uplink keepalive -------------------------------------------------------
+#
+# A half-open link is only detectable from missing pongs, and the time that
+# takes is the sum of three settings - including close_timeout, which counts
+# because the close handshake waits for a frame a dead link cannot deliver.
+
+
+def test_keepalive_defaults_bound_detection_at_25_seconds(tmp_path: Path) -> None:
+    config = load_config(write(tmp_path, MINIMAL))
+
+    assert config.uplink_ping_interval_s == 10.0
+    assert config.uplink_ping_timeout_s == 10.0
+    assert config.uplink_close_timeout_s == 5.0
+    assert config.worst_case_detection_s == 25.0
+
+
+def test_the_worst_case_is_the_sum_of_all_three(tmp_path: Path) -> None:
+    """close_timeout is the term most easily forgotten, so it is asserted."""
+    body = MINIMAL + (
+        "\nuplink_ping_interval_s = 4.0\n"
+        "uplink_ping_timeout_s = 3.0\n"
+        "uplink_close_timeout_s = 2.0\n"
+    )
+
+    assert load_config(write(tmp_path, body)).worst_case_detection_s == 9.0
+
+
+def test_keepalive_that_outlasts_the_operator_alert_is_refused(
+    tmp_path: Path,
+) -> None:
+    """The websockets defaults, which is what the relay used to ship with.
+
+    20 + 20 + 10 = 50 s. The operator would be told the link was down while
+    the relay still believed it was healthy.
+    """
+    body = MINIMAL + (
+        "\nuplink_ping_interval_s = 20.0\n"
+        "uplink_ping_timeout_s = 20.0\n"
+        "uplink_close_timeout_s = 10.0\n"
+    )
+
+    with pytest.raises(ConfigurationError) as raised:
+        load_config(write(tmp_path, body))
+
+    message = str(raised.value)
+    assert "50s" in message
+    assert "30s" in message
+    assert "still believe" in message
+
+
+def test_exactly_the_alert_threshold_is_refused(tmp_path: Path) -> None:
+    """At 30 s the two events race; below it the ordering is guaranteed."""
+    body = MINIMAL + (
+        "\nuplink_ping_interval_s = 15.0\n"
+        "uplink_ping_timeout_s = 10.0\n"
+        "uplink_close_timeout_s = 5.0\n"
+    )
+
+    with pytest.raises(ConfigurationError, match=r"30s"):
+        load_config(write(tmp_path, body))
+
+
+def test_just_under_the_threshold_is_accepted(tmp_path: Path) -> None:
+    """The presence half: a longer-than-default budget is allowed if bounded."""
+    body = MINIMAL + (
+        "\nuplink_ping_interval_s = 14.0\n"
+        "uplink_ping_timeout_s = 10.0\n"
+        "uplink_close_timeout_s = 5.0\n"
+    )
+
+    assert load_config(write(tmp_path, body)).worst_case_detection_s == 29.0
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["uplink_ping_interval_s", "uplink_ping_timeout_s", "uplink_close_timeout_s"],
+)
+def test_a_zero_keepalive_setting_is_refused(tmp_path: Path, field: str) -> None:
+    """Zero would disable pings entirely, and a dead link would never be seen."""
+    with pytest.raises(ConfigurationError, match=field):
+        load_config(write(tmp_path, MINIMAL + f"\n{field} = 0\n"))
