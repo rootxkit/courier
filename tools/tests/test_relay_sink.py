@@ -662,3 +662,110 @@ def test_the_two_ends_agree_on_what_loopback_means() -> None:
         "10.0.0.7",
     ]:
         assert relay_is_loopback(host) == sink_is_loopback(host), host
+
+
+# --- counters survive an unclean stop ---------------------------------------
+#
+# The 2026-09-22 Procedure B report said "received: 57965" against "58003
+# stored", which is arithmetically impossible. The records were fsynced per
+# batch; the counter was written only on the 1 Hz status tick, and the sink was
+# killed before the last one. A reader cannot tell a stale counter from a real
+# anomaly, so the counter now moves with the data.
+
+
+def test_received_total_is_exact_without_any_status_tick(tmp_path: Path) -> None:
+    """No status message is ever handled here - only appends."""
+    store = SinkStore(tmp_path / "sink")
+    state = store.state("station-a", "abc123")
+
+    for batch in range(10):
+        store.append(
+            state,
+            [
+                Record(seq=batch * 5 + n, recv_utc_ns=n, datagram=b"x" * 16)
+                for n in range(5)
+            ],
+        )
+
+    # Abandon the store without close(), as a killed process would.
+    reopened = SinkStore(tmp_path / "sink")
+    reopened.load_all()
+    recovered = reopened.all_states()[0]
+
+    assert recovered.received_total == 50
+    assert len(recovered.stored) == 50
+    assert recovered.received_total == len(recovered.stored)
+    store.close()
+    reopened.close()
+
+
+def test_duplicates_are_counted_durably_too(tmp_path: Path) -> None:
+    store = SinkStore(tmp_path / "sink")
+    state = store.state("station-a", "abc123")
+
+    records = [Record(seq=n, recv_utc_ns=n, datagram=b"y") for n in range(4)]
+    store.append(state, records)
+    store.append(state, records)  # a resend after a reconnect
+
+    reopened = SinkStore(tmp_path / "sink")
+    reopened.load_all()
+    recovered = reopened.all_states()[0]
+
+    assert recovered.received_total == 8
+    assert recovered.duplicate_total == 4
+    assert len(recovered.stored) == 4
+    store.close()
+    reopened.close()
+
+
+def test_the_report_never_shows_fewer_received_than_stored(tmp_path: Path) -> None:
+    """The exact impossibility the 2026-09-22 run printed."""
+    store = SinkStore(tmp_path / "sink")
+    state = store.state("station-a", "abc123")
+    store.append(
+        state, [Record(seq=n, recv_utc_ns=n, datagram=b"z") for n in range(30)]
+    )
+
+    reopened = SinkStore(tmp_path / "sink")
+    reopened.load_all()
+    recovered = reopened.all_states()[0]
+    report = build_report(reopened)
+
+    assert recovered.received_total >= len(recovered.stored)
+    assert "received   : 30" in report
+    assert "(30 stored)" in report
+    store.close()
+    reopened.close()
+
+
+def test_a_truncated_counters_file_does_not_lose_the_records(
+    tmp_path: Path,
+) -> None:
+    """Corrupt counters degrade to zero; the records file is the truth."""
+    store = SinkStore(tmp_path / "sink")
+    state = store.state("station-a", "abc123")
+    store.append(
+        state, [Record(seq=n, recv_utc_ns=n, datagram=b"q") for n in range(12)]
+    )
+    counters = state.counters_path
+    store.close()
+
+    counters.write_text('{"station_id": "station-a", "epo', encoding="utf-8")
+
+    reopened = SinkStore(tmp_path / "sink")
+    recovered = reopened.state("station-a", "abc123")
+
+    assert len(recovered.stored) == 12
+    assert sorted(recovered.stored) == list(range(12))
+    reopened.close()
+
+
+def test_no_temporary_counter_files_are_left_behind(tmp_path: Path) -> None:
+    store = SinkStore(tmp_path / "sink")
+    state = store.state("station-a", "abc123")
+    store.append(state, [Record(seq=0, recv_utc_ns=0, datagram=b"w")])
+    store.close()
+
+    leftovers = list((tmp_path / "sink").rglob("*.tmp"))
+
+    assert leftovers == []

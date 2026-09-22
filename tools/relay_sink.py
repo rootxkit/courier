@@ -218,6 +218,15 @@ class SinkStore:
 
         handle.flush()
         os.fsync(handle.fileno())
+
+        # Counters are persisted here, under the same fsync as the records they
+        # describe, and not only on the 1 Hz status tick. Written on the tick
+        # alone they lag behind the data, and an unclean stop leaves a report
+        # claiming fewer records received than are stored - arithmetically
+        # impossible, and indistinguishable from a real anomaly by anyone
+        # reading it later. Observed on 2026-09-22: 57,965 received against
+        # 58,003 stored.
+        self.save_counters(state)
         return new
 
     def event(self, state: EpochState, payload: dict[str, Any]) -> None:
@@ -239,9 +248,16 @@ class SinkStore:
             "gaps": [list(gap) for gap in state.gaps],
             "last_status": state.last_status,
         }
-        state.counters_path.write_text(
-            json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
-        )
+        # Written to a temporary file and moved into place, so a process that
+        # dies mid-write leaves the previous counters intact rather than a
+        # truncated file. fsync before the move, because a rename that reaches
+        # the disk ahead of the contents would be worse than either.
+        temporary = state.counters_path.with_suffix(".json.tmp")
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(state.counters_path)
 
     def close(self) -> None:
         for handle in self._handles.values():
