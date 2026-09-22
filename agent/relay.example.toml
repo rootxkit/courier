@@ -3,6 +3,27 @@
 # Copy to relay.toml next to it, or pass --config <path>, and edit.
 # Start the relay with:  python -m agent --config relay.toml
 
+# ---------------------------------------------------------------------------
+# About paths in this file
+#
+# Relative paths are resolved against THIS FILE's directory, not against
+# whichever directory you happen to start the relay from. So
+# token_path = "relay.token" means the file sitting next to this one, and the
+# relay behaves the same whether you start it from here or from anywhere else.
+#
+# On Windows, write absolute paths with FORWARD slashes:
+#
+#     token_path = "C:/Users/pilot/relay.token"
+#
+# A backslash inside a double-quoted TOML string starts an escape sequence, so
+#     token_path = "C:\Users\pilot\relay.token"
+# is not valid TOML and the relay will refuse to start. If you would rather
+# keep backslashes, use a single-quoted literal string, where they are taken
+# exactly as written:
+#
+#     token_path = 'C:\Users\pilot\relay.token'
+# ---------------------------------------------------------------------------
+
 # Identifies this ground station to the Gateway. The Gateway operator issues
 # it along with the token; it is not something to invent locally.
 station_id = "tbilisi-base-1"
@@ -24,10 +45,12 @@ gateway_url = "wss://gateway.example.org/relay/v1"
 # over someone's shoulder, pasted into a support thread, or committed as an
 # example without leaking a credential. Keep the token file out of version
 # control - *.token is gitignored.
+# Relative to this file, so this is relay.token sitting beside relay.toml.
 token_path = "relay.token"
 
 # Where the durable queue lives. Telemetry accumulates here whenever the
 # uplink is down, and is deleted only once the Gateway confirms it is stored.
+# Relative to this file, like token_path.
 queue_path = "relay-queue.sqlite3"
 
 # The loopback socket QGroundControl forwards to.

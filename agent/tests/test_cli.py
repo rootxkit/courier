@@ -105,3 +105,39 @@ def test_the_default_config_path_is_relay_toml(
 
     assert main([]) == 2
     assert "relay.toml" in str(capture(capsys)[-1]["reason"])
+
+
+def test_a_config_elsewhere_finds_its_token_beside_itself(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The failure from the first local run, at the level it was hit.
+
+    token_path = "relay.token" used to resolve against the working directory,
+    so running the relay from anywhere but the config's own folder failed with
+    a message that pointed at the wrong place entirely.
+    """
+    station = tmp_path / "station"
+    station.mkdir()
+    (station / "relay.toml").write_text(VALID, encoding="utf-8")
+    (station / "relay.token").write_text("a-real-token", encoding="utf-8")
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    # Stop before the uplink: this test is about configuration, not networking.
+    started: dict[str, object] = {}
+
+    def fake_run(coro: object) -> None:
+        started["ran"] = True
+        getattr(coro, "close", lambda: None)()
+
+    monkeypatch.setattr("agent.__main__.asyncio.run", fake_run)
+
+    code = main(["--config", str(station / "relay.toml")])
+
+    assert code == 0, f"startup failed: {capture(capsys)}"
+    assert started.get("ran") is True
+    # The queue belongs beside the config, not in the shell's directory.
+    assert (station / "relay-queue.sqlite3").exists()
+    assert not (elsewhere / "relay-queue.sqlite3").exists()

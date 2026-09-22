@@ -249,3 +249,148 @@ def test_a_utf8_bom_token_does_not_become_an_invisible_prefix(
     path.write_text("secret-value", encoding="utf-8-sig")
 
     assert read_token(path) == "secret-value"
+
+
+# --- where relative paths point ---------------------------------------------
+#
+# Found on the first local run: token_path = "relay.token" resolved against the
+# process's working directory, so the relay started from one directory and
+# failed from another, with nothing in the message explaining why.
+
+
+def test_relative_paths_resolve_against_the_config_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`token_path = "relay.token"` means the file beside relay.toml."""
+    station = tmp_path / "station"
+    station.mkdir()
+    config_path = station / "relay.toml"
+    config_path.write_text(MINIMAL, encoding="utf-8")
+
+    # Start from somewhere else entirely, as a pilot in a shell would.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    config = load_config(config_path)
+
+    assert config.token_path == (station / "relay.token").resolve()
+    assert config.queue_path == (station / "relay-queue.sqlite3").resolve()
+
+
+def test_resolution_does_not_depend_on_the_working_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same file read from two directories must give the same answer."""
+    station = tmp_path / "station"
+    station.mkdir()
+    config_path = station / "relay.toml"
+    config_path.write_text(MINIMAL, encoding="utf-8")
+
+    monkeypatch.chdir(tmp_path)
+    from_here = load_config(config_path)
+    monkeypatch.chdir(station)
+    from_there = load_config(config_path)
+
+    assert from_here.token_path == from_there.token_path
+    assert from_here.queue_path == from_there.queue_path
+
+
+def test_relative_ca_path_resolves_too(tmp_path: Path) -> None:
+    station = tmp_path / "station"
+    station.mkdir()
+    config_path = station / "relay.toml"
+    config_path.write_text(MINIMAL + '\nca_path = "dev-ca.crt"\n', encoding="utf-8")
+
+    config = load_config(config_path)
+
+    assert config.ca_path == (station / "dev-ca.crt").resolve()
+
+
+def test_absolute_paths_are_left_alone(tmp_path: Path) -> None:
+    station = tmp_path / "station"
+    station.mkdir()
+    absolute = (tmp_path / "secrets" / "relay.token").resolve()
+    body = MINIMAL.replace(
+        'token_path = "relay.token"',
+        f"token_path = {str(absolute).replace(chr(92), '/')!r}",
+    )
+    config_path = station / "relay.toml"
+    config_path.write_text(body, encoding="utf-8")
+
+    assert load_config(config_path).token_path == absolute
+
+
+def test_a_subdirectory_path_resolves_relative_to_the_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    station = tmp_path / "station"
+    station.mkdir()
+    config_path = station / "relay.toml"
+    config_path.write_text(
+        MINIMAL.replace(
+            'token_path = "relay.token"', 'token_path = "secrets/relay.token"'
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    config = load_config(config_path)
+
+    assert config.token_path == (station / "secrets" / "relay.token").resolve()
+
+
+# --- Windows paths in TOML --------------------------------------------------
+
+BACKSLASH = chr(92)
+
+
+def test_a_backslash_windows_path_is_refused_with_guidance(tmp_path: Path) -> None:
+    """The error must name the cause, not just say "invalid escape".
+
+    A pilot pasting a path from Explorer gets backslashes. TOML reads them as
+    escape sequences, and tomllib's own message says nothing about paths.
+    """
+    body = MINIMAL.replace(
+        'token_path = "relay.token"',
+        f'token_path = "C:{BACKSLASH}Users{BACKSLASH}pilot{BACKSLASH}relay.token"',
+    )
+
+    with pytest.raises(ConfigurationError) as raised:
+        load_config(write(tmp_path, body))
+
+    message = str(raised.value)
+    assert "backslash" in message.lower()
+    assert "C:/Users/pilot/relay.token" in message, "must show the forward-slash form"
+    assert "single-quoted" in message, "must offer the literal-string form"
+
+
+def test_a_forward_slash_windows_path_is_accepted(tmp_path: Path) -> None:
+    body = MINIMAL.replace(
+        'token_path = "relay.token"', 'token_path = "C:/Users/pilot/relay.token"'
+    )
+
+    config = load_config(write(tmp_path, body))
+
+    assert config.token_path == Path("C:/Users/pilot/relay.token")
+
+
+def test_a_single_quoted_windows_path_is_accepted(tmp_path: Path) -> None:
+    """A TOML literal string takes backslashes exactly as written."""
+    literal = f"'C:{BACKSLASH}Users{BACKSLASH}pilot{BACKSLASH}relay.token'"
+    body = MINIMAL.replace('token_path = "relay.token"', f"token_path = {literal}")
+
+    config = load_config(write(tmp_path, body))
+
+    assert str(config.token_path).endswith("relay.token")
+    assert "Users" in str(config.token_path)
+
+
+def test_an_unrelated_toml_error_does_not_get_the_windows_hint(
+    tmp_path: Path,
+) -> None:
+    """The hint must not appear on every parse failure, or it becomes noise."""
+    with pytest.raises(ConfigurationError) as raised:
+        load_config(write(tmp_path, "station_id = = ="))
+
+    assert "backslash" not in str(raised.value).lower()

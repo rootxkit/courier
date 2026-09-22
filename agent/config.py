@@ -38,6 +38,29 @@ __all__ = ["RelayConfig", "load_config", "read_token"]
 # pathological stall drops datagrams rather than exhausting memory.
 DEFAULT_INTAKE_QUEUE_SIZE = 10000
 
+# Fields holding a filesystem path. A relative one is resolved against the
+# configuration file's own directory, not the process's working directory.
+_PATH_FIELDS = ("token_path", "queue_path", "ca_path")
+
+_BACKSLASH = chr(92)
+
+# Shown when TOML parsing fails on what looks like a pasted Windows path. By
+# far the most likely cause of a decode error on a ground station.
+_WINDOWS_PATH_HINT = """
+  A backslash in a double-quoted TOML string starts an escape sequence, so a
+  Windows path written like this is not valid TOML:
+
+      token_path = "C:\\Users\\pilot\\relay.token"
+
+  Use forward slashes, which Windows accepts everywhere:
+
+      token_path = "C:/Users/pilot/relay.token"
+
+  or a single-quoted literal string, where backslashes are taken as written:
+
+      token_path = 'C:\\Users\\pilot\\relay.token'
+"""
+
 
 class RelayConfig(BaseModel):
     """Validated relay configuration."""
@@ -105,6 +128,34 @@ def _describe(error: ValidationError, path: Path) -> str:
     return "\n".join(lines)
 
 
+def _resolve_paths(raw: dict[str, Any], base: Path) -> dict[str, Any]:
+    """Resolve relative paths against the configuration file's own directory.
+
+    A pilot writing `token_path = "relay.token"` means the file sitting next to
+    relay.toml. Resolving against the working directory instead makes the relay
+    start from one directory and fail from another, for a reason nothing in the
+    error message explains.
+    """
+    resolved = dict(raw)
+    for field in _PATH_FIELDS:
+        value = resolved.get(field)
+        if not isinstance(value, str):
+            continue
+        candidate = Path(value)
+        if not candidate.is_absolute():
+            resolved[field] = str((base / candidate).resolve())
+    return resolved
+
+
+def _toml_error_message(path: Path, text: str, error: Exception) -> str:
+    """Explain a TOML parse failure, and guess at the usual cause."""
+    message = f"{path} is not valid TOML: {error}"
+    looks_like_a_windows_path = "escape" in str(error).lower() or _BACKSLASH in text
+    if not looks_like_a_windows_path:
+        return message
+    return message + "\n" + _WINDOWS_PATH_HINT.rstrip()
+
+
 def load_config(path: Path) -> RelayConfig:
     """Read and validate a relay TOML file.
 
@@ -112,11 +163,11 @@ def load_config(path: Path) -> RelayConfig:
     reading this on a laptop gets a sentence, not a stack trace.
     """
     try:
-        # utf-8-sig, not utf-8: Notepad writes a byte-order mark, and a
-        # BOM makes tomllib fail with "Invalid statement (at line 1,
-        # column 1)" - unintelligible to the pilot who just saved the
-        # file. Identical to utf-8 when no BOM is present.
-        raw: dict[str, Any] = tomllib.loads(path.read_text(encoding="utf-8-sig"))
+        # utf-8-sig, not utf-8: Notepad writes a byte-order mark, and a BOM
+        # makes tomllib fail with "Invalid statement (at line 1, column 1)" -
+        # unintelligible to the pilot who just saved the file. Identical to
+        # utf-8 when no BOM is present.
+        text = path.read_text(encoding="utf-8-sig")
     except FileNotFoundError as error:
         raise ConfigurationError(
             f"no relay configuration at {path}. "
@@ -124,8 +175,15 @@ def load_config(path: Path) -> RelayConfig:
         ) from error
     except UnicodeDecodeError as error:
         raise ConfigurationError(f"{path} is not valid UTF-8 text") from error
+
+    try:
+        raw: dict[str, Any] = tomllib.loads(text)
     except tomllib.TOMLDecodeError as error:
-        raise ConfigurationError(f"{path} is not valid TOML: {error}") from error
+        raise ConfigurationError(_toml_error_message(path, text, error)) from error
+
+    # Relative paths belong to the file that names them, not to whichever
+    # directory the relay happened to be started from.
+    raw = _resolve_paths(raw, path.parent)
 
     try:
         return RelayConfig(**raw)
@@ -137,8 +195,8 @@ def read_token(path: Path) -> str:
     """Read the bearer token, or explain what is wrong with it."""
     try:
         # utf-8-sig for the same reason as the configuration: a BOM would
-        # otherwise become an invisible prefix on the bearer token, and
-        # the failure would surface as a 401 from the Gateway.
+        # otherwise become an invisible prefix on the bearer token, and the
+        # failure would surface as a 401 from the Gateway.
         token = path.read_text(encoding="utf-8-sig").strip()
     except FileNotFoundError as error:
         raise ConfigurationError(
