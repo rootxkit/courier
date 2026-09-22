@@ -39,7 +39,11 @@ done
 
 for pid in "${pids[@]}"; do
   [[ "${pid}" =~ ^[0-9]+$ ]] || continue
-  kill -0 "${pid}" 2>/dev/null && kill -9 "${pid}" 2>/dev/null || true
+  # An explicit if, not `A && B || C`: in that form C also runs when A
+  # succeeds and B fails, which is not what it reads as.
+  if kill -0 "${pid}" 2>/dev/null; then
+    kill -9 "${pid}" 2>/dev/null || true
+  fi
 done
 
 : > "${PID_FILE}"
