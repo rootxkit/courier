@@ -112,7 +112,11 @@ def load_config(path: Path) -> RelayConfig:
     reading this on a laptop gets a sentence, not a stack trace.
     """
     try:
-        raw: dict[str, Any] = tomllib.loads(path.read_text(encoding="utf-8"))
+        # utf-8-sig, not utf-8: Notepad writes a byte-order mark, and a
+        # BOM makes tomllib fail with "Invalid statement (at line 1,
+        # column 1)" - unintelligible to the pilot who just saved the
+        # file. Identical to utf-8 when no BOM is present.
+        raw: dict[str, Any] = tomllib.loads(path.read_text(encoding="utf-8-sig"))
     except FileNotFoundError as error:
         raise ConfigurationError(
             f"no relay configuration at {path}. "
@@ -132,7 +136,10 @@ def load_config(path: Path) -> RelayConfig:
 def read_token(path: Path) -> str:
     """Read the bearer token, or explain what is wrong with it."""
     try:
-        token = path.read_text(encoding="utf-8").strip()
+        # utf-8-sig for the same reason as the configuration: a BOM would
+        # otherwise become an invisible prefix on the bearer token, and
+        # the failure would surface as a 401 from the Gateway.
+        token = path.read_text(encoding="utf-8-sig").strip()
     except FileNotFoundError as error:
         raise ConfigurationError(
             f"no token file at {path}. The Gateway operator issues this; it is "

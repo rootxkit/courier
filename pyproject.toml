@@ -191,6 +191,10 @@ exclude_also = [
 #   agent/         84%
 #   mavlink_probe  36%
 #
+# Re-measured 2026-09-22 after covering the paths that had never executed:
+#   everything     72%
+#   agent/         94%
+#
 # The margin below each figure absorbs the integration tests, whose timing
 # decides whether a reconnect branch runs at all on a loaded CI machine. A gate
 # that fails at random teaches people to re-run the build, which is worse than
@@ -199,4 +203,4 @@ exclude_also = [
 # agent/ and tools/mavlink_probe.py are gated separately and more tightly by
 # `make cover`; see the Makefile. TASKS.md's 80% for gateway, dispatch and
 # airspace applies once those modules have behaviour (P1-02).
-fail_under = 68
+fail_under = 71

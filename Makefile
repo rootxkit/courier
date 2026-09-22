@@ -58,7 +58,7 @@ PROBE_OPTS := $(if $(PROBE_HOST),--host $(PROBE_HOST)) $(if $(PROBE_PORT),--port
 
 # Coverage ratchets, set just under the figures measured on 2026-09-21.
 # Raise them when coverage rises; lowering one needs a reason in the commit.
-COVERAGE_MIN_AGENT ?= 83
+COVERAGE_MIN_AGENT ?= 92
 COVERAGE_MIN_PROBE ?= 35
 
 .PHONY: help hooks up down stop ps logs reset psql psql-telemetry sim sim-stop \

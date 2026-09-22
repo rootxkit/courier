@@ -165,3 +165,87 @@ def test_the_example_does_not_contain_a_token() -> None:
 
     assert "token" not in config
     assert "token_path" in config
+
+
+# --- files a pilot might actually produce -----------------------------------
+#
+# TOML was chosen because a pilot edits it. Notepad's "Unicode" save option
+# writes UTF-16 with a BOM, which is a plausible way for this file to arrive
+# and an implausible thing for anyone to diagnose from a UnicodeDecodeError.
+
+
+def test_utf16_config_is_refused_with_a_readable_message(tmp_path: Path) -> None:
+    path = tmp_path / "relay.toml"
+    path.write_text(MINIMAL, encoding="utf-16")
+
+    with pytest.raises(ConfigurationError) as raised:
+        load_config(path)
+
+    message = str(raised.value)
+    assert "UTF-8" in message
+    assert str(path) in message, "the message must say which file"
+    assert "Traceback" not in message
+
+
+def test_utf16_token_is_refused_with_a_readable_message(tmp_path: Path) -> None:
+    path = tmp_path / "relay.token"
+    path.write_text("secret-value", encoding="utf-16")
+
+    with pytest.raises(ConfigurationError) as raised:
+        read_token(path)
+
+    message = str(raised.value)
+    assert "UTF-8" in message
+    assert str(path) in message
+
+
+def test_a_utf8_bom_is_tolerated(tmp_path: Path) -> None:
+    """Notepad's other option. This one is valid UTF-8 and should just work."""
+    path = tmp_path / "relay.toml"
+    path.write_text(MINIMAL, encoding="utf-8-sig")
+
+    assert load_config(path).station_id == "tbilisi-base-1"
+
+
+# --- the plaintext rule -----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "host", ["192.168.1.50", "10.0.0.7", "gateway.example.org", "8.8.8.8"]
+)
+def test_plaintext_to_a_remote_host_is_refused(tmp_path: Path, host: str) -> None:
+    """The bearer token is a request header; ws:// puts it on the wire."""
+    body = MINIMAL.replace("wss://gateway.example.org/relay/v1", f"ws://{host}:8443")
+
+    with pytest.raises(ConfigurationError) as raised:
+        load_config(write(tmp_path, body))
+
+    message = str(raised.value)
+    assert "plaintext" in message
+    assert "wss://" in message
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "[::1]", "127.0.0.5"])
+def test_plaintext_to_loopback_is_allowed(tmp_path: Path, host: str) -> None:
+    """A relay and a sink on one laptop never put the token on a wire."""
+    body = MINIMAL.replace("wss://gateway.example.org/relay/v1", f"ws://{host}:8443")
+
+    assert load_config(write(tmp_path, body)).uses_tls is False
+
+
+@pytest.mark.parametrize("host", ["192.168.1.50", "gateway.example.org"])
+def test_tls_to_a_remote_host_is_allowed(tmp_path: Path, host: str) -> None:
+    """The presence half: wss:// to the same hosts is exactly what we want."""
+    body = MINIMAL.replace("wss://gateway.example.org/relay/v1", f"wss://{host}:8443")
+
+    assert load_config(write(tmp_path, body)).uses_tls is True
+
+
+def test_a_utf8_bom_token_does_not_become_an_invisible_prefix(
+    tmp_path: Path,
+) -> None:
+    """A BOM on the token would surface as an unexplained 401 from the Gateway."""
+    path = tmp_path / "relay.token"
+    path.write_text("secret-value", encoding="utf-8-sig")
+
+    assert read_token(path) == "secret-value"
