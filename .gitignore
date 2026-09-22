@@ -11,6 +11,10 @@ sim/sitl.env
 relay.toml
 !relay.example.toml
 
+# Local scratch area for hands-on testing: configs, tokens, queues, logs.
+# Nothing here belongs in the repository; the test RECORD goes in docs/.
+local/
+
 # P1-01 hardware test artifacts: the development CA, the server certificate
 # it signs, and whatever the sink received. Keys especially - the dev CA can
 # sign anything the relay would then trust.
