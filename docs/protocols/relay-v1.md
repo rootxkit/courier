@@ -264,6 +264,61 @@ The Gateway should treat three consecutive missed `status` messages as the
 station being unreachable. Relying on TCP or WebSocket timeouts alone is not
 sufficient: a half-open connection can survive for minutes.
 
+### The relay's own detection, and the window where the two disagree
+
+The Gateway reaches its verdict in about 3 s. The relay cannot: a half-open
+link — bytes stop, the socket stays up, nothing is refused — looks alive until
+a ping goes unanswered.
+
+**A relay must detect an unresponsive uplink and begin reconnecting within
+25 seconds.** Detection takes:
+
+```
+detection  = (time to the next ping) + ping_timeout + close_timeout
+worst case = ping_interval + ping_timeout + close_timeout
+```
+
+`close_timeout` belongs in that sum because the close handshake waits for a
+close frame that a dead link can never deliver. It is a third of the budget and
+the term most easily forgotten.
+
+Defaults are **10 s / 10 s / 5 s**, all three configurable. Measured against a
+TCP proxy that stalls a connection without closing it: 23.0 s for these values,
+against 48 s for the websockets library defaults of 20/20/10. The measurement
+table is in `docs/runbooks/p1-01-test-records.md`.
+
+**So there is a window, up to 25 s long, in which the two components hold
+different beliefs about the same link:**
+
+```
+t = 0 s     the link goes dead
+t ~ 3 s     Gateway: station unreachable
+t ~ 25 s    relay: gives up, reconnects
+t ~ 30 s    P7-01: the operator is alerted
+```
+
+That disagreement is acceptable and must be understood rather than designed
+away. During it:
+
+- **No data is at risk.** No acknowledgement can arrive through a dead link, so
+  the relay deletes nothing. The queue grows, which is correct behaviour.
+- **The relay is still receiving.** Intake is independent of the uplink, so
+  telemetry continues to reach the disk at full rate.
+- **What is lost is time**, not telemetry: up to 25 s before the relay begins
+  reconnecting and the backlog starts draining.
+
+The sum of the three settings must stay **below the 30 s link-loss threshold in
+P7-01**. Not because 25 s beats an alert — the Gateway's verdict arrives long
+before either — but because the relay must have finished deciding before the
+operator is told. An operator alerted that a link is down while the relay still
+believes it is up is a third state, and nobody has designed for it.
+
+**This has a consequence at the console**, and it is a requirement on the
+Gateway rather than on this protocol: during the window the Gateway reports the
+station as unreachable while the relay is alive and buffering correctly. The
+console must not imply telemetry is being lost, because it is not. See P1-02
+and P6-03.
+
 ## 9. Clocks
 
 `recv_utc_ns` comes from the ground PC's wall clock, which **may be wrong** —

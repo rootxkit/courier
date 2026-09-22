@@ -7,6 +7,67 @@ written down is a failure that gets rediscovered later, at worse cost.
 
 ---
 
+## 2026-09-22 — half-open uplink detection, measured
+
+Not a runbook procedure: a bench measurement made with the TCP proxy fixture in
+`agent/tests/blackhole.py`, which stalls a connection without closing it. This
+is the case a pulled cable produces and Procedure B does not — a stopped
+receiver refuses the connection immediately, while a dead link is silent.
+
+**Method.** A WebSocket client through the proxy to a local server; the
+blackhole engaged; time until the client raised `ConnectionClosed`. The stall
+was placed at two points in the ping cycle, because where it lands changes the
+answer by up to a full `ping_interval`.
+
+| `ping_interval` | `ping_timeout` | `close_timeout` | stall lands | detected |
+|---|---|---|---|---|
+| 20 | 20 | 10 | just after a ping | **49.5 s** |
+| 20 | 20 | 10 | late in the cycle | 35.0 s |
+| 10 | 10 | 5 | just after a ping | 24.5 s |
+| 5 | 5 | 2 | just after a ping | 11.5 s |
+| 5 | 5 | 2 | late in the cycle | 8.0 s |
+
+The formula is exact — predicted 50 / 25 / 12, measured 49.5 / 24.5 / 11.5:
+
+```
+detection  = (time to the next ping) + ping_timeout + close_timeout
+worst case = ping_interval + ping_timeout + close_timeout
+```
+
+`close_timeout` is in the sum because the close handshake waits for a close
+frame a dead link can never deliver. It is a third of the budget, and the term
+most easily forgotten.
+
+**End to end through the relay**, with the full stack and a live UDP source:
+
+| Settings | Detection |
+|---|---|
+| 20 / 20 / 10 (websockets defaults, as shipped before) | **48.0 s** |
+| 10 / 10 / 5 (now the default) | **23.0 s** |
+| 5 / 5 / 2 (used by the fast test) | 9.8 s |
+
+Cause in the relay's log: `keepalive ping timeout`, then `timed out while
+closing connection`.
+
+**Two fixture defects found while measuring**, both of which would have
+produced a plausible wrong number:
+
+1. The proxy first let the far end's **close** through the blackhole. When the
+   sink's own keepalive fired first, the relay received an immediate TCP close
+   — so the number measured was the sink's timeout, not the relay's. A pulled
+   cable delivers no FIN; the fixture now holds closes too.
+2. Bytes are **held, not dropped**. Dropping would corrupt the WebSocket stream
+   and the relay would reconnect for the wrong reason.
+
+**Caveat.** Loopback. A real link adds RTT, and a cable pull may be detected
+sooner because the interface going down can fail pending sends outright. These
+figures are the pessimistic case, which is the right one to design against.
+
+Recorded in `relay-v1.md` §8 as a bounded requirement: detect within 25 s,
+defaults 10 / 10 / 5, sum required to stay below P7-01's 30 s.
+
+---
+
 ## 2026-09-22 — Procedure B (stop the receiver), local loopback — **PASS**
 
 **Procedure:** B — the receiver is stopped and restarted, rather than the
