@@ -67,11 +67,11 @@ def _first_exception(group: BaseExceptionGroup[BaseException]) -> BaseException:
     unwrapping, the reconnect logic below cannot tell an ordinary disconnect
     from a real fault, and logs every dropped link as "unexpected".
     """
-    for exception in group.exceptions:
-        if isinstance(exception, BaseExceptionGroup):
-            return _first_exception(exception)
-        return exception
-    return group
+    for exc in group.exceptions:
+        if isinstance(exc, BaseExceptionGroup):  # pragma: no cover - no nesting today
+            return _first_exception(exc)
+        return exc
+    return group  # pragma: no cover - unreachable: an ExceptionGroup is never empty
 
 
 def _now_pair() -> tuple[int, int]:

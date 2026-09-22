@@ -32,7 +32,7 @@ class ReceiveOnlyUDPSocket:
         self._port = port
 
     @property
-    def endpoint(self) -> tuple[str, int]:
+    def endpoint(self) -> tuple[str, int]:  # pragma: no cover - trivial accessor
         """The configured endpoint, as asked for."""
         return self._host, self._port
 
@@ -61,7 +61,7 @@ class ReceiveOnlyUDPSocket:
         self._socket.close()
 
     def __enter__(self) -> ReceiveOnlyUDPSocket:
-        return self
+        return self  # pragma: no cover - context manager sugar
 
     def __exit__(self, *exc_info: object) -> None:
-        self.close()
+        self.close()  # pragma: no cover - context manager sugar

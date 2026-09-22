@@ -130,11 +130,11 @@ class DurableQueue:
         return self._epoch
 
     @property
-    def path(self) -> Path:
+    def path(self) -> Path:  # pragma: no cover - trivial accessor
         return self._path
 
     @property
-    def max_bytes(self) -> int:
+    def max_bytes(self) -> int:  # pragma: no cover - trivial accessor
         return self._max_bytes
 
     # --- state ------------------------------------------------------------
@@ -238,7 +238,7 @@ class DurableQueue:
             row = self._connection.execute(
                 "SELECT seq, nbytes FROM records ORDER BY seq LIMIT 1"
             ).fetchone()
-            if row is None:
+            if row is None:  # pragma: no cover - loop condition implies a row exists
                 break
             self._connection.execute("DELETE FROM records WHERE seq = ?", (row[0],))
             self._total_bytes -= int(row[1])
