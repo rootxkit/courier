@@ -76,7 +76,10 @@ fi
 SITL_SPACING_M="${SITL_SPACING_M:-25}"
 SITL_SYSID_BASE="${SITL_SYSID_BASE:-1}"
 SITL_OUT_PORT_BASE="${SITL_OUT_PORT_BASE:-14560}"
-SITL_QGC_PORT="${SITL_QGC_PORT:-14550}"
+# `-` and not `:-`: an explicitly empty SITL_QGC_PORT means "no QGC to fan out
+# to", which is what CI sets. With `:-` the empty string is replaced by the
+# default and every vehicle gets a --out to 14550 that nobody is listening on.
+SITL_QGC_PORT="${SITL_QGC_PORT-14550}"
 SITL_FRAME="${SITL_FRAME:-quad}"
 SITL_SPEEDUP="${SITL_SPEEDUP:-1}"
 SITL_TCP_PORT_BASE="${SITL_TCP_PORT_BASE:-5760}"
