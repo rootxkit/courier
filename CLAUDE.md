@@ -153,6 +153,15 @@ Do not add a dependency without a one-line justification in the commit body.
   a WebSocket close so the relay's fatal-auth path never ran, and a relay `gap`
   that shipped unexecuted behind `assert gaps == []`. All three had passing
   tests. Branch coverage (`make cover`) is the backstop, not the rule.
+- **Never write a wire-format offset from memory.** Derive it from pymavlink —
+  from `ordered_fieldnames`, or by diffing two frames that differ in one field
+  — and pin it with a test that derives it the same way. An offset that is
+  wrong in a plausible way produces confident, meaningless output rather than
+  an error.
+  Three times in one session: `param_id` read at PARAM_VALUE offset 4 instead
+  of 8, payload bounds counted back from the end of a signed v2 frame, and the
+  MAVLink sequence byte read at offset 2 for v2 frames where it is at 4 and
+  offset 2 is a constant. Every one of them returned a plausible answer.
 
 ## What not to do
 

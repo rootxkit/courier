@@ -96,6 +96,50 @@ records file, and that matched the relay's `oldest_seq_held` exactly. Resumption
 came from disk, not from memory. That is the property Procedure B exists to
 test, and everything else in the report follows from it.
 
+### Upstream integrity — `UPSTREAM: CLEAN`
+
+Run afterwards over the stored capture with `python -m tools.analyze_capture`:
+
+```
+  source             frames    lost   loss %   gaps
+  1/1                 57301       0   0.000%      0
+  255/190               702       0   0.000%      0
+
+UPSTREAM: CLEAN - no MAVLink sequence gaps. Nothing was lost
+between QGC and the relay during this capture.
+```
+
+Nothing was lost between QGC and the relay — a link the relay's own counters
+cannot see at all.
+
+**QGC sent exactly one MAVLink frame per UDP datagram**, a constant 1.00 across
+all 71 buckets. That is worth recording, because it means a dropped datagram is
+exactly one lost frame: on this setup MAVLink-sequence analysis is a direct
+measurement of loss rather than an approximation of it.
+
+It is an observed behaviour of this QGC build, not a guarantee. A different
+version, or `mavlink-router` at Stage 1, may coalesce. `analyze_capture.py`
+therefore counts frames per datagram rather than assuming the ratio, and the
+frames-per-second column is computed from frames, not datagrams — a capture
+where the ratio changes will still be measured correctly, and the ratio column
+will say so.
+
+**Frame rate was flat at 82.3–83.8 frames/s across the whole capture**,
+including the outage:
+
+```
+  time        datagrams/s   frames/s  frames/datagram
+  16:16:52           82.5       82.5             1.00
+  16:17:02           82.9       82.9             1.00   <-- outage
+  16:18:32           82.5       82.5             1.00   <-- outage
+  16:19:32           82.5       82.5             1.00   <-- outage
+  16:19:42           82.7       82.7             1.00
+```
+
+The relay kept receiving at full rate while disconnected. An earlier apparent
+variation across the outage was an artefact of measuring delivery to the sink;
+these buckets are keyed on the time the relay received each datagram.
+
 ### Criteria
 
 | Criterion | Result |
