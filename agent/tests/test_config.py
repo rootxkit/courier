@@ -6,6 +6,7 @@ with a debugger, so "what is wrong and where" matters more than usual.
 
 from __future__ import annotations
 
+import sys
 import tomllib
 from pathlib import Path
 
@@ -366,6 +367,28 @@ def test_a_backslash_windows_path_is_refused_with_guidance(tmp_path: Path) -> No
 
 
 def test_a_forward_slash_windows_path_is_accepted(tmp_path: Path) -> None:
+    """The point is that it PARSES; the backslash form does not.
+
+    Whether a drive-letter path counts as absolute is the platform's business.
+    On Windows it is, and is left alone. On Linux it is not, so it is resolved
+    against the configuration file like any other relative path - which is the
+    least-wrong answer, since the path cannot exist there either way and the
+    resulting error names it in full.
+    """
+    body = MINIMAL.replace(
+        'token_path = "relay.token"', 'token_path = "C:/Users/pilot/relay.token"'
+    )
+
+    config = load_config(write(tmp_path, body))
+
+    assert config.token_path.as_posix().endswith("C:/Users/pilot/relay.token")
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="drive letters are only absolute on Windows"
+)
+def test_a_drive_letter_path_is_absolute_on_windows(tmp_path: Path) -> None:
+    """On the platform a pilot actually uses, it is left exactly as written."""
     body = MINIMAL.replace(
         'token_path = "relay.token"', 'token_path = "C:/Users/pilot/relay.token"'
     )
