@@ -51,7 +51,7 @@ Stated first, because scope creep here is expensive.
   them; it does not compute them.
 - **No mission planning or validation.** That is P3.
 - **No direct UDP ingest as the primary path.** A UDP listener stays for SITL
-  and bench work (see §9), but the production path is relay-v1.
+  and bench work (see §11), but the production path is relay-v1.
 
 ## 3. Relationship to `tools/relay_sink.py`
 
@@ -107,7 +107,7 @@ service:
    messages and record them as events. These losses have no `gap` and no
    sequence discontinuity; the delta is the only evidence they happened.
 8. **Three consecutive missed `status` messages means unreachable**, surfaced
-   differently from a rising `last_datagram_age_ms`. See §7.
+   differently from a rising `last_datagram_age_ms`. See §9.
 9. **Parse MAVLink only after all of the above.** The transport layer does not
    need to understand the payload, and mixing the two makes a parsing bug into
    a transport failure.
@@ -132,9 +132,9 @@ Per the P1-07 refinement recorded in `relay-v1.md` §3:
 - A frame whose SYSID is not assigned to the presenting station is rejected and
   rate-limit-logged. A compromised ground station cannot mint vehicles it was
   never assigned.
-- Direct UDP sources (§9) keep their own path and are never production.
+- Direct UDP sources (§11) keep their own path and are never production.
 
-Token storage, rotation and revocation are an open question (§10).
+Token storage, rotation and revocation are an open question (§12).
 
 ## 6. Source classification and the hot path
 
@@ -216,7 +216,72 @@ Concretely:
 - Rate is a *measurement to report* (P1-09 link quality), never an input to
   correctness.
 
-## 7. Station state for the console
+## 7. Vehicle identity: binding a source to a drone
+
+**A SYSID is a flight-time address, not an identity.** It is set by a
+parameter, it is reused across airframes, and two aircraft that never fly
+together may share one for years. `drone_state.drone_id` is a fleet identity
+and must not be inferred from an address.
+
+The mapping is an explicit binding with validity:
+
+```
+(station_id, sysid, compid)  ->  drone_id
+                                 bound_from   TIMESTAMPTZ
+                                 bound_until  TIMESTAMPTZ NULL
+```
+
+Rules:
+
+- **`drone_state` always stores `drone_id`**, never a raw SYSID.
+- **The binding is resolved at the record's timestamp, not at ingest time.**
+  This matters because of the relay: a backlog replayed after a two-hour
+  outage must resolve against the binding that was in effect when the
+  telemetry was *captured*, not when it happened to arrive. Resolving at
+  ingest would silently attribute an hour of one airframe's flight to
+  whichever drone holds the address now.
+- **An unknown or unbound source is archived, never written to
+  `drone_state`.** It is surfaced on the console as an *unclaimed source* so
+  it is visible rather than silently dropped.
+- **No auto-registration.** A misconfigured aircraft must not walk itself into
+  the fleet. Binding is a deliberate act.
+- **Reassigning a SYSID closes one binding and opens another.** Overlapping
+  bindings for the same key are a constraint violation, enforced in the
+  database rather than in application code.
+
+An unclaimed source is a normal condition during setup and a serious one in
+flight, so it is an event and a console state, not a log line.
+
+## 8. Two stations relaying one vehicle
+
+**Accepted, not rejected.** Two ground stations in radio range of one aircraft
+will both forward its frames, and that is the normal state during a handover
+between stations. It is also what Stage 2 looks like when an aircraft is
+reachable on both the 915 MHz radio and LTE at once. Rejecting the second
+station would mean deliberately severing a working link to preserve a tidy
+invariant.
+
+- **One `drone_state` row per vehicle.** Last write wins, ordered by the
+  *record's* timestamp — not by arrival.
+- **The archive keeps both copies**, each tagged with the station that
+  delivered it. They are not duplicates: two independent observations of the
+  same instant, and after an incident the difference between them is evidence
+  about the links.
+- Dedupe stays per station, on `(station_id, epoch, seq)`. Two stations
+  relaying the same frame produce two records, correctly.
+
+**Where this gets hard is clocks.** Two laptops do not agree, and
+last-write-wins against a wrong clock silently reorders state — a stale
+position from the station whose clock runs fast would overwrite a fresh one.
+The material for solving it already exists: `relay-v1.md` §9's monotonic/UTC
+pairs in `hello` and `status` allow each station's offset to be estimated, and
+`SYSTEM_TIME` — observed at 3 Hz in ADR-001, carrying GPS-derived time — is the
+eventual authority, being the one clock both stations share.
+
+**The mechanism is deliberately not specified here.** §12 question 8 records
+the constraints it has to satisfy.
+
+## 9. Station state for the console
 
 This is the requirement that follows from `relay-v1.md` §8, and it is the one
 most easily got wrong.
@@ -249,7 +314,7 @@ P6-03 carries the console half of this: alert text must not imply loss that has
 not happened. A pilot who learns the alerts overstate things will discount the
 one that does not.
 
-## 8. Storage
+## 10. Storage
 
 - **Hot path → TimescaleDB** `drone_state` hypertable (P1-04 owns batching,
   chunking and retention).
@@ -264,7 +329,7 @@ Units and conventions are not negotiable here: SI at the parser boundary
 timestamps `TIMESTAMPTZ` in UTC, all geometry SRID 4326. P1-03 owns the
 conversion and its property tests.
 
-## 9. Direct UDP ingest
+## 11. Direct UDP ingest
 
 A UDP listener is retained for SITL and bench work, on
 `MAVLINK_BIND_PORT`. It shares the parsing, classification and hot-path code
@@ -279,7 +344,7 @@ Note that the Gateway's UDP socket is *read-only by the same rule as the
 relay's*, and binds exclusively — two readers of one port split the stream and
 neither can tell.
 
-## 10. Open questions
+## 12. Open questions
 
 Listed, not resolved. Each needs an answer before the code that depends on it.
 
@@ -292,27 +357,35 @@ Listed, not resolved. Each needs an answer before the code that depends on it.
 3. **Dedupe index cost.** `(station_id, epoch, seq)` over months of records is
    a large index. Is dedupe bounded to a recent window, and if so what happens
    to a relay replaying a very old backlog?
-4. **`drone_id` binding.** `drone_state.drone_id` is a fleet identity;
-   telemetry arrives keyed by `(sysid, compid)`. Where is the mapping, and what
-   happens when a SYSID is reassigned between airframes?
-5. **Multiple stations relaying the same vehicle.** Two ground stations in
-   radio range of one aircraft both forward its frames. Dedupe is per station,
-   so `drone_state` would get both. Is that a merge, a policy rejection, or a
-   configuration error to alert on?
-6. **Clock correction.** `relay-v1.md` §9 provides the monotonic/UTC pairs to
+4. **Clock correction.** `relay-v1.md` §9 provides the monotonic/UTC pairs to
    estimate a station's clock offset, and notes `SYSTEM_TIME` carries GPS time
    at 3 Hz. Which timestamp is authoritative for `drone_state.ts`, and is the
    correction applied at write time or at read time?
-7. **Backpressure.** If TimescaleDB is slow or down, what does the Gateway do?
+5. **Backpressure.** If TimescaleDB is slow or down, what does the Gateway do?
    It must not acknowledge what it has not stored, so the relay's queue becomes
    the buffer — which is correct, but the behaviour should be deliberate and
    bounded rather than emergent.
-8. **Station-to-vehicle policy source.** Database table, configuration, or
+6. **Station-to-vehicle policy source.** Database table, configuration, or
    derived from the `drones` registry's `home_base_id`?
-9. **Does a `component` ever need a row of its own?** A gimbal's attitude is
+7. **Does a `component` ever need a row of its own?** A gimbal's attitude is
    archived today. If P8 wants it live, where does it go — it is not a drone.
+8. **Ordering writes from two stations whose clocks disagree.** §8 accepts two
+   stations relaying one vehicle, with last-write-wins by the record's
+   timestamp. Two laptops do not agree, so a station whose clock runs fast can
+   overwrite fresh state with stale state, silently and without any signal that
+   it happened. The constraints on whatever solves this:
+   - `relay-v1.md` §9's monotonic/UTC pairs in `hello` and `status` allow each
+     station's clock offset to be estimated, and a step to be distinguished
+     from elapsed time — the monotonic clock cannot jump.
+   - `SYSTEM_TIME` carries GPS-derived time and was observed at 3 Hz in
+     ADR-001. It is the eventual authority: the one clock both stations share,
+     because it comes from the aircraft rather than from either laptop.
+   - Reordering must be detectable, not merely avoided. A write rejected as
+     stale is information about a station's clock and belongs in `events`.
+   Related to question 4, which asks which timestamp is authoritative at all;
+   this one asks how to order two of them against each other.
 
-## 11. Acceptance
+## 13. Acceptance
 
 From `TASKS.md` P1-02, plus what this specification adds:
 
@@ -320,6 +393,11 @@ From `TASKS.md` P1-02, plus what this specification adds:
 - No non-vehicle endpoint is ever registered as a drone.
 - A station that goes unreachable is never reported as losing data unless a
   gap or a drop counter says so.
+- An unbound `(station_id, sysid, compid)` is archived and surfaced as an
+  unclaimed source, and never produces a `drone_state` row.
+- A backlog replayed after an outage resolves its binding at the record's
+  timestamp, so telemetry captured before a SYSID was reassigned is attributed
+  to the airframe that produced it.
 - A relay driven against the Gateway satisfies the same criteria as the P1-01
   hardware test: one epoch, zero missing seqs, zero drops, duplicates
   deduplicated.
