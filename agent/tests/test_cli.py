@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from agent.__main__ import main
+from agent.udp import ReceiveOnlyUDPSocket
 
 VALID = """
 station_id = "cli-test"
@@ -141,3 +142,32 @@ def test_a_config_elsewhere_finds_its_token_beside_itself(
     # The queue belongs beside the config, not in the shell's directory.
     assert (station / "relay-queue.sqlite3").exists()
     assert not (elsewhere / "relay-queue.sqlite3").exists()
+
+
+def test_a_second_relay_refuses_to_start_on_a_held_port(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Starting a second relay must fail, not silently split the stream.
+
+    Two relays were found sharing UDP 14445 during the 2026-09-22 Procedure B
+    run, each receiving an arbitrary share of the forwarded datagrams. Neither
+    could tell, and the symptom is indistinguishable from packet loss.
+    """
+    holder = ReceiveOnlyUDPSocket("127.0.0.1", 0, timeout_s=0.01)
+    try:
+        port = holder.bound_endpoint[1]
+        station = tmp_path / "station"
+        station.mkdir()
+        (station / "relay.toml").write_text(
+            VALID + f"\nbind_port = {port}\n", encoding="utf-8"
+        )
+        (station / "relay.token").write_text("a-real-token", encoding="utf-8")
+
+        code = main(["--config", str(station / "relay.toml")])
+    finally:
+        holder.close()
+
+    assert code == 2
+    reason = str(capture(capsys)[-1]["reason"])
+    assert str(port) in reason
+    assert "another process" in reason.lower()

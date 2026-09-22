@@ -17,6 +17,7 @@ from pathlib import Path
 from agent.config import load_config, read_token
 from agent.queue import DurableQueue
 from agent.relay import RELAY_VERSION, Relay
+from agent.udp import PortInUseError
 from common.config import ConfigurationError
 from common.logging import bind, configure_logging, get_logger
 
@@ -72,7 +73,15 @@ def main(argv: list[str] | None = None) -> int:
         },
     )
 
-    udp = relay.start_intake()
+    try:
+        udp = relay.start_intake()
+    except PortInUseError as error:
+        # Two readers of one UDP port split the stream between them on Windows,
+        # and neither can tell. Refusing to start is the only safe answer.
+        bound.error("cannot start", extra={"reason": str(error)})
+        durable_queue.close()
+        return 2
+
     try:
         asyncio.run(relay.run_uplink())
     except KeyboardInterrupt:

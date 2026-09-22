@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 from agent import udp
-from agent.udp import ReceiveOnlyUDPSocket
+from agent.udp import PortInUseError, ReceiveOnlyUDPSocket
 
 AGENT_ROOT = Path(udp.__file__).resolve().parent
 
@@ -150,3 +150,86 @@ def test_receive_returns_the_datagram_verbatim() -> None:
         assert receiver.receive() == payload
     finally:
         receiver.close()
+
+
+# --- exclusive bind ---------------------------------------------------------
+#
+# Two relays were found splitting the forwarded stream during the 2026-09-22
+# Procedure B run: the socket set SO_REUSEADDR, which on Windows lets a second
+# process bind the same UDP port. The OS then hands each an arbitrary share of
+# the datagrams and neither can tell it is only seeing part of the stream -
+# indistinguishable from packet loss.
+#
+# These run on Linux in CI, where the absence of SO_REUSEADDR is already enough
+# for the second bind to fail, and on Windows, where SO_EXCLUSIVEADDRUSE is.
+
+
+def test_a_second_bind_on_the_same_port_is_refused() -> None:
+    """The runbook's warning, made a guarantee."""
+    first = ReceiveOnlyUDPSocket("127.0.0.1", 0, timeout_s=0.01)
+    try:
+        port = first.bound_endpoint[1]
+
+        with pytest.raises(PortInUseError) as raised:
+            ReceiveOnlyUDPSocket("127.0.0.1", port, timeout_s=0.01)
+    finally:
+        first.close()
+
+    message = str(raised.value)
+    assert str(port) in message, "the error must name the port"
+    assert "another process" in message.lower()
+    assert "mavlink_probe" in message, "it must name the other likely holder"
+
+
+def test_a_raw_socket_cannot_steal_the_port_either() -> None:
+    """Not just two relays: the probe, or anything else, is refused too."""
+    relay_socket = ReceiveOnlyUDPSocket("127.0.0.1", 0, timeout_s=0.01)
+    try:
+        port = relay_socket.bound_endpoint[1]
+        intruder = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                intruder.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            with pytest.raises(OSError):
+                intruder.bind(("127.0.0.1", port))
+        finally:
+            intruder.close()
+    finally:
+        relay_socket.close()
+
+
+def test_the_port_is_released_on_close() -> None:
+    """The presence half: refusing forever would be its own bug."""
+    first = ReceiveOnlyUDPSocket("127.0.0.1", 0, timeout_s=0.01)
+    port = first.bound_endpoint[1]
+    first.close()
+
+    second = ReceiveOnlyUDPSocket("127.0.0.1", port, timeout_s=0.01)
+    try:
+        assert second.bound_endpoint[1] == port
+    finally:
+        second.close()
+
+
+def test_a_failed_bind_does_not_leak_the_socket() -> None:
+    """The half-built socket is closed before the error is raised."""
+    first = ReceiveOnlyUDPSocket("127.0.0.1", 0, timeout_s=0.01)
+    try:
+        port = first.bound_endpoint[1]
+        for _ in range(20):
+            with pytest.raises(PortInUseError):
+                ReceiveOnlyUDPSocket("127.0.0.1", port, timeout_s=0.01)
+    finally:
+        first.close()
+
+
+def test_the_relay_does_not_ask_for_reuseaddr() -> None:
+    """Pin the absence: re-adding it would silently restore the split-stream bug.
+
+    The constant may still be named in a comment explaining why it is absent;
+    what must not come back is the setsockopt call.
+    """
+    source = Path(udp.__file__).read_text(encoding="utf-8")
+
+    assert "SO_REUSEADDR, 1)" not in source
+    assert "SO_EXCLUSIVEADDRUSE" in source
