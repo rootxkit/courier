@@ -68,7 +68,7 @@ def encode_records(records: Iterable[Record]) -> bytes:
                 f"datagram of {len(record.datagram)} bytes exceeds the "
                 f"{MAX_DATAGRAM_BYTES}-byte length field"
             )
-        if record.seq < 0:
+        if record.seq < 0:  # pragma: no cover - seq comes from a u64 counter we own
             raise FramingError(f"seq must be unsigned, got {record.seq}")
         chunks.append(
             _HEADER.pack(record.seq, record.recv_utc_ns, len(record.datagram))

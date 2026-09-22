@@ -257,6 +257,28 @@ def classify_absences(seen: set[int]) -> tuple[set[int], set[int]]:
     return REQUIRED_STREAMS - seen, EVENT_DRIVEN - seen
 
 
+def bind_exclusive(sock: socket.socket, host: str, port: int) -> None:
+    """Bind so that a second process cannot take the same port.
+
+    Deliberately not SO_REUSEADDR. On Windows that option lets two
+    processes bind the same UDP port, after which the OS splits the
+    datagrams between them arbitrarily - each reader silently sees part of
+    the stream and reports it as if it were the whole. That is
+    indistinguishable from packet loss, and it is exactly what this tool
+    exists to measure.
+
+    SO_EXCLUSIVEADDRUSE is the Windows opt-out. On POSIX, simply not asking
+    for SO_REUSEADDR already makes the second bind fail.
+
+    The relay applies the same rule in agent/udp.py. The two are kept
+    separate because listen mode must run on a ground-station Python with
+    nothing but the standard library.
+    """
+    if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    sock.bind((host, port))
+
+
 def payload_of(frame: bytes) -> bytes | None:
     """Return a frame's payload, or None if the frame is unusable.
 
@@ -350,12 +372,16 @@ def split_frames(buf: bytes) -> list[bytes]:
 
 def cmd_listen(args: argparse.Namespace) -> int:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
-        sock.bind((args.host, args.port))
+        bind_exclusive(sock, args.host, args.port)
     except OSError as exc:
         print(f"Cannot bind {args.host}:{args.port} -- {exc}", file=sys.stderr)
-        print("Another listener may already hold the port.", file=sys.stderr)
+        print(
+            "Another process already holds that port. Only one reader of the "
+            "forwarded stream may run at a time: stop the ground relay "
+            "(python -m agent) or any other probe first.",
+            file=sys.stderr,
+        )
         return 2
     sock.settimeout(1.0)
 
@@ -650,11 +676,15 @@ def cmd_roundtrip(args: argparse.Namespace) -> int:
         return 2
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
-        sock.bind((args.host, args.port))
+        bind_exclusive(sock, args.host, args.port)
     except OSError as exc:
         print(f"Cannot bind {args.host}:{args.port} -- {exc}", file=sys.stderr)
+        print(
+            "Another process already holds that port. Stop the ground relay "
+            "(python -m agent) or any other probe first.",
+            file=sys.stderr,
+        )
         return 2
     sock.settimeout(1.0)
 

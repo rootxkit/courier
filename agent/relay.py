@@ -67,11 +67,11 @@ def _first_exception(group: BaseExceptionGroup[BaseException]) -> BaseException:
     unwrapping, the reconnect logic below cannot tell an ordinary disconnect
     from a real fault, and logs every dropped link as "unexpected".
     """
-    for exception in group.exceptions:
-        if isinstance(exception, BaseExceptionGroup):
-            return _first_exception(exception)
-        return exception
-    return group
+    for exc in group.exceptions:
+        if isinstance(exc, BaseExceptionGroup):  # pragma: no cover - no nesting today
+            return _first_exception(exc)
+        return exc
+    return group  # pragma: no cover - unreachable: an ExceptionGroup is never empty
 
 
 def _now_pair() -> tuple[int, int]:
@@ -276,6 +276,11 @@ class Relay:
                 url,
                 additional_headers={"Authorization": f"Bearer {self._token}"},
                 ssl=self._ssl_context(),
+                # A half-open uplink is only detectable from missing pongs.
+                # These three decide how long that takes; see RelayConfig.
+                ping_interval=self._config.uplink_ping_interval_s,
+                ping_timeout=self._config.uplink_ping_timeout_s,
+                close_timeout=self._config.uplink_close_timeout_s,
             )
         except websockets.InvalidStatus as error:
             if error.response.status_code in (401, 403):

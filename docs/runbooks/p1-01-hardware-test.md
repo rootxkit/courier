@@ -217,7 +217,34 @@ What each line has to say for the test to have passed:
 | `drops intake` | **0** | The relay could not write to disk fast enough. Investigate before flying |
 | `drops cap` | **0** | Same as `gaps` |
 | `relay restarts` | **0** | The relay process died and restarted. Records in its memory at that moment were lost — find out why it died |
+| `UPSTREAM: CLEAN` (analyze_capture) | **yes on USB** | MAVLink sequence gaps mean frames were lost between QGC and the relay, which the sink report cannot see |
 | `seq range` starting at 0 | **yes** | A first sequence above 0 means an earlier epoch's data is in this directory, or records were lost before the receiver ever saw them |
+
+### Then check upstream integrity
+
+The sink report covers relay to sink. It says nothing about QGC to relay, and
+the relay's own counters cannot: `dropped_intake_total` counts datagrams the
+relay took off the socket and could not hand on, but one the OS discarded from
+the UDP receive buffer before `recvfrom` was never counted anywhere.
+
+Every stored record still holds the MAVLink frames as they arrived, and MAVLink
+carries a per-`(sysid, compid)` sequence byte. A hole in it is loss upstream of
+the relay's queue.
+
+    python -m tools.analyze_capture local/sink-data --bucket-seconds 10
+
+A pass needs **`UPSTREAM: CLEAN`** — zero MAVLink sequence gaps on every
+source. On a USB link there is no radio to lose frames, so any gap is loss
+between QGC and the relay.
+
+Over a radio link, expect some loss and record the percentage rather than
+demanding zero: that is the radio, not the software, and it is the number
+P1-01b's stream-rate budget has to live within.
+
+The frames-per-second buckets are the other half. A steady rate across the
+outage confirms the relay kept receiving while disconnected; a dip during the
+outage would mean the relay stopped taking datagrams while it was busy
+reconnecting, which would be a real defect.
 
 Record the report, the two timestamps from steps 2 and 4, and the QGC version
 in the test notes. Then update P1-01 in `TASKS.md`.

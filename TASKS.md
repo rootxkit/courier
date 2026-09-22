@@ -69,7 +69,7 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
       (`SR1_*`/`SR2_*`) must be measured separately before any multi-aircraft
       flight; `MISSION_ITEM_REACHED` to be confirmed on the first mission run.
 
-- [ ] **P1-01** Ground relay process: read UDP 14445, authenticate, forward to
+- [~] **P1-01** Ground relay process: read UDP 14445, authenticate, forward to
       Gateway over TLS WebSocket, disk-backed queue that replays after an
       internet dropout. Runs as a Windows service or tray app on the ground PC.
       **The relay is lossless and dumb.** It forwards every datagram it
@@ -84,6 +84,13 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
       The wire contract is [`docs/protocols/relay-v1.md`](docs/protocols/relay-v1.md).
       *Done when:* pulling the network cable for 2 minutes results in zero lost
       telemetry rows once it reconnects, and the relay conforms to relay-v1.
+      *Partial:* Procedure B (stop and restart the receiver) passed on
+      2026-09-22 over loopback — see `docs/runbooks/p1-01-test-records.md`. The
+      sink resumed from its own disk and the relay refilled the gap exactly.
+      Outstanding: Procedure A over a real LAN, which also covers TLS and the
+      half-open-connection detection path that a connection refusal never
+      exercises; and QGC-to-relay integrity, which the relay's own counters
+      cannot see (`tools/analyze_capture.py`).
 
 - [ ] **P1-01b** QGC setup documentation: forwarding configuration, stream rate
       tuning (`SR*_` parameters), multi-vehicle SYSID assignment, radio `NETID`
@@ -115,8 +122,20 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
       pipeline needs; everything else goes to the raw archive for P10-03 replay
       and incident investigation. Nothing here may depend on a specific stream
       rate — QGC's own settings determine what `SR0_*` emits, and they change.
-      *Done when:* 10 SITL vehicles are parsed concurrently without drops, and
-      no non-vehicle endpoint is ever registered as a drone.
+      **Distinguish "unreachable" from "losing data".** The Gateway declares
+      a station unreachable after three missed `status` messages, about 3 s,
+      while the relay does not give up on a half-open uplink for up to 25 s
+      (`relay-v1.md` §8). For that window the two disagree, and the relay is
+      alive and buffering correctly throughout it — nothing is deleted,
+      because no acknowledgement can arrive through a dead link. The station
+      state the Gateway publishes must carry that distinction: "unreachable,
+      data buffered at the station" is not "data lost". Only a `gap`, an
+      intake-drop delta, or a `uptime_s` reset means telemetry is actually
+      gone.
+      *Done when:* 10 SITL vehicles are parsed concurrently without drops,
+      no non-vehicle endpoint is ever registered as a drone, and a station
+      that goes unreachable is never reported as losing data unless a gap or
+      a drop counter says so.
 
 - [ ] **P1-03** Unit conversion at the parser boundary: 1e7 lat/lon scaling,
       mm→m altitude, cm/s→m/s velocity. Both AGL and AMSL preserved separately.
@@ -403,6 +422,13 @@ This is the phase where a bug means physical damage. Budget the most time here.
       battery trend, link quality.
 - [ ] **P6-03** Alert system with severity levels, audible cue for critical,
       acknowledge flow.
+      **Alert text must not imply loss that has not happened.** A station going
+      unreachable means the ground station cannot be reached from here; the
+      relay is almost certainly still receiving and buffering, and the record
+      will be complete once it reconnects (`relay-v1.md` §8, P1-02). An alert
+      reading "telemetry lost" there is false, and a pilot who learns the
+      alerts overstate things will discount the one that does not. Reserve
+      loss wording for a reported `gap` or a drop counter that moved.
 - [ ] **P6-04** Takeover: switch to GUIDED/LOITER, virtual joystick, altitude
       and heading control. Confirmation required for any armed-state change.
 - [ ] **P6-05** WebRTC video feed (deferred until onboard computer exists —

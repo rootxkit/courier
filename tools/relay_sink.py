@@ -31,6 +31,7 @@ import argparse
 import asyncio
 import contextlib
 import http
+import ipaddress
 import json
 import os
 import re
@@ -48,6 +49,8 @@ from typing import Any
 # repeated: u64 seq, i64 recv_utc_ns, u16 len, u8 datagram[len], little-endian.
 _RECORD_HEADER = struct.Struct("<QqH")
 _RECORD_HEADER_BYTES = _RECORD_HEADER.size
+
+_SUMMARY = (__doc__ or "").splitlines()[0]
 
 PROTOCOL_VERSION = 1
 
@@ -215,6 +218,15 @@ class SinkStore:
 
         handle.flush()
         os.fsync(handle.fileno())
+
+        # Counters are persisted here, under the same fsync as the records they
+        # describe, and not only on the 1 Hz status tick. Written on the tick
+        # alone they lag behind the data, and an unclean stop leaves a report
+        # claiming fewer records received than are stored - arithmetically
+        # impossible, and indistinguishable from a real anomaly by anyone
+        # reading it later. Observed on 2026-09-22: 57,965 received against
+        # 58,003 stored.
+        self.save_counters(state)
         return new
 
     def event(self, state: EpochState, payload: dict[str, Any]) -> None:
@@ -236,9 +248,16 @@ class SinkStore:
             "gaps": [list(gap) for gap in state.gaps],
             "last_status": state.last_status,
         }
-        state.counters_path.write_text(
-            json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
-        )
+        # Written to a temporary file and moved into place, so a process that
+        # dies mid-write leaves the previous counters intact rather than a
+        # truncated file. fsync before the move, because a rename that reaches
+        # the disk ahead of the contents would be worse than either.
+        temporary = state.counters_path.with_suffix(".json.tmp")
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(state.counters_path)
 
     def close(self) -> None:
         for handle in self._handles.values():
@@ -561,31 +580,69 @@ def build_report(store: SinkStore) -> str:
 # --- entry points -----------------------------------------------------------
 
 
+def _is_loopback(host: str) -> bool:
+    """True for an address that never leaves this machine."""
+    if host in {"localhost", ""}:
+        return True
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return False
+
+
 def _tls_context(cert: Path | None, key: Path | None) -> ssl.SSLContext | None:
     if cert is None and key is None:
         return None
     if cert is None or key is None:
-        raise SinkError("--cert and --key must be given together")
+        raise SinkError(
+            "--cert and --key must be given together: a certificate without "
+            "its private key cannot serve TLS"
+        )
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(certfile=str(cert), keyfile=str(key))
     return context
 
 
+def check_bind_is_safe(host: str, context: ssl.SSLContext | None) -> None:
+    """Refuse to accept bearer tokens in plaintext from the network.
+
+    The relay already refuses to *send* a token over ws:// to anything but
+    loopback. The sink is the other half of that rule: without it, the default
+    --host 0.0.0.0 with no certificate would sit on the LAN accepting tokens in
+    the clear, and the protection would depend entirely on every relay being
+    configured correctly. A credential is only as protected as the more
+    permissive end of the link.
+    """
+    if context is not None or _is_loopback(host):
+        return
+    raise SinkError(
+        f"refusing to serve plaintext on {host!r}: a bearer token would cross "
+        f"the network in the clear. Pass --cert and --key, or bind 127.0.0.1 "
+        f"for a local test. See docs/runbooks/p1-01-hardware-test.md."
+    )
+
+
 async def serve_forever(args: argparse.Namespace) -> int:
     from websockets.asyncio.server import serve
 
-    token = args.token_file.read_text(encoding="utf-8").strip()
+    # Refuse an unsafe bind before touching anything else: a missing token
+    # file must not mask a refusal to accept credentials in the clear.
+    context = _tls_context(args.cert, args.key)
+    check_bind_is_safe(args.host, context)
+
+    try:
+        token = args.token_file.read_text(encoding="utf-8").strip()
+    except OSError as error:
+        raise SinkError(f"cannot read token file {args.token_file}: {error}") from error
     if not token:
         raise SinkError(f"token file {args.token_file} is empty")
 
     store = SinkStore(args.out)
     sink = RelaySink(store, token)
-    context = _tls_context(args.cert, args.key)
 
     if context is None:
         print(
-            "[sink] WARNING: no --cert/--key, serving ws:// in the clear. "
-            "The relay will refuse this for anything but loopback.",
+            "[sink] no --cert/--key: serving ws:// on loopback only.",
             flush=True,
         )
 
@@ -649,23 +706,80 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+class _Help(argparse.ArgumentDefaultsHelpFormatter):
+    """Show defaults, except where a default is meaningless.
+
+    ArgumentDefaultsHelpFormatter prints "(default: None)" against required
+    arguments, which reads as though None were an acceptable value.
+    """
+
+    def _get_help_string(self, action: argparse.Action) -> str | None:
+        if action.required or action.default is None:
+            return action.help
+        return super()._get_help_string(action)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="relay_sink.py", description=__doc__.split("\n")[0]
+        prog="relay_sink.py",
+        description=_SUMMARY,
+        epilog="Full procedure: docs/runbooks/p1-01-hardware-test.md",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    serve_parser = sub.add_parser("serve", help="receive from a relay")
-    serve_parser.add_argument("--out", type=Path, required=True)
-    serve_parser.add_argument("--token-file", type=Path, required=True)
-    serve_parser.add_argument("--host", default="0.0.0.0")
-    serve_parser.add_argument("--port", type=int, default=8443)
-    serve_parser.add_argument("--cert", type=Path)
-    serve_parser.add_argument("--key", type=Path)
+    serve_parser = sub.add_parser(
+        "serve",
+        help="receive from a relay",
+        description="Receive and store a relay-v1 stream.",
+        formatter_class=_Help,
+    )
+    serve_parser.add_argument(
+        "--out",
+        type=Path,
+        required=True,
+        help="directory to store received records in; reused on restart to "
+        "resume from what is already on disk",
+    )
+    serve_parser.add_argument(
+        "--token-file",
+        type=Path,
+        required=True,
+        help="file holding the bearer token this sink accepts; must match the "
+        "contents of the relay's token_path exactly",
+    )
+    serve_parser.add_argument(
+        "--host",
+        default="0.0.0.0",
+        help="address to bind. Anything but loopback requires --cert/--key, so "
+        "a bearer token is never accepted in the clear over a network",
+    )
+    serve_parser.add_argument("--port", type=int, default=8443, help="port to bind")
+    serve_parser.add_argument(
+        "--cert",
+        type=Path,
+        help="PEM server certificate. Give it together with --key to serve "
+        "wss://; neither works without the other",
+    )
+    serve_parser.add_argument(
+        "--key",
+        type=Path,
+        help="PEM private key for --cert. Give it together with --cert to "
+        "serve wss://; neither works without the other",
+    )
     serve_parser.set_defaults(func=cmd_serve)
 
-    report_parser = sub.add_parser("report", help="print the verification report")
-    report_parser.add_argument("--out", type=Path, required=True)
+    report_parser = sub.add_parser(
+        "report",
+        help="print the verification report",
+        description="Print the verification report for a previous run.",
+        formatter_class=_Help,
+    )
+    report_parser.add_argument(
+        "--out",
+        type=Path,
+        required=True,
+        help="the directory a previous `serve` run wrote to",
+    )
     report_parser.set_defaults(func=cmd_report)
 
     args = parser.parse_args(argv)

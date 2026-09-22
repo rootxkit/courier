@@ -66,15 +66,20 @@ jobs:
       # executing the path it claims to cover has happened three times in this
       # repository; an unexecuted branch arc is what makes that visible.
       - name: pytest with branch coverage
-        run: pytest -m 'not sitl' --cov --cov-branch --cov-report=term-missing:skip-covered --cov-report=xml
+        run: pytest -m 'not sitl and not slow' --cov --cov-branch --cov-report=term-missing:skip-covered --cov-report=xml
 
       # Ratchets, set just under the measured figures. They catch a regression;
       # they are not a target. Raise them as coverage rises.
       - name: Coverage gate - agent/
-        run: coverage report --include='agent/*' --show-missing --fail-under=83
+        run: coverage report --include='agent/*' --show-missing --fail-under=95
 
       - name: Coverage gate - tools/mavlink_probe.py
         run: coverage report --include='tools/mavlink_probe.py' --show-missing --fail-under=35
+
+      # Slow tests need nothing external, so they belong here rather than in
+      # the SITL job - a failure there would look like a SITL problem.
+      - name: Slow tests
+        run: pytest -m slow -v
 
       - name: Upload coverage report
         if: always()

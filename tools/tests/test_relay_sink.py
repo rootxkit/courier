@@ -29,8 +29,11 @@ from agent.relay import Relay
 from tools.relay_sink import (
     Record,
     RelaySink,
+    SinkError,
     SinkStore,
+    _tls_context,
     build_report,
+    check_bind_is_safe,
     decode_batch,
     encode_record,
 )
@@ -583,3 +586,186 @@ async def test_events_are_written_for_each_session(tmp_path: Path) -> None:
         for line in events[0].read_text(encoding="utf-8").splitlines()
     ]
     assert "session_open" in kinds
+
+
+# --- the plaintext bind rule ------------------------------------------------
+#
+# The relay refuses to SEND a bearer token over ws:// to anything but loopback.
+# These cover the other half: the sink refuses to ACCEPT one that way. A
+# credential is only as protected as the more permissive end of the link, and
+# the sink's default --host is 0.0.0.0.
+
+
+@pytest.mark.parametrize(
+    "host", ["0.0.0.0", "192.168.1.50", "10.0.0.7", "example.org", "::"]
+)
+def test_sink_refuses_plaintext_on_a_non_loopback_host(host: str) -> None:
+    with pytest.raises(SinkError, match=r"plaintext"):
+        check_bind_is_safe(host, None)
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1", "127.0.0.5"])
+def test_sink_allows_plaintext_on_loopback(host: str) -> None:
+    """A relay and a sink on one laptop is a legitimate development setup."""
+    check_bind_is_safe(host, None)
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "192.168.1.50", "127.0.0.1"])
+def test_tls_makes_any_host_acceptable(host: str) -> None:
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+
+    check_bind_is_safe(host, context)
+
+
+def test_the_refusal_says_what_to_do() -> None:
+    """The reader is at a flying site with the runbook on another screen."""
+    with pytest.raises(SinkError) as raised:
+        check_bind_is_safe("192.168.1.50", None)
+
+    message = str(raised.value)
+    assert "--cert" in message
+    assert "127.0.0.1" in message
+    assert "p1-01-hardware-test" in message
+
+
+def test_cert_without_key_is_refused() -> None:
+    with pytest.raises(SinkError, match=r"together"):
+        _tls_context(Path("server.crt"), None)
+
+    with pytest.raises(SinkError, match=r"together"):
+        _tls_context(None, Path("server.key"))
+
+
+def test_neither_cert_nor_key_means_no_tls() -> None:
+    assert _tls_context(None, None) is None
+
+
+def test_the_two_ends_agree_on_what_loopback_means() -> None:
+    """The relay and the sink must not disagree about which hosts are safe.
+
+    If one treated ::1 as loopback and the other did not, a setup that the
+    relay was willing to send a token over would be one the sink refused to
+    accept it on - or worse, the reverse.
+    """
+    from agent.config import _is_loopback as relay_is_loopback
+    from tools.relay_sink import _is_loopback as sink_is_loopback
+
+    for host in [
+        "127.0.0.1",
+        "localhost",
+        "::1",
+        "127.0.0.5",
+        "",
+        "0.0.0.0",
+        "192.168.1.50",
+        "example.org",
+        "10.0.0.7",
+    ]:
+        assert relay_is_loopback(host) == sink_is_loopback(host), host
+
+
+# --- counters survive an unclean stop ---------------------------------------
+#
+# The 2026-09-22 Procedure B report said "received: 57965" against "58003
+# stored", which is arithmetically impossible. The records were fsynced per
+# batch; the counter was written only on the 1 Hz status tick, and the sink was
+# killed before the last one. A reader cannot tell a stale counter from a real
+# anomaly, so the counter now moves with the data.
+
+
+def test_received_total_is_exact_without_any_status_tick(tmp_path: Path) -> None:
+    """No status message is ever handled here - only appends."""
+    store = SinkStore(tmp_path / "sink")
+    state = store.state("station-a", "abc123")
+
+    for batch in range(10):
+        store.append(
+            state,
+            [
+                Record(seq=batch * 5 + n, recv_utc_ns=n, datagram=b"x" * 16)
+                for n in range(5)
+            ],
+        )
+
+    # Abandon the store without close(), as a killed process would.
+    reopened = SinkStore(tmp_path / "sink")
+    reopened.load_all()
+    recovered = reopened.all_states()[0]
+
+    assert recovered.received_total == 50
+    assert len(recovered.stored) == 50
+    assert recovered.received_total == len(recovered.stored)
+    store.close()
+    reopened.close()
+
+
+def test_duplicates_are_counted_durably_too(tmp_path: Path) -> None:
+    store = SinkStore(tmp_path / "sink")
+    state = store.state("station-a", "abc123")
+
+    records = [Record(seq=n, recv_utc_ns=n, datagram=b"y") for n in range(4)]
+    store.append(state, records)
+    store.append(state, records)  # a resend after a reconnect
+
+    reopened = SinkStore(tmp_path / "sink")
+    reopened.load_all()
+    recovered = reopened.all_states()[0]
+
+    assert recovered.received_total == 8
+    assert recovered.duplicate_total == 4
+    assert len(recovered.stored) == 4
+    store.close()
+    reopened.close()
+
+
+def test_the_report_never_shows_fewer_received_than_stored(tmp_path: Path) -> None:
+    """The exact impossibility the 2026-09-22 run printed."""
+    store = SinkStore(tmp_path / "sink")
+    state = store.state("station-a", "abc123")
+    store.append(
+        state, [Record(seq=n, recv_utc_ns=n, datagram=b"z") for n in range(30)]
+    )
+
+    reopened = SinkStore(tmp_path / "sink")
+    reopened.load_all()
+    recovered = reopened.all_states()[0]
+    report = build_report(reopened)
+
+    assert recovered.received_total >= len(recovered.stored)
+    assert "received   : 30" in report
+    assert "(30 stored)" in report
+    store.close()
+    reopened.close()
+
+
+def test_a_truncated_counters_file_does_not_lose_the_records(
+    tmp_path: Path,
+) -> None:
+    """Corrupt counters degrade to zero; the records file is the truth."""
+    store = SinkStore(tmp_path / "sink")
+    state = store.state("station-a", "abc123")
+    store.append(
+        state, [Record(seq=n, recv_utc_ns=n, datagram=b"q") for n in range(12)]
+    )
+    counters = state.counters_path
+    store.close()
+
+    counters.write_text('{"station_id": "station-a", "epo', encoding="utf-8")
+
+    reopened = SinkStore(tmp_path / "sink")
+    recovered = reopened.state("station-a", "abc123")
+
+    assert len(recovered.stored) == 12
+    assert sorted(recovered.stored) == list(range(12))
+    reopened.close()
+
+
+def test_no_temporary_counter_files_are_left_behind(tmp_path: Path) -> None:
+    store = SinkStore(tmp_path / "sink")
+    state = store.state("station-a", "abc123")
+    store.append(state, [Record(seq=0, recv_utc_ns=0, datagram=b"w")])
+    store.close()
+
+    leftovers = list((tmp_path / "sink").rglob("*.tmp"))
+
+    assert leftovers == []

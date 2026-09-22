@@ -72,8 +72,10 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# Tests may shadow builtins in fixtures and assert on private helpers.
-"**/tests/**" = ["A", "B008"]
+# Tests may shadow builtins in fixtures and assert on private helpers. T201
+# because a test that measures something has to be able to report the number:
+# the point of agent/tests/test_halfopen.py is the detection time it prints.
+"**/tests/**" = ["A", "B008", "T201"]
 # tools/ holds CLI diagnostics whose stdout IS the deliverable: the operator
 # runs them at the ground station and pastes the output into a decision record.
 # Structured JSON logging would defeat the purpose, and listen mode must stay
@@ -157,8 +159,13 @@ addopts = [
     "--strict-config",
     "-ra",
 ]
+# Two reasons a test is excluded from the default run, and they are not the
+# same reason. Conflating them makes a job's failures ambiguous: a slow test
+# that needs no SITL, running in the SITL job, produces a red build that looks
+# like a SITL problem and is not.
 markers = [
-    "sitl: integration test requiring running SITL vehicles (not run by default)",
+    "sitl: requires running SITL vehicles; needs an external dependency the default run does not have",
+    "slow: takes tens of seconds but has no external dependency; excluded to keep the default run quick",
 ]
 filterwarnings = ["error"]
 
@@ -191,6 +198,16 @@ exclude_also = [
 #   agent/         84%
 #   mavlink_probe  36%
 #
+# Re-measured 2026-09-22 after covering the paths that had never executed:
+#   everything     73%
+#   agent/         97%
+#
+# Re-measured again the same day, after the exclusive-bind and capture-analysis
+# work:
+#   everything     76%
+#   agent/         96%
+#   analyze_capture 96%
+#
 # The margin below each figure absorbs the integration tests, whose timing
 # decides whether a reconnect branch runs at all on a loaded CI machine. A gate
 # that fails at random teaches people to re-run the build, which is worse than
@@ -199,4 +216,4 @@ exclude_also = [
 # agent/ and tools/mavlink_probe.py are gated separately and more tightly by
 # `make cover`; see the Makefile. TASKS.md's 80% for gateway, dispatch and
 # airspace applies once those modules have behaviour (P1-02).
-fail_under = 68
+fail_under = 75
