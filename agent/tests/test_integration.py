@@ -33,7 +33,11 @@ from agent.relay import Relay
 # sized to be comfortably longer than the relay's 100 ms batch interval.
 WARMUP_S = 2.0
 OUTAGE_S = 10.0
-RECOVERY_S = 6.0
+
+# Limits, not sleeps. The relay can be a full BACKOFF_MAX_S into its backoff
+# when the sink returns, so anything shorter than that is a coin flip.
+RECOVERY_LIMIT_S = 45.0
+DRAIN_LIMIT_S = 30.0
 
 TOKEN = "integration-test-token"
 
@@ -265,6 +269,16 @@ async def _fake_vehicle(port: int, stop: asyncio.Event) -> int:
     return sent
 
 
+async def _wait_for(predicate: Any, limit_s: float, interval_s: float = 0.2) -> bool:
+    """Poll until true, or give up. Never a bare sleep for a condition."""
+    deadline = time.monotonic() + limit_s
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        await asyncio.sleep(interval_s)
+    return False
+
+
 def _free_port() -> int:
     import socket
 
@@ -323,7 +337,20 @@ async def test_no_records_are_lost_across_an_outage(tmp_path: Path) -> None:
 
         # --- and plugged back in -------------------------------------------
         await gateway.start()
-        await asyncio.sleep(RECOVERY_S)
+
+        # Wait for progress rather than sleeping a fixed time. The relay may be
+        # deep in backoff when the sink returns - up to BACKOFF_MAX_S before it
+        # even retries - and a fixed RECOVERY_S that happened to be long enough
+        # on a fast machine is a test that fails on a slower one for no reason
+        # of its own. This is what failed in CI.
+        assert await _wait_for(
+            lambda: gateway.highest_contiguous > delivered_before, RECOVERY_LIMIT_S
+        ), "the relay did not resume delivering after the sink returned"
+
+        # Then let the backlog drain, again by condition rather than by clock.
+        assert await _wait_for(lambda: durable_queue.depth < 100, DRAIN_LIMIT_S), (
+            "the backlog did not drain"
+        )
     finally:
         stop_vehicle.set()
         await vehicle
