@@ -91,7 +91,7 @@ docker compose -f infra\docker-compose.dev.yml down                  # make down
 .\.venv\Scripts\ruff check .                                         #   ...
 .\.venv\Scripts\ruff format --check .                                #   ...
 .\.venv\Scripts\ruff format .                                        # make fmt
-.\.venv\Scripts\pytest -m 'not sitl'                                 # make test
+.\.venv\Scripts\pytest -m 'not sitl and not slow'                   # make test
 .\.venv\Scripts\python tools\mavlink_probe.py listen                 # make probe
 ```
 

@@ -159,8 +159,13 @@ addopts = [
     "--strict-config",
     "-ra",
 ]
+# Two reasons a test is excluded from the default run, and they are not the
+# same reason. Conflating them makes a job's failures ambiguous: a slow test
+# that needs no SITL, running in the SITL job, produces a red build that looks
+# like a SITL problem and is not.
 markers = [
-    "sitl: integration test requiring running SITL vehicles (not run by default)",
+    "sitl: requires running SITL vehicles; needs an external dependency the default run does not have",
+    "slow: takes tens of seconds but has no external dependency; excluded to keep the default run quick",
 ]
 filterwarnings = ["error"]
 

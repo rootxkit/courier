@@ -248,15 +248,16 @@ async def test_a_half_open_uplink_is_detected_and_recovered(
     assert detection_s < FAST_LIMIT_S
 
 
-@pytest.mark.sitl
+@pytest.mark.slow
 async def test_the_shipped_keepalive_defaults_detect_within_their_bound(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """The numbers that actually ship: 10/10/5, bounding detection at 25 s.
 
-    Excluded from the default run by the marker - it costs about half a minute
-    - but it is the only test that exercises the values a relay is configured
-    with out of the box.
+    Marked slow, not sitl: it costs about half a minute but needs nothing
+    external. Putting it in the SITL job would make that job's failures
+    ambiguous. It is the only test that exercises the values a relay is
+    configured with out of the box.
     """
     detection_s = await _run_half_open_case(
         tmp_path, caplog, {}, DEFAULT_LIMIT_S, "10/10/5 (shipped defaults)"
