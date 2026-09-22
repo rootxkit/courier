@@ -1,0 +1,327 @@
+# P1-02 — Gateway ingest
+
+- **Status:** DRAFT — specification only, no implementation exists
+- **Task:** P1-02
+- **Built against:** [`docs/protocols/relay-v1.md`](../protocols/relay-v1.md)
+
+The Gateway is the first component that understands what a datagram means.
+Everything upstream of it moves opaque bytes; everything downstream depends on
+it having read them correctly.
+
+## 0. The rule that governs this document
+
+**The Gateway is built against `relay-v1.md`, not against the relay's source
+or the sink's.** If the implementations and the document disagree, the document
+is correct and the implementation has a bug. Say so, file it, and fix the
+implementation — do not quietly match the code and leave the specification
+describing something nobody built.
+
+This is not hypothetical. Writing the sink from the document surfaced two real
+specification gaps (§11's gap-advances-the-resume-point rule, and
+`last_datagram_age_ms` being `null` before any datagram arrives). Both were
+fixed in the document. A third implementation reading the same text is another
+chance to find what the first two assumed.
+
+## 1. What P1-02 is
+
+A service that:
+
+1. Terminates relay-v1 connections from ground stations.
+2. Stores every received datagram durably, and acknowledges only what is
+   stored.
+3. Identifies who sent each MAVLink frame, and decides which senders are
+   aircraft.
+4. Converts the messages the live pipeline needs into `drone_state` rows, and
+   archives the rest.
+5. Publishes station and vehicle state the console can render without
+   misleading a pilot.
+
+## 2. What P1-02 is not
+
+Stated first, because scope creep here is expensive.
+
+- **No commanding.** Nothing in the Gateway sends anything towards an aircraft.
+  The Stage 0 guarantee runs from `agent/udp.py`'s receive-only socket through
+  this service and out to the console; P1-02 does not weaken it. When a command
+  path arrives it is P3B, through `mavlink-router`, as a separate component
+  with its own review.
+- **No dispatch.** Assignment is P4. The Gateway publishes state; it does not
+  choose which drone takes an order.
+- **No deconfliction.** Corridors, CPA and resolution are P5. The Gateway feeds
+  them; it does not compute them.
+- **No mission planning or validation.** That is P3.
+- **No direct UDP ingest as the primary path.** A UDP listener stays for SITL
+  and bench work (see §9), but the production path is relay-v1.
+
+## 3. Relationship to `tools/relay_sink.py`
+
+The sink already speaks the server side of relay-v1. It exists to verify the
+protocol during the P1-01 hardware test, and **it must not be promoted into
+production**. The differences are not incidental:
+
+| | Sink | Gateway |
+|---|---|---|
+| Storage | append-only file per epoch, plus a JSON counters file | TimescaleDB hypertable and a raw archive |
+| Durability | `fsync` per batch on one local file | database transaction, committed before ack |
+| Dedupe | an in-memory `set[int]` of every seq | index on `(station_id, epoch, seq)` |
+| Restart | rescans the whole records file | query, bounded |
+| Tokens | one token, one file | many stations, rotation, revocation |
+| MAVLink | never parsed | parsed, classified, converted |
+| Vehicles | no such concept | `drones` registry, station-to-vehicle policy |
+| Concurrency | one process, one station at a time is fine | many stations concurrently |
+| Failure | crash and lose the run | supervised, restarts, keeps its data |
+
+The sink's in-memory seq set is the clearest example: fine for a twelve-minute
+test with 58,000 records, hopeless for a fleet over months. Anything that
+borrows from the sink should borrow the *reading of the protocol*, not the
+implementation.
+
+The sink stays as it is. It remains the independent second implementation, and
+its value is precisely that it was not written by whoever writes this one.
+
+## 4. relay-v1 server obligations
+
+Conformance is §13 of the protocol. Restated here with what each means in this
+service:
+
+1. **Accept the upgrade, validate the bearer token, resolve it to a
+   `station_id`.** Failure is HTTP `401` on the upgrade, not a WebSocket close
+   — the relay treats `401` as fatal and stops retrying, and a close frame
+   would leave it reconnecting against a credential that will never work.
+2. **Reply to `hello` with `welcome`** carrying the true `resume_from_seq` for
+   that `(station_id, epoch)`, `0` for an epoch never seen. The value comes
+   from what is **durably stored**, never from memory or a cache — a Gateway
+   that restarts must answer from the database.
+3. **Persist before acknowledging.** The ack is a promise the relay acts on by
+   deleting its own copy. An ack for data still in a buffer turns a Gateway
+   crash into a permanent hole.
+4. **Cumulative `ack` carrying the epoch**, at least once per second while data
+   flows. The epoch matters: a late ack arriving after the relay has started a
+   new epoch must be discarded, not applied.
+5. **Deduplicate on `(station_id, epoch, seq)`.** At-least-once on the wire,
+   exactly-once after dedupe.
+6. **Record every `gap` as an event**, with its sequence range and wall-clock
+   window. A recorded gap also advances `resume_from_seq` past it — otherwise
+   the same gap is re-reported on every reconnect for the life of the epoch.
+7. **Track `dropped_intake_total` deltas** between consecutive `status`
+   messages and record them as events. These losses have no `gap` and no
+   sequence discontinuity; the delta is the only evidence they happened.
+8. **Three consecutive missed `status` messages means unreachable**, surfaced
+   differently from a rising `last_datagram_age_ms`. See §7.
+9. **Parse MAVLink only after all of the above.** The transport layer does not
+   need to understand the payload, and mixing the two makes a parsing bug into
+   a transport failure.
+
+### Protocol errors
+
+`resume_from_seq > newest_seq_held + 1` is the relay's check, not the
+Gateway's, but the Gateway is the side that can *cause* it by answering with a
+sequence the station never produced. That would mean the Gateway has confused
+two epochs or two stations. It must be impossible by construction: the
+`welcome` value is derived from a query keyed on both.
+
+## 5. Authentication
+
+Per the P1-07 refinement recorded in `relay-v1.md` §3:
+
+- **Tokens identify a ground station, not a vehicle.** A station relays
+  whatever its radio hears and cannot hold one credential per aircraft.
+- **Which vehicles a station may carry is server policy**, evaluated here, on
+  `(station_id, sysid)`. A station is not trusted to assert what it is
+  carrying.
+- A frame whose SYSID is not assigned to the presenting station is rejected and
+  rate-limit-logged. A compromised ground station cannot mint vehicles it was
+  never assigned.
+- Direct UDP sources (§9) keep their own path and are never production.
+
+Token storage, rotation and revocation are an open question (§10).
+
+## 6. Source classification and the hot path
+
+### 6.1 Classification
+
+The relay forwards everything it hears, which includes QGC's own heartbeat and
+any component that speaks on the same link. Classification is per
+**`(sysid, compid)`**, from the HEARTBEAT payload:
+
+- `type == MAV_TYPE_GCS` → **ground station**
+- a non-vehicle `MAV_TYPE`, or `autopilot == MAV_AUTOPILOT_INVALID` →
+  **component**
+- otherwise → **vehicle**
+
+**Only vehicles become drones.** A ground station or a component must never be
+registered as one.
+
+Three rules, each learned from a specific failure:
+
+- **Never classify on the SYSID number.** 255 is a convention;
+  `GCS_SYSTEM_ID` is a user setting sitting in `QGroundControl.ini`.
+- **Never classify on message volume.** A vehicle that has just booted has sent
+  one HEARTBEAT and nothing else, which is exactly when it must stay visible.
+- **Ambiguity resolves to vehicle.** Registering a ground station as an
+  aircraft is a nuisance; failing to register an aircraft is the direction that
+  gets someone hurt.
+
+`tools/mavlink_probe.py` has a working implementation to lift. Component IDs
+matter in practice: ADR-001 observed the autopilot at `1/1` and QGC at
+`255/190`, and a gimbal or companion computer may heartbeat under the vehicle's
+own SYSID with a different component ID.
+
+### 6.2 Offsets
+
+**Derive every wire-format offset from pymavlink; never write one from
+memory**, and pin it with a test that derives it the same way (CLAUDE.md,
+Testing). Three offsets were wrong in one session and every one returned a
+plausible answer rather than an error. The Gateway should prefer pymavlink's
+own decoder where it can, and where it cannot, derive and pin.
+
+### 6.3 Hot path versus archive
+
+Per ADR-001. These produce `drone_state` rows:
+
+| Message | Feeds |
+|---|---|
+| `HEARTBEAT` | liveness, flight mode, armed state |
+| `GLOBAL_POSITION_INT` | position, altitude AGL and AMSL, heading, velocity |
+| `SYS_STATUS` | battery percent, voltage |
+| `BATTERY_STATUS` | energy accounting for the P4-03 budget |
+| `GPS_RAW_INT` | fix type, satellite count |
+| `VFR_HUD` | ground speed, climb rate |
+| `EKF_STATUS_REPORT` | health alerting (P7-10) |
+| `MISSION_CURRENT` | progress inference (P3-06) |
+| `MISSION_ITEM_REACHED` | waypoint completion (P3-06) |
+| `STATUSTEXT` | FC messages and failsafe reasons |
+
+**Everything else is archived, not discarded.** ADR-001 measured 31 message
+types on a real link; roughly 80% of the traffic is not on the hot path.
+`ATTITUDE`, `VIBRATION`, `ESC_TELEMETRY_1_TO_4`, `RAW_IMU` and the rest are
+exactly what an incident investigation reads after a crash, and P10-03 flight
+replay cannot reconstruct what was never stored. The split is between *live
+state* and *archive*, never between keep and discard.
+
+### 6.4 No dependence on stream rates
+
+**Nothing in the Gateway may depend on a message arriving at a particular
+rate.** What arrives is decided by QGC's own `SR*_` settings and by which
+screen the pilot has open; it changes between versions and between sessions.
+
+Concretely:
+
+- Liveness comes from Redis TTL expiry (P1-05), not from counting HEARTBEATs.
+- A missing message is a missing value, not an error — unless it is absent long
+  enough to expire the TTL.
+- `MISSION_ITEM_REACHED` is event-driven and was **not observed** in ADR-001's
+  capture, because the aircraft was parked. Its absence must never be treated
+  as a fault, and P3-06 must not assume it arrives.
+- Rate is a *measurement to report* (P1-09 link quality), never an input to
+  correctness.
+
+## 7. Station state for the console
+
+This is the requirement that follows from `relay-v1.md` §8, and it is the one
+most easily got wrong.
+
+The Gateway declares a station unreachable after three missed `status`
+messages, about 3 s. The relay does not give up on a half-open uplink for up to
+25 s. **For that window the two components hold different beliefs about the
+same link**, and during it the relay is alive, receiving at full rate, and
+buffering correctly.
+
+So the Gateway must publish at least these distinct states:
+
+| State | Meaning | Is telemetry lost? |
+|---|---|---|
+| `healthy` | status arriving, datagrams recent | no |
+| `radio_silent` | status arriving, `last_datagram_age_ms` rising | **yes, upstream** — the station has lost the aircraft |
+| `unreachable` | no status for >3 s | **no** — almost certainly buffering; the record completes on reconnect |
+| `data_lost` | a `gap`, an intake-drop delta, or a `uptime_s` reset | **yes** — and the extent is known |
+
+**`unreachable` is not `data_lost`.** Only a reported `gap`, a
+`dropped_intake_total` delta, or a `uptime_s` going backwards means telemetry
+is actually gone. Everything else is a tracking outage that resolves itself.
+
+`radio_silent` and `unreachable` are different failure domains
+(`ARCHITECTURE.md` §3) and must never be presented identically: the first means
+the ground station has lost the aircraft, which is a flight-safety event; the
+second means we have lost the ground station, and the pilot still has QGC.
+
+P6-03 carries the console half of this: alert text must not imply loss that has
+not happened. A pilot who learns the alerts overstate things will discount the
+one that does not.
+
+## 8. Storage
+
+- **Hot path → TimescaleDB** `drone_state` hypertable (P1-04 owns batching,
+  chunking and retention).
+- **Raw archive → every received datagram**, addressable by
+  `(station_id, epoch, seq)` with its `recv_utc_ns`, sufficient for P10-03 to
+  replay a flight and for `tools/analyze_capture.py` to run over it.
+- **Events → the append-only `events` table**: gaps, intake-drop deltas,
+  station state transitions, rejected SYSIDs, relay restarts.
+
+Units and conventions are not negotiable here: SI at the parser boundary
+(1e7 lat/lon, mm→m, cm/s→m/s), AGL and AMSL stored separately and named, all
+timestamps `TIMESTAMPTZ` in UTC, all geometry SRID 4326. P1-03 owns the
+conversion and its property tests.
+
+## 9. Direct UDP ingest
+
+A UDP listener is retained for SITL and bench work, on
+`MAVLINK_BIND_PORT`. It shares the parsing, classification and hot-path code
+with the relay-v1 path — the same code must work against `sim_vehicle.py`
+(CLAUDE.md, hard rule 2).
+
+It is **not** a production path: it has no authentication, no durability and no
+station identity. Anything it produces is attributed to a synthetic station so
+it can never be confused with a real one.
+
+Note that the Gateway's UDP socket is *read-only by the same rule as the
+relay's*, and binds exclusively — two readers of one port split the stream and
+neither can tell.
+
+## 10. Open questions
+
+Listed, not resolved. Each needs an answer before the code that depends on it.
+
+1. **Token storage and rotation.** Where do station tokens live, how are they
+   issued, how is one revoked mid-flight? Hashed at rest is the obvious
+   starting point, but rotation while a station is connected is not obvious.
+2. **Raw archive medium.** TimescaleDB alongside `drone_state`, object storage,
+   or files on disk? Volume is ~2.8 KiB/s per aircraft before compression —
+   about 240 MB per aircraft per day. Retention policy is unanswered.
+3. **Dedupe index cost.** `(station_id, epoch, seq)` over months of records is
+   a large index. Is dedupe bounded to a recent window, and if so what happens
+   to a relay replaying a very old backlog?
+4. **`drone_id` binding.** `drone_state.drone_id` is a fleet identity;
+   telemetry arrives keyed by `(sysid, compid)`. Where is the mapping, and what
+   happens when a SYSID is reassigned between airframes?
+5. **Multiple stations relaying the same vehicle.** Two ground stations in
+   radio range of one aircraft both forward its frames. Dedupe is per station,
+   so `drone_state` would get both. Is that a merge, a policy rejection, or a
+   configuration error to alert on?
+6. **Clock correction.** `relay-v1.md` §9 provides the monotonic/UTC pairs to
+   estimate a station's clock offset, and notes `SYSTEM_TIME` carries GPS time
+   at 3 Hz. Which timestamp is authoritative for `drone_state.ts`, and is the
+   correction applied at write time or at read time?
+7. **Backpressure.** If TimescaleDB is slow or down, what does the Gateway do?
+   It must not acknowledge what it has not stored, so the relay's queue becomes
+   the buffer — which is correct, but the behaviour should be deliberate and
+   bounded rather than emergent.
+8. **Station-to-vehicle policy source.** Database table, configuration, or
+   derived from the `drones` registry's `home_base_id`?
+9. **Does a `component` ever need a row of its own?** A gimbal's attitude is
+   archived today. If P8 wants it live, where does it go — it is not a drone.
+
+## 11. Acceptance
+
+From `TASKS.md` P1-02, plus what this specification adds:
+
+- 10 SITL vehicles parsed concurrently without drops.
+- No non-vehicle endpoint is ever registered as a drone.
+- A station that goes unreachable is never reported as losing data unless a
+  gap or a drop counter says so.
+- A relay driven against the Gateway satisfies the same criteria as the P1-01
+  hardware test: one epoch, zero missing seqs, zero drops, duplicates
+  deduplicated.
+- Every wire-format offset used is pinned by a test that derives it from
+  pymavlink.
