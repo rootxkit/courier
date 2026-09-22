@@ -29,8 +29,11 @@ from agent.relay import Relay
 from tools.relay_sink import (
     Record,
     RelaySink,
+    SinkError,
     SinkStore,
+    _tls_context,
     build_report,
+    check_bind_is_safe,
     decode_batch,
     encode_record,
 )
@@ -583,3 +586,79 @@ async def test_events_are_written_for_each_session(tmp_path: Path) -> None:
         for line in events[0].read_text(encoding="utf-8").splitlines()
     ]
     assert "session_open" in kinds
+
+
+# --- the plaintext bind rule ------------------------------------------------
+#
+# The relay refuses to SEND a bearer token over ws:// to anything but loopback.
+# These cover the other half: the sink refuses to ACCEPT one that way. A
+# credential is only as protected as the more permissive end of the link, and
+# the sink's default --host is 0.0.0.0.
+
+
+@pytest.mark.parametrize(
+    "host", ["0.0.0.0", "192.168.1.50", "10.0.0.7", "example.org", "::"]
+)
+def test_sink_refuses_plaintext_on_a_non_loopback_host(host: str) -> None:
+    with pytest.raises(SinkError, match=r"plaintext"):
+        check_bind_is_safe(host, None)
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1", "127.0.0.5"])
+def test_sink_allows_plaintext_on_loopback(host: str) -> None:
+    """A relay and a sink on one laptop is a legitimate development setup."""
+    check_bind_is_safe(host, None)
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "192.168.1.50", "127.0.0.1"])
+def test_tls_makes_any_host_acceptable(host: str) -> None:
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+
+    check_bind_is_safe(host, context)
+
+
+def test_the_refusal_says_what_to_do() -> None:
+    """The reader is at a flying site with the runbook on another screen."""
+    with pytest.raises(SinkError) as raised:
+        check_bind_is_safe("192.168.1.50", None)
+
+    message = str(raised.value)
+    assert "--cert" in message
+    assert "127.0.0.1" in message
+    assert "p1-01-hardware-test" in message
+
+
+def test_cert_without_key_is_refused() -> None:
+    with pytest.raises(SinkError, match=r"together"):
+        _tls_context(Path("server.crt"), None)
+
+    with pytest.raises(SinkError, match=r"together"):
+        _tls_context(None, Path("server.key"))
+
+
+def test_neither_cert_nor_key_means_no_tls() -> None:
+    assert _tls_context(None, None) is None
+
+
+def test_the_two_ends_agree_on_what_loopback_means() -> None:
+    """The relay and the sink must not disagree about which hosts are safe.
+
+    If one treated ::1 as loopback and the other did not, a setup that the
+    relay was willing to send a token over would be one the sink refused to
+    accept it on - or worse, the reverse.
+    """
+    from agent.config import _is_loopback as relay_is_loopback
+    from tools.relay_sink import _is_loopback as sink_is_loopback
+
+    for host in [
+        "127.0.0.1",
+        "localhost",
+        "::1",
+        "127.0.0.5",
+        "",
+        "0.0.0.0",
+        "192.168.1.50",
+        "example.org",
+        "10.0.0.7",
+    ]:
+        assert relay_is_loopback(host) == sink_is_loopback(host), host

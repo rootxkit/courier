@@ -25,17 +25,24 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="python -m agent",
         description="Ground relay: forward QGC's MAVLink stream to the Gateway.",
+        epilog=(
+            "Copy agent/relay.example.toml to relay.toml and edit it first. "
+            "Hardware test procedure: docs/runbooks/p1-01-hardware-test.md"
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
         "--config",
         type=Path,
         default=Path("relay.toml"),
-        help="path to the relay TOML configuration (default: relay.toml)",
+        help="path to the relay TOML configuration",
     )
     parser.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="verbosity of the JSON log written to stdout; DEBUG adds a line "
+        "per acknowledgement, which is noisy on a healthy link",
     )
     return parser.parse_args(argv)
 
