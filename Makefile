@@ -139,13 +139,13 @@ typecheck: venv ## mypy, strict on the safety-relevant modules
 	$(VENV_BIN)/mypy
 
 test: venv ## Run unit tests (slow and SITL tests excluded)
-	$(VENV_BIN)/pytest -m 'not sitl and not slow and not postgres'
+	$(VENV_BIN)/pytest -m 'not sitl and not slow and not postgres and not nats'
 
 test-cov: venv ## Run unit tests with a coverage report
-	$(VENV_BIN)/pytest -m 'not sitl and not slow and not postgres' --cov --cov-branch --cov-report=term-missing
+	$(VENV_BIN)/pytest -m 'not sitl and not slow and not postgres and not nats' --cov --cov-branch --cov-report=term-missing
 
 cover: venv ## Branch coverage with the thresholds enforced (what CI runs)
-	$(VENV_BIN)/pytest -m 'not sitl and not slow and not postgres' --cov --cov-branch --cov-report=term-missing:skip-covered --cov-report=xml
+	$(VENV_BIN)/pytest -m 'not sitl and not slow and not postgres and not nats' --cov --cov-branch --cov-report=term-missing:skip-covered --cov-report=xml
 	@echo
 	@echo "=== agent/ - uncovered lines and branch arcs ==="
 	$(VENV_BIN)/coverage report --include='agent/*' --show-missing --fail-under=$(COVERAGE_MIN_AGENT)
@@ -164,6 +164,12 @@ migrate: venv ## Apply telemetry database migrations
 
 migrate-down: venv ## Roll the telemetry database back one revision
 	$(TELEMETRY_ALEMBIC) downgrade -1
+
+console: venv ## Serve the P1-08 map on :8000 (needs .env and `make up`)
+	$(VENV_BIN)/python -m api.console
+
+test-bus: venv ## Run tests that need NATS (make up first)
+	$(VENV_BIN)/pytest -m nats -v
 
 test-db: venv ## Run tests that need the telemetry database (make up first)
 	$(VENV_BIN)/pytest -m postgres -v --cov=gateway.ingest_store_pg --cov=gateway.retention --cov=gateway.binding --cov=gateway.state_writer --cov-branch --cov-report=term-missing
