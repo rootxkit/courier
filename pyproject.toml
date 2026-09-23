@@ -16,6 +16,18 @@ dependencies = [
     # relay must run on a pilot's bare Windows laptop where a C toolchain is
     # not available, so a pure-Python client matters.
     "websockets>=13",
+    # The Gateway's index of what it has stored. Async because the ingest path
+    # is asyncio end to end and a blocking driver would stall every station on
+    # one slow query.
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.29",
+    # Schema is owned by migrations, never by hand (CLAUDE.md). Two trees: this
+    # dependency serves both.
+    "alembic>=1.13",
+    # Raw archive compression. The archive is opaque bytes nobody queries, so
+    # it is compressed on the way to disk; zstd is the ratio/speed point that
+    # keeps fsync-per-batch affordable.
+    "zstandard>=0.22",
 ]
 
 [project.optional-dependencies]
@@ -166,6 +178,7 @@ addopts = [
 markers = [
     "sitl: requires running SITL vehicles; needs an external dependency the default run does not have",
     "slow: takes tens of seconds but has no external dependency; excluded to keep the default run quick",
+    "postgres: needs the telemetry database from `make up` and TELEMETRY_DATABASE_URL; excluded from the default run for the same reason as sitl",
 ]
 filterwarnings = ["error"]
 
