@@ -56,12 +56,18 @@ class Record:
     datagram: bytes
 
 
-def decode_records(frame: bytes) -> list[Record]:
+def decode_records(frame: bytes, *, require_contiguous: bool = True) -> list[Record]:
     """Decode one binary batch.
 
     Raises `RecordFramingError` if the frame is truncated, if a declared length
     exceeds what a datagram can be, or if the sequence numbers are not strictly
     ascending — §6 requires ascending order with no gaps *within* a batch.
+
+    `require_contiguous=False` relaxes only that last rule, for reading back a
+    concatenation of batches rather than one wire frame. An archive segment
+    spanning a recorded `gap` legitimately jumps, and refusing to read the hour
+    either side of a hole would make the archive useless exactly when it is
+    needed.
     """
     records: list[Record] = []
     offset = 0
@@ -97,7 +103,8 @@ def decode_records(frame: bytes) -> list[Record]:
         )
         offset += datagram_len
 
-    _check_ascending(records)
+    if require_contiguous:
+        _check_ascending(records)
     return records
 
 
