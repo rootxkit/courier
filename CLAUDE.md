@@ -162,6 +162,17 @@ Do not add a dependency without a one-line justification in the commit body.
   of 8, payload bounds counted back from the end of a signed v2 frame, and the
   MAVLink sequence byte read at offset 2 for v2 frames where it is at 4 and
   offset 2 is a constant. Every one of them returned a plausible answer.
+- **Never report an inference as an observation.** If a command fails, read the
+  error before interpreting it: a mangled path, an escaped colon or a
+  permission denial is not evidence about the thing being checked. When the
+  data source is unavailable, say the question is unanswered rather than
+  answering it from a proxy.
+  The wire-offset bugs, the "the SITL job has never run" claim - contradicted
+  by four merged pull requests - and the `git cat-file` misread, where Git Bash
+  rewrote `origin/main:path` to `origin\main;path` and the resulting error was
+  read as "the file is absent", were all the same mistake. So was a generated
+  workflow whose shell line continuations had been silently eaten: the file was
+  written, not read back.
 
 ## What not to do
 
