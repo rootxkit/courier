@@ -244,3 +244,51 @@ def test_a_legitimate_station_id_is_accepted(tmp_path: Path) -> None:
     """Paired with the rejection tests: the filter must not reject everything."""
     write = archive(tmp_path).append("tbilisi-base-1.a_2", EPOCH, records(0, 1))[0]
     assert write.relative_path.startswith("tbilisi-base-1.a_2/")
+
+
+# --- deletion ---------------------------------------------------------------
+
+
+def test_deleting_a_segment_reclaims_its_bytes(tmp_path: Path) -> None:
+    store = archive(tmp_path)
+    write = store.append(STATION, EPOCH, records(0, 30))[0]
+    on_disk = (tmp_path / "archive" / write.relative_path).stat().st_size
+
+    freed = store.delete_segment(write.relative_path)
+
+    assert freed == on_disk
+    assert not (tmp_path / "archive" / write.relative_path).exists()
+
+
+def test_deleting_a_segment_that_is_already_gone_is_not_an_error(
+    tmp_path: Path,
+) -> None:
+    """Retention runs repeatedly, and it can crash between two steps.
+
+    A crash after removing the file but before marking the index leaves the
+    next sweep trying to delete a file that is not there. Treating that as an
+    error would wedge retention permanently - and retention that stops running
+    is how an archive fills a disk.
+    """
+    store = archive(tmp_path)
+    write = store.append(STATION, EPOCH, records(0, 5))[0]
+    store.delete_segment(write.relative_path)
+
+    assert store.delete_segment(write.relative_path) == 0
+
+
+def test_deleting_one_segment_leaves_the_others(tmp_path: Path) -> None:
+    """Whole segments only, and only the one named.
+
+    A partially deleted hour is a hole in the flight record with nothing
+    recording that it is a hole.
+    """
+    store = archive(tmp_path)
+    first_hour = store.append(STATION, EPOCH, records(0, 5))[0]
+    later = BASE_NS + 3_600 * 1_000_000_000
+    second_hour = store.append(STATION, EPOCH, records(5, 5, base_ns=later))[0]
+
+    store.delete_segment(first_hour.relative_path)
+
+    assert not (tmp_path / "archive" / first_hour.relative_path).exists()
+    assert len(store.read_segment(second_hour.relative_path)) == 5

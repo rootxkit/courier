@@ -132,6 +132,33 @@ class RawArchive:
             writes.append(self._append_to_segment(station_id, epoch, hour, group))
         return writes
 
+    def delete_segment(self, relative_path: str) -> int:
+        """Remove one segment from disk, returning the bytes reclaimed.
+
+        Whole segments only. A partially deleted hour is a hole in the flight
+        record with nothing recording that it is a hole, which is the outcome
+        this whole design exists to avoid.
+
+        A segment already gone is not an error: retention runs repeatedly, and
+        a crash between deleting the file and marking the index would otherwise
+        wedge the sweep for ever.
+        """
+        path = self.root / relative_path
+        try:
+            size = path.stat().st_size
+        except FileNotFoundError:
+            return 0
+        except OSError as error:
+            raise ArchiveError(f"could not stat {relative_path}: {error}") from error
+
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return 0
+        except OSError as error:
+            raise ArchiveError(f"could not delete {relative_path}: {error}") from error
+        return size
+
     def read_segment(
         self,
         relative_path: str,
