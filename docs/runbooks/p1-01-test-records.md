@@ -22,9 +22,17 @@ FAILED gateway/tests/test_relay_server.py::test_a_different_epoch_resumes_from_z
 2 failed, 496 passed, 23 deselected in 66.69s
 ```
 
-The run took **66.69 s** against a normal 85-89 s. It failed *faster* than a
-passing run, which already argues against a timeout: a test that waits out its
-limit makes the suite slower, not quicker.
+The run took **66.69 s** against a normal 85-89 s.
+
+> **A failing run that is shorter than a passing one falsifies the timeout
+> theory on its own.** A test that waits out its limit spends that time before
+> failing, so a timeout can only make the suite slower. A run that finishes
+> early failed *fast* - a raised exception, a refused bind, a wrong answer.
+> Check the elapsed time before investigating margins: it is free, and it
+> eliminates a whole class of explanation in one number.
+
+That observation was available immediately and was not used until after the
+timing hypothesis had been measured out. Reach for it first next time.
 
 ### The working hypothesis, and why it was wrong
 
@@ -75,7 +83,14 @@ with nothing in the message hinting that the port was chosen wrongly.
 
 That is a fast, hard failure, which matches a 66 s run. `test_handshake.py` and
 `test_integration.py` already probed `SOCK_DGRAM` correctly; this file was the
-only one that did not. Fixed.
+only one that did not.
+
+Fixed, and the knowledge moved somewhere it can travel: `tests/ports.py` offers
+`free_tcp_port()` and `free_udp_port()` and deliberately no protocol-agnostic
+`free_port()`, with `tests/test_port_helpers.py` failing if any test file
+defines its own probe. That guard immediately found a fourth file,
+`tools/tests/test_relay_sink.py`, which had its own pair - so the pattern had
+already spread further than the one broken copy.
 
 ### What is still unexplained
 

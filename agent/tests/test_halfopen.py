@@ -27,6 +27,7 @@ from agent.config import RelayConfig
 from agent.queue import DurableQueue
 from agent.relay import Relay
 from agent.tests.blackhole import BlackholeProxy
+from tests.ports import free_udp_port
 from tools.relay_sink import RelaySink, SinkStore
 
 TOKEN = "halfopen-test-token"
@@ -47,30 +48,6 @@ FAST_WORST_CASE_S = 12.0
 # themselves, and a gate that fails at random is worse than no gate.
 FAST_LIMIT_S = 40.0
 DEFAULT_LIMIT_S = 70.0
-
-
-def free_port() -> int:
-    """A free TCP port, for the sink and the proxy."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
-
-
-def free_udp_port() -> int:
-    """A free UDP port, for the relay's intake socket.
-
-    Must probe SOCK_DGRAM. TCP and UDP are separate port spaces, so a free TCP
-    port says nothing about UDP: a port held on UDP binds happily on TCP, which
-    was measured. The relay binds its intake socket exclusively, so a collision
-    is not a warning - it is `PortInUseError` and an immediate test failure,
-    with nothing in the message to suggest the port was picked wrongly.
-
-    `test_handshake.py` and `test_integration.py` already did this correctly;
-    this file was the one that probed the wrong protocol.
-    """
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
-        probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
 
 
 class SinkServer:

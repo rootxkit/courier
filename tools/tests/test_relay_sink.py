@@ -26,6 +26,7 @@ import pytest
 from agent.config import RelayConfig
 from agent.queue import DurableQueue
 from agent.relay import Relay
+from tests.ports import free_tcp_port, free_udp_port
 from tools.relay_sink import (
     Record,
     RelaySink,
@@ -39,18 +40,6 @@ from tools.relay_sink import (
 )
 
 TOKEN = "sink-test-token"
-
-
-def free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
-
-
-def free_udp_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
-        probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
 
 
 class SinkServer:
@@ -212,7 +201,7 @@ def test_truncated_batch_raises_rather_than_returning_short() -> None:
 
 
 async def test_relay_to_sink_delivers_everything(tmp_path: Path) -> None:
-    port = free_port()
+    port = free_tcp_port()
     server = SinkServer(tmp_path / "sink", port)
     await server.start()
 
@@ -238,7 +227,7 @@ async def test_relay_to_sink_delivers_everything(tmp_path: Path) -> None:
 
 async def test_sink_restart_resumes_without_loss(tmp_path: Path) -> None:
     """The second way to induce an outage: stop the receiver, not the network."""
-    port = free_port()
+    port = free_tcp_port()
     server = SinkServer(tmp_path / "sink", port)
     await server.start()
 
@@ -269,7 +258,7 @@ async def test_sink_restart_resumes_without_loss(tmp_path: Path) -> None:
 
 async def test_records_survive_on_disk_across_sink_restarts(tmp_path: Path) -> None:
     """resume_from_seq must come from the data, not from memory."""
-    port = free_port()
+    port = free_tcp_port()
     server = SinkServer(tmp_path / "sink", port)
     await server.start()
     try:
@@ -296,7 +285,7 @@ async def test_a_bad_token_is_rejected_with_http_401(tmp_path: Path) -> None:
     """
     import websockets
 
-    port = free_port()
+    port = free_tcp_port()
     server = SinkServer(tmp_path / "sink", port)
     await server.start()
 
@@ -315,7 +304,7 @@ async def test_a_bad_token_is_rejected_with_http_401(tmp_path: Path) -> None:
 
 
 async def test_relay_stops_retrying_after_a_401(tmp_path: Path) -> None:
-    port = free_port()
+    port = free_tcp_port()
     server = SinkServer(tmp_path / "sink", port)
     await server.start()
 
@@ -347,7 +336,7 @@ async def test_relay_stops_retrying_after_a_401(tmp_path: Path) -> None:
 
 
 async def test_report_says_pass_on_a_clean_run(tmp_path: Path) -> None:
-    port = free_port()
+    port = free_tcp_port()
     server = SinkServer(tmp_path / "sink", port)
     await server.start()
     try:
@@ -516,7 +505,7 @@ async def test_relay_to_sink_over_tls_with_a_development_ca(tmp_path: Path) -> N
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(certfile=str(srv_crt), keyfile=str(srv_key))
 
-    port = free_port()
+    port = free_tcp_port()
     server = SinkServer(tmp_path / "sink", port, ssl_context=context)
     await server.start()
 
@@ -546,7 +535,7 @@ async def test_an_untrusted_certificate_is_refused(tmp_path: Path) -> None:
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(certfile=str(srv_crt), keyfile=str(srv_key))
 
-    port = free_port()
+    port = free_tcp_port()
     server = SinkServer(tmp_path / "sink", port, ssl_context=context)
     await server.start()
 
@@ -569,7 +558,7 @@ async def test_an_untrusted_certificate_is_refused(tmp_path: Path) -> None:
 
 
 async def test_events_are_written_for_each_session(tmp_path: Path) -> None:
-    port = free_port()
+    port = free_tcp_port()
     server = SinkServer(tmp_path / "sink", port)
     await server.start()
     try:
