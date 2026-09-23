@@ -7,6 +7,99 @@ written down is a failure that gets rediscovered later, at worse cost.
 
 ---
 
+## 2026-09-23 — an intermittent test failure, investigated
+
+Not a runbook procedure. One run of the full suite under coverage failed two
+tests at once; every run before and after passed. Recorded because the
+investigation found one real defect and ruled out the obvious explanation for
+the other half, and because the next occurrence should not start from zero.
+
+### What happened
+
+```
+FAILED agent/tests/test_halfopen.py::test_a_half_open_uplink_is_detected_and_recovered
+FAILED gateway/tests/test_relay_server.py::test_a_different_epoch_resumes_from_zero_independently
+2 failed, 496 passed, 23 deselected in 66.69s
+```
+
+The run took **66.69 s** against a normal 85-89 s. It failed *faster* than a
+passing run, which already argues against a timeout: a test that waits out its
+limit makes the suite slower, not quicker.
+
+### The working hypothesis, and why it was wrong
+
+The hypothesis was that coverage instrumentation slows execution and the
+tightest margin fails first. It is a good hypothesis - that is exactly what the
+`assert 65 > 65` failure turned out to be - and it is testable, so it was
+tested.
+
+**Handshake timing, 300 rounds each**, on 16 cores, contention from 32 busy
+processes:
+
+| Condition | min | median | p99 | max |
+|---|---|---|---|---|
+| Idle | 1.2 ms | 1.4 ms | 3.0 ms | 3.6 ms |
+| All cores saturated | 1.7 ms | 1.8 ms | 81.6 ms | 90.6 ms |
+
+The budget is websockets' 10 s open timeout. The worst case with every core
+busy is **90.6 ms, or 0.9% of it** - a margin of about 110x - and 600
+handshakes returned zero wrong answers. **Slowness cannot produce that
+failure.** The hypothesis is disproved for the Gateway test, not merely
+unconfirmed.
+
+**Half-open detection, under coverage and full CPU saturation:**
+
+| Condition | Detection | Limit | Theoretical worst case |
+|---|---|---|---|
+| Idle | 9.8 s | 40 s | 12 s |
+| Coverage + 32 busy processes | 10.0 s | 40 s | 12 s |
+
+Instrumentation moved it by 0.2 s. That margin is healthy and needed no change.
+
+### The defect that was found
+
+`agent/tests/test_halfopen.py` picked the relay's **UDP** intake port by
+probing a **TCP** socket:
+
+```python
+udp_port = free_port()          # SOCK_STREAM
+...
+bind_port=udp_port              # used for UDP
+```
+
+TCP and UDP are separate port spaces. Measured directly: a port held on UDP is
+bound happily by a TCP probe, and a second UDP bind of it then fails with
+`WSAEADDRINUSE` (10048). The relay binds its intake socket *exclusively*, so a
+collision is not a warning - it is `PortInUseError` and an immediate failure,
+with nothing in the message hinting that the port was chosen wrongly.
+
+That is a fast, hard failure, which matches a 66 s run. `test_handshake.py` and
+`test_integration.py` already probed `SOCK_DGRAM` correctly; this file was the
+only one that did not. Fixed.
+
+### What is still unexplained
+
+The Gateway failure. It is not a timing margin - that is measured, above - and
+it is not port exhaustion: TIME_WAIT peaked at 301 sockets against a dynamic
+range of 16384 (`netsh int ipv4 show dynamicport tcp`) and drains within a
+minute. The assertion itself is deterministic given the store, so a wrong
+answer would have to come from somewhere other than arithmetic.
+
+**Not reproduced** in six subsequent full runs, including two under coverage
+with every core saturated. Rather than keep guessing, both tests now explain
+their own timeouts: elapsed time, what was being awaited, and the observable
+state at the moment of giving up. The Gateway handshake carries the measured
+figures in its failure message, so the next person does not repeat this
+investigation to rule slowness out again.
+
+### Reproducing the contention
+
+`tools` has no home for a load generator, so it lived in a scratch file:
+32 processes each running a tight integer loop for the duration of the test
+run, on a 16-core machine.
+
+---
+
 ## 2026-09-22 — cost of a refused reconnect on Windows, measured
 
 Not a runbook procedure. A bench measurement, taken while fixing a flaky

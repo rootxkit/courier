@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -139,15 +140,55 @@ def auth() -> dict[str, str]:
 
 
 async def read_until(connection: Any, message_type: str, limit: int = 20) -> Any:
-    """Read control messages until one of `message_type` arrives."""
+    """Read control messages until one of `message_type` arrives.
+
+    Both failure paths say what was seen and how long it took. A bare "no ack"
+    is indistinguishable between a server that sent nothing, a server that sent
+    something else, and a machine that was simply slow - and that ambiguity is
+    what gets a failure written off as flaky.
+    """
+    started = time.monotonic()
+    seen: list[str] = []
     for _ in range(limit):
-        raw = await asyncio.wait_for(connection.recv(), timeout=5.0)
+        try:
+            raw = await asyncio.wait_for(connection.recv(), timeout=5.0)
+        except TimeoutError:
+            raise AssertionError(
+                f"timed out after {time.monotonic() - started:.2f}s waiting for "
+                f"{message_type!r}; messages seen so far: {seen}"
+            ) from None
         if isinstance(raw, bytes):
+            seen.append(f"<binary {len(raw)}B>")
             continue
         payload = json.loads(raw)
+        seen.append(str(payload.get("type")))
         if payload.get("type") == message_type:
             return payload
-    raise AssertionError(f"no {message_type!r} within {limit} messages")
+    raise AssertionError(
+        f"no {message_type!r} within {limit} messages after "
+        f"{time.monotonic() - started:.2f}s; saw {seen}"
+    )
+
+
+async def handshake(connection: Any, message: str) -> Any:
+    """Send `hello` and read `welcome`, with the wait bounded and explained.
+
+    Measured worst case for this exchange is ~90 ms with every core saturated,
+    against websockets' 10 s open timeout, so 15 s here is not a margin that
+    can be reached by slowness. If it ever trips, the cause is something other
+    than a loaded machine, and the message should not imply otherwise.
+    """
+    started = time.monotonic()
+    await connection.send(message)
+    try:
+        raw = await asyncio.wait_for(connection.recv(), timeout=15.0)
+    except TimeoutError:
+        raise AssertionError(
+            f"no reply to `hello` after {time.monotonic() - started:.2f}s. "
+            f"The handshake takes ~2ms idle and ~90ms with all cores busy, so "
+            f"this is not slowness - look for a server-side exception."
+        ) from None
+    return json.loads(raw)
 
 
 # --- authentication --------------------------------------------------------
@@ -186,8 +227,7 @@ async def test_a_valid_token_is_accepted() -> None:
         running() as server,
         connect(url(server), additional_headers=auth()) as connection,
     ):
-        await connection.send(hello())
-        welcome = json.loads(await connection.recv())
+        welcome = await handshake(connection, hello())
 
     assert welcome["type"] == "welcome"
     assert welcome["protocol_version"] == 1
@@ -201,8 +241,7 @@ async def test_an_unknown_epoch_resumes_from_zero() -> None:
         running() as server,
         connect(url(server), additional_headers=auth()) as connection,
     ):
-        await connection.send(hello())
-        welcome = json.loads(await connection.recv())
+        welcome = await handshake(connection, hello())
 
     assert welcome["resume_from_seq"] == 0
 
@@ -224,8 +263,7 @@ async def test_the_resume_point_comes_from_the_store_not_from_memory() -> None:
         running(store=store) as server,
         connect(url(server), additional_headers=auth()) as connection,
     ):
-        await connection.send(hello())
-        welcome = json.loads(await connection.recv())
+        welcome = await handshake(connection, hello())
 
     assert welcome["resume_from_seq"] == 500
 
@@ -247,8 +285,7 @@ async def test_a_different_epoch_resumes_from_zero_independently() -> None:
         running(store=store) as server,
         connect(url(server), additional_headers=auth()) as connection,
     ):
-        await connection.send(hello(epoch=OTHER_EPOCH))
-        welcome = json.loads(await connection.recv())
+        welcome = await handshake(connection, hello(epoch=OTHER_EPOCH))
 
     assert welcome["resume_from_seq"] == 0
 
