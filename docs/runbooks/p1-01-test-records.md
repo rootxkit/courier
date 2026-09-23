@@ -69,7 +69,7 @@ Instrumentation moved it by 0.2 s. That margin is healthy and needed no change.
 `agent/tests/test_halfopen.py` picked the relay's **UDP** intake port by
 probing a **TCP** socket:
 
-```python
+```text
 udp_port = free_port()          # SOCK_STREAM
 ...
 bind_port=udp_port              # used for UDP
