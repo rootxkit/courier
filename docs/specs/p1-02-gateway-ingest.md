@@ -252,6 +252,44 @@ Rules:
 An unclaimed source is a normal condition during setup and a serious one in
 flight, so it is an event and a console state, not a log line.
 
+### `known_drones` is a projection, never an authority
+
+`source_bindings.drone_id` points at `known_drones` in the **telemetry**
+database, not at `drones` in the relational one. A foreign key cannot cross
+databases, and the Gateway does not connect to the relational database, so this
+is what makes "a binding to a drone that does not exist" a constraint violation
+rather than an application check that two concurrent writers can both pass.
+
+`known_drones` holds identities and nothing else: `drone_id`, a label for a
+human reading an event, and registration/retirement timestamps. **The
+relational `drones` registry is the authority.** P2-05 owns projecting into it
+when a drone is registered or retired.
+
+**If the two ever diverge, the repair is to rebuild `known_drones` from
+`drones`, never the reverse.** A projection that has been edited to match a
+mistake becomes a second source of truth, and then nobody can say which
+airframe a flight belonged to.
+
+### The registration race is normal, and recoverable
+
+An aircraft can transmit before its projection lands — powered up while the
+paperwork is still being done, or a station reconnecting with a backlog that
+predates the registration. The Gateway then has no binding and marks those
+records **unclaimed**.
+
+**This is not data loss and it is not an error.** The archive holds every
+datagram regardless of whether it resolved, and resolution happens at the
+record's timestamp, so once the drone is registered and the binding is created
+with the correct `bound_from`, the affected records resolve correctly on
+replay. The state is recoverable after the fact precisely because nothing was
+discarded and nothing was resolved early.
+
+It must be presented that way. The failure mode to guard against is somebody
+seeing a screen full of unclaimed sources and "fixing" it with
+auto-registration — which is what §7 forbids, because a misconfigured aircraft
+would then walk itself into the fleet, and the resulting `drone_id` would be
+one nobody chose.
+
 ## 8. Two stations relaying one vehicle
 
 **Accepted, not rejected.** Two ground stations in radio range of one aircraft

@@ -210,7 +210,19 @@ Goal: orders exist, move through states, and are fully auditable.
 
 - [ ] **P2-05** Drone and pilot registry API, including status transitions
       (`IDLE`, `ASSIGNED`, `IN_FLIGHT`, `CHARGING`, `MAINTENANCE`, `OFFLINE`).
-      *Done when:* status is derived from telemetry freshness, not set by hand.
+      **Registering or retiring a drone must project into the telemetry
+      database's `known_drones`.** The Gateway never connects to the relational
+      database, so `source_bindings.drone_id` points at that projection rather
+      than at `drones`, and a binding to a drone the projection has not heard
+      of is refused by a foreign key. Without this step someone inserts into
+      `drones`, the binding is refused or the telemetry is marked unclaimed,
+      and the cause is invisible from either side: the relational registry
+      looks correct and the Gateway looks broken.
+      `known_drones` is a projection, never an authority — see
+      `docs/specs/p1-02-gateway-ingest.md` §7.
+      *Done when:* status is derived from telemetry freshness, not set by hand,
+      and registering a drone makes it bindable in the telemetry database
+      without anyone touching that database by hand.
 
 - [ ] **P2-06** Append-only audit log with a query API filtered by entity and
       time range.
