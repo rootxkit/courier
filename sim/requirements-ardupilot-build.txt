@@ -21,10 +21,24 @@
 # https://setuptools.pypa.io/en/latest/history.html#v82-0-0
 setuptools==81.0.0
 
-# The package that was missing outright. Nothing in the previous CI list
-# provided it, so the DSDL generator had nothing to import even before
-# pkg_resources entered the picture.
-dronecan==1.0.27
+# `dronecan` is deliberately NOT listed here, although the failure message
+# said "please install dronecan with 'python3 -m pip install dronecan'".
+#
+# ArduPilot vendors it as the submodule modules/DroneCAN/pydronecan, and
+# dronecan_dsdlc.py imports it like this:
+#
+#     try:
+#         import dronecan.dsdl
+#     except Exception:
+#         sys.path.insert(0, ".../pydronecan/")   # "for usage in CI"
+#         import dronecan.dsdl
+#
+# The observed failure was the *second* import, not the first: the vendored
+# copy was found and then failed on pkg_resources. Installing dronecan from
+# PyPI would make the first import succeed instead, silently substituting a
+# release that need not match the modules/DroneCAN/DSDL checked out for this
+# ArduPilot ref. That is a green job building something other than what it
+# claims to. The submodule is already checked out by `submodules: recursive`.
 
 # 3.3.4 because ArduPilot pins it there. empy 4.x changed its API and the waf
 # build does not work with it.
@@ -45,9 +59,12 @@ MAVProxy==1.8.74
 
 # --- Transitive, pinned for the same reason -----------------------------------
 #
-# These are not imported by this project or by the build; they arrive as
-# dependencies of the packages above. They are pinned anyway, because an
-# unpinned transitive dependency is the same coin flip one level down.
+# Not imported by this project or by the build; they arrive as dependencies of
+# the packages above (fastcrc and pynmeagps via pymavlink and MAVProxy). They
+# are pinned anyway, because an unpinned transitive dependency is the same coin
+# flip one level down. Re-derive this list with
+# `pip install --dry-run --report` after changing anything above rather than
+# editing it by hand.
 #
 # Verified to have artifacts for the platform this job runs on (Linux x86_64,
 # CPython 3.12): numpy and fastcrc ship cp312 manylinux wheels, pynmeagps is
