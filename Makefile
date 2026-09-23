@@ -60,7 +60,11 @@ PROBE_OPTS := $(if $(PROBE_HOST),--host $(PROBE_HOST)) $(if $(PROBE_PORT),--port
 # Raise them when coverage rises; lowering one needs a reason in the commit.
 COVERAGE_MIN_AGENT ?= 95
 COVERAGE_MIN_PROBE ?= 35
-COVERAGE_MIN_GATEWAY ?= 90
+COVERAGE_MIN_GATEWAY ?= 92
+# gateway/ingest_store_pg.py is excluded from the figure above and gated
+# separately by `make test-db`: its tests need a database, so counting it in a
+# run that skips them would ratchet against coverage that was never measured.
+COVERAGE_MIN_INGEST_STORE ?= 85
 
 .PHONY: help hooks up down stop ps logs reset psql psql-telemetry sim sim-stop \
         venv lint fmt typecheck test test-cov test-slow test-sitl cover clean probe probe-roundtrip
@@ -133,22 +137,35 @@ typecheck: venv ## mypy, strict on the safety-relevant modules
 	$(VENV_BIN)/mypy
 
 test: venv ## Run unit tests (slow and SITL tests excluded)
-	$(VENV_BIN)/pytest -m 'not sitl and not slow'
+	$(VENV_BIN)/pytest -m 'not sitl and not slow and not postgres'
 
 test-cov: venv ## Run unit tests with a coverage report
-	$(VENV_BIN)/pytest -m 'not sitl and not slow' --cov --cov-branch --cov-report=term-missing
+	$(VENV_BIN)/pytest -m 'not sitl and not slow and not postgres' --cov --cov-branch --cov-report=term-missing
 
 cover: venv ## Branch coverage with the thresholds enforced (what CI runs)
-	$(VENV_BIN)/pytest -m 'not sitl and not slow' --cov --cov-branch --cov-report=term-missing:skip-covered --cov-report=xml
+	$(VENV_BIN)/pytest -m 'not sitl and not slow and not postgres' --cov --cov-branch --cov-report=term-missing:skip-covered --cov-report=xml
 	@echo
 	@echo "=== agent/ - uncovered lines and branch arcs ==="
 	$(VENV_BIN)/coverage report --include='agent/*' --show-missing --fail-under=$(COVERAGE_MIN_AGENT)
 	@echo
 	@echo "=== gateway/ - uncovered lines and branch arcs ==="
-	$(VENV_BIN)/coverage report --include='gateway/*' --show-missing --fail-under=$(COVERAGE_MIN_GATEWAY)
+	$(VENV_BIN)/coverage report --include='gateway/*' --omit='gateway/ingest_store_pg.py' --show-missing --fail-under=$(COVERAGE_MIN_GATEWAY)
 	@echo
 	@echo "=== tools/mavlink_probe.py - uncovered ==="
 	$(VENV_BIN)/coverage report --include='tools/mavlink_probe.py' --show-missing --fail-under=$(COVERAGE_MIN_PROBE)
+
+# Two migration trees, two databases, never merged. See CLAUDE.md.
+TELEMETRY_ALEMBIC := $(VENV_BIN)/alembic -c infra/migrations/telemetry/alembic.ini
+
+migrate: venv ## Apply telemetry database migrations
+	$(TELEMETRY_ALEMBIC) upgrade head
+
+migrate-down: venv ## Roll the telemetry database back one revision
+	$(TELEMETRY_ALEMBIC) downgrade -1
+
+test-db: venv ## Run tests that need the telemetry database (make up first)
+	$(VENV_BIN)/pytest -m postgres -v --cov=gateway.ingest_store_pg --cov-branch --cov-report=term-missing
+	$(VENV_BIN)/coverage report --include='gateway/ingest_store_pg.py' --show-missing --fail-under=$(COVERAGE_MIN_INGEST_STORE)
 
 test-slow: venv ## Run the slow tests excluded from `make test`
 	$(VENV_BIN)/pytest -m slow -v

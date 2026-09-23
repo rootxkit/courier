@@ -318,11 +318,26 @@ one that does not.
 
 - **Hot path → TimescaleDB** `drone_state` hypertable (P1-04 owns batching,
   chunking and retention).
-- **Raw archive → every received datagram**, addressable by
-  `(station_id, epoch, seq)` with its `recv_utc_ns`, sufficient for P10-03 to
-  replay a flight and for `tools/analyze_capture.py` to run over it.
-- **Events → the append-only `events` table**: gaps, intake-drop deltas,
-  station state transitions, rejected SYSIDs, relay restarts.
+- **Raw archive → files, not the database.** Hourly segments partitioned by
+  station and epoch, zstd compressed, each segment a sequence of relay-v1 §6
+  record frames so the archive format *is* the wire format and
+  `tools/analyze_capture.py` reads it unchanged. Addressable by
+  `(station_id, epoch, seq)` and by time range, sufficient for P10-03 replay.
+
+  At ~240 MB per aircraft per day before compression, five aircraft is ~36 GB
+  a month of opaque bytes nobody queries by content — after an incident you
+  read a time range. Rows would buy nothing and cost an index. The **index** of
+  which segment covers which interval lives in the telemetry database; the
+  contents do not. Object storage is a later implementation behind the same
+  interface, not a migration.
+- **Events → `ingest_events` in the telemetry database**: gaps, intake-drop
+  deltas, station state transitions, rejected SYSIDs, relay restarts.
+
+  Deliberately *not* `ARCHITECTURE.md` §4's `events` table, which lives in the
+  relational database. The Gateway does not connect to the relational database
+  and keeping it that way is worth more than one shared table: ingest stays
+  isolated from the business schema in both directions. §4's `events` is
+  unchanged and remains the business audit log; the console reads both.
 
 Units and conventions are not negotiable here: SI at the parser boundary
 (1e7 lat/lon, mm→m, cm/s→m/s), AGL and AMSL stored separately and named, all
@@ -351,12 +366,24 @@ Listed, not resolved. Each needs an answer before the code that depends on it.
 1. **Token storage and rotation.** Where do station tokens live, how are they
    issued, how is one revoked mid-flight? Hashed at rest is the obvious
    starting point, but rotation while a station is connected is not obvious.
-2. **Raw archive medium.** TimescaleDB alongside `drone_state`, object storage,
-   or files on disk? Volume is ~2.8 KiB/s per aircraft before compression —
-   about 240 MB per aircraft per day. Retention policy is unanswered.
-3. **Dedupe index cost.** `(station_id, epoch, seq)` over months of records is
-   a large index. Is dedupe bounded to a recent window, and if so what happens
-   to a relay replaying a very old backlog?
+2. ~~**Raw archive medium.**~~ **ANSWERED (2026-09-23):** files, hourly
+   segments partitioned by station and epoch, zstd compressed, with the segment
+   index in the telemetry database. See §10. *Retention of the segments
+   themselves is still unanswered* — only the epoch metadata has a retention
+   rule so far.
+3. ~~**Dedupe index cost.**~~ **ANSWERED (2026-09-23):** bounded per *epoch*,
+   never by time. A time window would reject a relay replaying a two-hour
+   backlog, which is the design working as intended. Per `(station_id, epoch)`
+   the state is one `highest_contiguous_seq` plus a short list of permanent
+   gaps — constant-size however old the replay is, and the same number
+   `resume_from_seq` needs, so the two cannot drift apart.
+
+   An epoch is closed when its station declares a different one, and closed
+   epochs are dropped after a retention period. **Failure mode, deliberately
+   chosen:** a relay reconnecting under a dropped epoch is treated as new, so
+   it resends — duplicating data rather than losing it. The opposite, keeping
+   the watermark and discarding the resend, looks identical in every log and
+   silently loses a flight.
 4. **Clock correction.** `relay-v1.md` §9 provides the monotonic/UTC pairs to
    estimate a station's clock offset, and notes `SYSTEM_TIME` carries GPS time
    at 3 Hz. Which timestamp is authoritative for `drone_state.ts`, and is the
