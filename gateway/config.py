@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from pydantic import Field
 
 from common import (
@@ -37,4 +39,23 @@ class GatewaySettings(
     # treated as link-lost; it matches the Redis TTL in ARCHITECTURE.md §1.
     link_timeout_s: float = Field(
         default=15.0, gt=0.0, validation_alias="LINK_TIMEOUT_S"
+    )
+
+    # Where the raw archive's hourly segments live. Server-side, not on a
+    # pilot's laptop: the laptop's disk is protected by the relay's queue cap
+    # (P7-11), which is a different mechanism for the same principle.
+    archive_root: Path = Field(
+        default=Path("/var/lib/courier/archive"), validation_alias="ARCHIVE_ROOT"
+    )
+
+    # Ceiling on the archive per station. Retention is normally by age - see
+    # `telemetry_retention_days`, which is shared with P1-04 - and this is the
+    # bound that applies when a station produces more than expected before the
+    # period expires.
+    #
+    # Bounded by policy, never by disk exhaustion. The relay reports a cap drop
+    # to the Gateway as a `gap`; the Gateway has nobody downstream to report to,
+    # so the ingest_events row written on deletion is the entire audit trail.
+    archive_max_gib_per_station: int = Field(
+        default=250, ge=1, validation_alias="ARCHIVE_MAX_GIB_PER_STATION"
     )
