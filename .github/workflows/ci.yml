@@ -78,6 +78,9 @@ jobs:
       - name: Coverage gate - agent/
         run: coverage report --include='agent/*' --show-missing --fail-under=95
 
+      - name: Coverage gate - gateway/
+        run: coverage report --include='gateway/*' --show-missing --fail-under=90
+
       - name: Coverage gate - tools/mavlink_probe.py
         run: coverage report --include='tools/mavlink_probe.py' --show-missing --fail-under=35
 

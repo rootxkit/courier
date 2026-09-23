@@ -60,6 +60,7 @@ PROBE_OPTS := $(if $(PROBE_HOST),--host $(PROBE_HOST)) $(if $(PROBE_PORT),--port
 # Raise them when coverage rises; lowering one needs a reason in the commit.
 COVERAGE_MIN_AGENT ?= 95
 COVERAGE_MIN_PROBE ?= 35
+COVERAGE_MIN_GATEWAY ?= 90
 
 .PHONY: help hooks up down stop ps logs reset psql psql-telemetry sim sim-stop \
         venv lint fmt typecheck test test-cov test-slow test-sitl cover clean probe probe-roundtrip
@@ -142,6 +143,9 @@ cover: venv ## Branch coverage with the thresholds enforced (what CI runs)
 	@echo
 	@echo "=== agent/ - uncovered lines and branch arcs ==="
 	$(VENV_BIN)/coverage report --include='agent/*' --show-missing --fail-under=$(COVERAGE_MIN_AGENT)
+	@echo
+	@echo "=== gateway/ - uncovered lines and branch arcs ==="
+	$(VENV_BIN)/coverage report --include='gateway/*' --show-missing --fail-under=$(COVERAGE_MIN_GATEWAY)
 	@echo
 	@echo "=== tools/mavlink_probe.py - uncovered ==="
 	$(VENV_BIN)/coverage report --include='tools/mavlink_probe.py' --show-missing --fail-under=$(COVERAGE_MIN_PROBE)
