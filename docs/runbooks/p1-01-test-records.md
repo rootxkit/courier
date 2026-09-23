@@ -7,6 +7,90 @@ written down is a failure that gets rediscovered later, at worse cost.
 
 ---
 
+## 2026-09-22 — cost of a refused reconnect on Windows, measured
+
+Not a runbook procedure. A bench measurement, taken while fixing a flaky
+integration test, of how long a *failed* reconnect attempt costs before the
+relay's backoff timer even starts.
+
+### What was measured
+
+A TCP port was bound, its number recorded, and the socket closed, so nothing is
+listening. Ten connection attempts were then timed at three layers, all to
+`127.0.0.1`. The relay's own `websockets.connect` is the top layer; the two
+below it are there to locate the cost.
+
+| Layer                         | min    | median | max    |
+|-------------------------------|--------|--------|--------|
+| blocking `socket.connect`     | 2.019s | 2.045s | 2.057s |
+| `loop.sock_connect`           | 2.024s | 2.042s | 2.060s |
+| `loop.create_connection`      | 2.030s | 2.043s | 2.056s |
+| `websockets.connect`          | 2.034s | 2.045s | 2.070s |
+
+Windows 11 Pro 26200, Python 3.13.2, websockets 17.1, `ProactorEventLoop`.
+
+### What it means
+
+**~2.05 s, and it is the operating system, not the library.** The figure is
+identical at every layer, including a plain blocking socket with no asyncio in
+the picture, so nothing in `websockets` or in the relay is responsible.
+
+The error is `WinError 10061`, "actively refused" — an RST *was* received. It
+still takes two seconds, because the Windows TCP stack does not surface the
+first RST: it retransmits the SYN and only reports the refusal once its retries
+are spent. On loopback, with the peer answering instantly, the entire two
+seconds is retransmit backoff.
+
+The Linux figure is **not measured**. It is expected to be near zero (an RST on
+loopback is reported immediately), but that is reasoning, not evidence, and CI
+runs on Linux. Measure it before relying on it.
+
+### Why this is in the record
+
+The ground stations run Windows — that is where QGC is. So for a station, a
+reconnect attempt against a Gateway that is down costs ~2 s *before* the
+documented backoff begins. The real retry period is `2.05 s + backoff`, not
+`backoff`, and at the cap that is 12 s per attempt rather than 10 s.
+
+Two consequences for P1-02, which sizes Gateway restart behaviour:
+
+- A Gateway restart that takes longer than a few seconds is not free. Each
+  station spends two seconds per attempt discovering the Gateway is still
+  absent, and that cost is paid on every attempt during the restart, not once.
+- With many stations reconnecting at once the arithmetic compounds: the
+  connection attempts themselves arrive spread over a window two seconds wider
+  than the jitter alone implies. That helps — but it is accidental help from an
+  OS timer, not a property anyone designed, and it disappears the day a station
+  runs on Linux.
+
+It is also why `test_the_jittered_backoff_never_exceeds_the_documented_cap`
+stubs `_session` instead of pointing the relay at a dead port. Six real
+attempts would cost twelve seconds of wall clock to test arithmetic.
+
+### Reproducing
+
+```bash
+.venv/Scripts/python - <<'EOF'
+import socket, statistics, time
+with socket.socket() as probe:
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+d = []
+for _ in range(10):
+    s = socket.socket()
+    t0 = time.monotonic()
+    try:
+        s.connect(("127.0.0.1", port))
+    except OSError as error:
+        err = error
+    d.append(time.monotonic() - t0)
+    s.close()
+print(min(d), statistics.median(d), max(d), err)
+EOF
+```
+
+---
+
 ## 2026-09-22 — half-open uplink detection, measured
 
 Not a runbook procedure: a bench measurement made with the TCP proxy fixture in

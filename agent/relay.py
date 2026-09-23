@@ -251,7 +251,13 @@ class Relay:
             # Jitter matters once more than one station exists: without it a
             # Gateway restart brings them all back at the same instant, each
             # draining a backlog.
-            await asyncio.sleep(backoff * (0.5 + random.random()))
+            #
+            # The jittered delay is itself capped. relay-v1 §12 says the
+            # backoff is capped at 10 s, and multiplying a 10 s backoff by a
+            # factor of up to 1.5 sleeps for 15 s - which is not what the
+            # document says, and is a fifteen-second hole in recovery nobody
+            # budgeted for.
+            await asyncio.sleep(min(backoff * (0.5 + random.random()), BACKOFF_MAX_S))
             backoff = min(backoff * BACKOFF_FACTOR, BACKOFF_MAX_S)
 
     def _ssl_context(self) -> ssl.SSLContext | None:

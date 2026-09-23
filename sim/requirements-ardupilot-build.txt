@@ -1,0 +1,74 @@
+# Python packages ArduPilot's waf SITL build needs.
+#
+# Taken from ArduPilot's own Tools/environment_install/install-prereqs-ubuntu.sh
+# (PYTHON_PKGS) on the ref the CI job builds, not invented here, so it tracks a
+# list maintained upstream. The GUI-only and lint-only entries from that script
+# (pygame, matplotlib, scipy, opencv, geocoder, flake8, junitparser) are left
+# out: a headless SITL build does not use them.
+#
+# Every version is pinned. A SITL job that breaks when an unrelated package
+# makes a release is not a gate, it is a coin flip.
+
+# ArduPilot's DroneCAN DSDL generator imports `pkg_resources`, which setuptools
+# removed in 82.0.0. 81.0.0 is the last release that still ships it. Without
+# this pin the SITL build fails, roughly one minute in, as:
+#
+#   No module named 'pkg_resources' -> Failed to import dronecan.dsdl
+#
+# Remove this pin - do not merely raise it - once ArduPilot's generator stops
+# importing pkg_resources. The import is the cause; the pin only holds the
+# symptom still, and an unexplained pin outlives its reason.
+# https://setuptools.pypa.io/en/latest/history.html#v82-0-0
+setuptools==81.0.0
+
+# `dronecan` is deliberately NOT listed here, although the failure message
+# said "please install dronecan with 'python3 -m pip install dronecan'".
+#
+# ArduPilot vendors it as the submodule modules/DroneCAN/pydronecan, and
+# dronecan_dsdlc.py imports it like this:
+#
+#     try:
+#         import dronecan.dsdl
+#     except Exception:
+#         sys.path.insert(0, ".../pydronecan/")   # "for usage in CI"
+#         import dronecan.dsdl
+#
+# The observed failure was the *second* import, not the first: the vendored
+# copy was found and then failed on pkg_resources. Installing dronecan from
+# PyPI would make the first import succeed instead, silently substituting a
+# release that need not match the modules/DroneCAN/DSDL checked out for this
+# ArduPilot ref. That is a green job building something other than what it
+# claims to. The submodule is already checked out by `submodules: recursive`.
+
+# 3.3.4 because ArduPilot pins it there. empy 4.x changed its API and the waf
+# build does not work with it.
+empy==3.3.4
+
+future==1.0.0
+lxml==6.1.3
+pexpect==4.9.0
+ptyprocess==0.7.0
+pyserial==3.5
+
+# Also required by the workspace itself (pyproject `sitl` extra, >=2.4.40).
+# This exact pin satisfies that range, so the workspace install leaves it alone.
+pymavlink==2.4.49
+
+# Runs the per-vehicle MAVLink fan-out that sim/run_sitl.sh starts.
+MAVProxy==1.8.74
+
+# --- Transitive, pinned for the same reason -----------------------------------
+#
+# Not imported by this project or by the build; they arrive as dependencies of
+# the packages above (fastcrc and pynmeagps via pymavlink and MAVProxy). They
+# are pinned anyway, because an unpinned transitive dependency is the same coin
+# flip one level down. Re-derive this list with
+# `pip install --dry-run --report` after changing anything above rather than
+# editing it by hand.
+#
+# Verified to have artifacts for the platform this job runs on (Linux x86_64,
+# CPython 3.12): numpy and fastcrc ship cp312 manylinux wheels, pynmeagps is
+# pure Python. Re-check that before raising any of them.
+fastcrc==0.5.0
+numpy==2.5.3
+pynmeagps==1.1.7

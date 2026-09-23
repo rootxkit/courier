@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import random
 import socket
 from pathlib import Path
 from typing import Any
@@ -26,7 +27,7 @@ from websockets.asyncio.server import ServerConnection, serve
 from agent.config import RelayConfig
 from agent.framing import RECORD_HEADER_BYTES, decode_records
 from agent.queue import DurableQueue
-from agent.relay import ProtocolError, Relay
+from agent.relay import BACKOFF_MAX_S, ProtocolError, Relay
 
 TOKEN = "handshake-test-token"
 DATAGRAM_BYTES = 32
@@ -434,3 +435,68 @@ async def test_intake_drops_do_not_break_the_sequence(tmp_path: Path) -> None:
 
     assert dropped > 0
     assert held == list(range(len(held))), "the sequence has a hole in it"
+
+
+# --- #4: the reconnect backoff obeys its own documented cap -----------------
+
+
+async def test_the_jittered_backoff_never_exceeds_the_documented_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """relay-v1 §12 caps the reconnect backoff at 10 s. Jitter must not lift it.
+
+    `backoff * (0.5 + random())` with the backoff already at the cap sleeps for
+    up to 15 s - a five-second hole in recovery that nobody budgeted for and
+    that the document does not describe. Rule zero: the document is correct and
+    the relay has the bug.
+
+    Worst-case jitter is forced rather than hoped for, and the test asserts the
+    clamp *fires*. A run where the delay merely happened to land under 10 s
+    would prove nothing about the arithmetic that keeps it there.
+    """
+    relay, durable_queue, _ = make_relay(tmp_path, free_port())
+
+    # The session is stubbed to fail instantly. Pointing the relay at a closed
+    # port would exercise more, but a refused connect costs ~2 s on Windows,
+    # and this test is about the loop's arithmetic, not about `connect`.
+    async def failing_session() -> None:
+        raise OSError("the Gateway is not there")
+
+    monkeypatch.setattr(relay, "_session", failing_session)
+
+    delays: list[float] = []
+    enough = asyncio.Event()
+    real_sleep = asyncio.sleep
+
+    async def recording_sleep(delay: float, *args: Any, **kwargs: Any) -> Any:
+        delays.append(delay)
+        # Stop once the cap has had its chance to bind; the count is a guard so
+        # a relay that never reaches the cap fails on the assertion below
+        # rather than hanging here.
+        if delay >= BACKOFF_MAX_S or len(delays) > 20:
+            enough.set()
+        return await real_sleep(0, *args, **kwargs)
+
+    # `agent.relay` calls `random.random()` and `asyncio.sleep()` through the
+    # module objects, so patching them here is what the relay sees.
+    monkeypatch.setattr(random, "random", lambda: 1.0)
+    monkeypatch.setattr(asyncio, "sleep", recording_sleep)
+
+    task = asyncio.create_task(relay.run_uplink())
+    try:
+        await asyncio.wait_for(enough.wait(), timeout=10.0)
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        durable_queue.close()
+
+    assert delays, "the uplink never backed off"
+    assert max(delays) <= BACKOFF_MAX_S, (
+        f"slept for {max(delays)} s; relay-v1 section 12 caps the backoff at "
+        f"{BACKOFF_MAX_S} s"
+    )
+    assert BACKOFF_MAX_S in delays, (
+        "the backoff never reached the cap, so the clamp never ran and this "
+        "test proved nothing"
+    )
