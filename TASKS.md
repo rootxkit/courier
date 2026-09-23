@@ -26,12 +26,15 @@ be launched and observed. No real hardware.
       TimescaleDB, Redis 7, NATS. Healthchecks on all four. Named volumes.
       *Done when:* `make up` reaches healthy on all services from a cold start.
 
-- [~] **P0-04** SITL launcher `sim/run_sitl.sh` — N instances, unique SYSID per
+- [x] **P0-04** SITL launcher `sim/run_sitl.sh` — N instances, unique SYSID per
       instance, configurable home location, distinct UDP out ports.
       *Done when:* `make sim N=10` gives 10 vehicles with distinct SYSIDs.
-      *Partial:* CI smoke test proves the launcher works. Visual confirmation in
-      QGC still outstanding — close that once local SITL exists (P0-08), because
-      a SYSID collision would pass CI and fail in the console.
+      *Closed* on the first green `sitl` job (PR #5): three vehicles launched
+      with distinct SYSIDs and the integration tests passed against them.
+      *Still pending:* visual confirmation in QGC, which needs local SITL
+      (P0-08). CI proves the SYSIDs are distinct on the wire; it cannot prove
+      they render as three vehicles in the console. Do not treat P0-08 as
+      optional on the strength of this checkbox.
 
 - [ ] **P0-08** WSL2 development environment per `docs/DEV_SETUP_WSL.md`:
       mirrored networking, Docker integration, repo on the WSL filesystem,
@@ -43,9 +46,13 @@ be launched and observed. No real hardware.
       support, shared `pyproject.toml` conventions.
       *Done when:* `make lint` and `make test` pass on an empty repo.
 
-- [~] **P0-06** CI pipeline (GitHub Actions): lint, typecheck, unit tests on
+- [x] **P0-06** CI pipeline (GitHub Actions): lint, typecheck, unit tests on
       every push; SITL integration job on PR to `main`.
       *Done when:* CI is green on the P0 branch.
+      *Closed* on PR #5, the first run where the `sitl` job built ArduPilot and
+      ran the integration tests rather than failing in setup. The job is also
+      dispatchable manually (`workflow_dispatch`), so the next branch can prove
+      it green before opening a PR.
 
 - [x] **P0-07** Structured logging and config loading shared library
       (`common/`): JSON logs, env-based config with validation, no bare prints.
