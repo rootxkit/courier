@@ -365,6 +365,34 @@ the bottleneck — not before.
 
 This is the phase where a bug means physical damage. Budget the most time here.
 
+- [ ] **P5-00** Terrain elevation source: ground elevation AMSL for a given
+      position, so that AGL becomes derivable at all.
+      **A prerequisite for P5-01 and P5-03, not an optional extra.** There is
+      currently no source for height above ground anywhere in the system:
+      `GLOBAL_POSITION_INT.relative_alt` is "Altitude above home", and
+      `GPS_RAW_INT.alt` and `VFR_HUD.alt` are MSL. `ARCHITECTURE.md` §7's
+      altitude layers are therefore written in AMSL against a reference
+      elevation, and the terrain bound that makes them safe
+      (`max_terrain_rise_m = lowest_layer_offset_m - minimum_clearance_m`)
+      cannot be checked without this.
+      Candidate sources, to be evaluated rather than assumed:
+      - **A DEM** — SRTM (~30 m postings, void-filled variants vary) or
+        Copernicus DEM (~30 m, generally better in mountainous terrain, which
+        Georgia is). Queried by position, served locally; licence and
+        coverage both need checking.
+      - **ArduPilot's `TERRAIN_REPORT`** (message 180), observed at 3.00 Hz in
+        ADR-001's capture. It carries terrain height from the flight
+        controller's own onboard terrain database, which makes it the
+        aircraft's own view rather than an independent one. **Investigate, do
+        not assume:** that database has its own coverage, resolution and
+        loading behaviour, it can be absent or stale, and a value that is
+        missing in flight is worse than one that was never offered. Whether it
+        agrees with a DEM is itself worth measuring.
+      *Done when:* ground elevation can be queried for any point in the
+      operating area, the two sources have been compared over that area, and
+      the disagreement between them is a recorded number rather than an
+      assumption.
+
 - [ ] **P5-01** Corridor generation: route → buffered polygon + altitude band +
       time window, stored as a reservation.
       *Done when:* corridors are visible as polygons on the pilot map.
@@ -374,6 +402,10 @@ This is the phase where a bug means physical damage. Budget the most time here.
       rejected; the same routes 10 minutes apart are accepted.
 
 - [ ] **P5-03** Semicircular altitude rule assignment by track angle.
+      Bands are **AMSL**, offset from an operating area's reference elevation
+      (`ARCHITECTURE.md` §7.1). AGL bands would not guarantee separation: two
+      aircraft 15 m apart in AGL over terrain differing by 15 m are at the same
+      height. Needs P5-00 to check the terrain bound.
       *Done when:* reciprocal routes are automatically assigned different bands.
 
 - [ ] **P5-04** Conflict resolution ladder: altitude change → departure delay →

@@ -378,9 +378,42 @@ one that does not.
   unchanged and remains the business audit log; the console reads both.
 
 Units and conventions are not negotiable here: SI at the parser boundary
-(1e7 lat/lon, mm→m, cm/s→m/s), AGL and AMSL stored separately and named, all
+(1e7 lat/lon, mm→m, cm/s→m/s), altitudes stored separately and named, all
 timestamps `TIMESTAMPTZ` in UTC, all geometry SRID 4326. P1-03 owns the
 conversion and its property tests.
+
+### Why there is no `alt_agl_m`, and why it must not be added back
+
+`drone_state` carries `alt_amsl_m` and `alt_above_home_m`. It does **not**
+carry `alt_agl_m`, and the field was removed from `ARCHITECTURE.md` §4 rather
+than left nullable.
+
+Nothing in the telemetry carries height above ground. From pymavlink's own
+field descriptions:
+
+| Field | Description | Datum |
+|---|---|---|
+| `GLOBAL_POSITION_INT.alt` | "Altitude (MSL)" | AMSL |
+| `GLOBAL_POSITION_INT.relative_alt` | **"Altitude above home"** | above home |
+| `GPS_RAW_INT.alt` | "Altitude (MSL)" | AMSL |
+| `GPS_RAW_INT.alt_ellipsoid` | "Altitude (above WGS84, EGM96 ellipsoid)" | ellipsoid |
+| `VFR_HUD.alt` | "Current altitude (MSL)" | AMSL |
+
+`relative_alt` equals AGL only while the ground under the aircraft is at the
+home point's elevation. Over rising terrain it overstates clearance.
+
+**The tempting change is to rename `alt_above_home_m` to `alt_agl_m`, or to
+fill a nullable `alt_agl_m` from it. Do neither.** The resulting error is
+smooth, plausible and produces no signal anywhere: the track looks normal, the
+numbers look normal, and the aircraft is lower over the ground than the data
+says. It lands in deconfliction, where §7.2 alerts on `d_alt < 20 m` and §7.1's
+layers are 15 m apart — so a terrain difference of one layer's spacing is
+enough to judge two aircraft as separated when they are co-altitude, or the
+reverse.
+
+That is why `ARCHITECTURE.md` §7's altitude layers are now expressed in AMSL
+against a reference elevation. AGL returns when **P5-00** provides a terrain
+source, and the column returns with it.
 
 ## 11. Direct UDP ingest
 
