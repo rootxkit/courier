@@ -65,7 +65,9 @@ def attitude(*, sysid: int = 1, compid: int = 1) -> ParsedMessage:
 
 def test_every_hot_path_id_matches_pymavlinks_own_table() -> None:
     """Cross-checked against `mavlink_map`, not recomputed the same way."""
-    by_name = {cls.name: message_id for message_id, cls in mavlink.mavlink_map.items()}
+    by_name = {
+        cls.msgname: message_id for message_id, cls in mavlink.mavlink_map.items()
+    }
     expected = {by_name[name] for name in HOT_PATH_MESSAGE_NAMES}
 
     assert expected == HOT_PATH_MESSAGE_IDS
@@ -73,12 +75,14 @@ def test_every_hot_path_id_matches_pymavlinks_own_table() -> None:
 
 def test_every_hot_path_name_exists_in_the_dialect() -> None:
     """A typo'd name would silently drop a message from the hot path."""
-    known = {cls.name for cls in mavlink.mavlink_map.values()}
+    known = {cls.msgname for cls in mavlink.mavlink_map.values()}
     assert set(HOT_PATH_MESSAGE_NAMES) <= known
 
 
 def test_the_heartbeat_id_is_pymavlinks() -> None:
-    by_name = {cls.name: message_id for message_id, cls in mavlink.mavlink_map.items()}
+    by_name = {
+        cls.msgname: message_id for message_id, cls in mavlink.mavlink_map.items()
+    }
     assert by_name["HEARTBEAT"] == HEARTBEAT_ID
 
 
@@ -103,7 +107,9 @@ def test_the_hot_path_is_the_adr_001_list() -> None:
 
 @pytest.mark.parametrize("name", HOT_PATH_MESSAGE_NAMES)
 def test_hot_path_messages_are_on_the_hot_path(name: str) -> None:
-    by_name = {cls.name: message_id for message_id, cls in mavlink.mavlink_map.items()}
+    by_name = {
+        cls.msgname: message_id for message_id, cls in mavlink.mavlink_map.items()
+    }
     assert is_hot_path(by_name[name])
 
 
@@ -118,7 +124,9 @@ def test_everything_else_is_archived_not_on_the_hot_path(name: str) -> None:
     converted to live state", not "thrown away" - the archive already holds
     the datagram either way.
     """
-    by_name = {cls.name: message_id for message_id, cls in mavlink.mavlink_map.items()}
+    by_name = {
+        cls.msgname: message_id for message_id, cls in mavlink.mavlink_map.items()
+    }
     assert not is_hot_path(by_name[name])
 
 
@@ -128,7 +136,9 @@ def test_mission_item_reached_is_on_the_hot_path_though_never_observed() -> None
     An event that did not happen is not a missing stream. It stays on the hot
     path, and §6.4 forbids treating its absence as a fault.
     """
-    by_name = {cls.name: message_id for message_id, cls in mavlink.mavlink_map.items()}
+    by_name = {
+        cls.msgname: message_id for message_id, cls in mavlink.mavlink_map.items()
+    }
     assert is_hot_path(by_name["MISSION_ITEM_REACHED"])
 
 

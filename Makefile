@@ -65,7 +65,7 @@ COVERAGE_MIN_GATEWAY ?= 92
 # separately by `make test-db`: their tests need a database, so counting them
 # in a run that skips those tests would ratchet against coverage that was
 # never measured.
-COVERAGE_DB_ONLY := gateway/ingest_store_pg.py,gateway/retention.py,gateway/binding.py
+COVERAGE_DB_ONLY := gateway/ingest_store_pg.py,gateway/retention.py,gateway/binding.py,gateway/state_writer.py
 COVERAGE_MIN_DB_MODULES ?= 85
 
 .PHONY: help hooks up down stop ps logs reset psql psql-telemetry sim sim-stop \
@@ -166,7 +166,7 @@ migrate-down: venv ## Roll the telemetry database back one revision
 	$(TELEMETRY_ALEMBIC) downgrade -1
 
 test-db: venv ## Run tests that need the telemetry database (make up first)
-	$(VENV_BIN)/pytest -m postgres -v --cov=gateway.ingest_store_pg --cov=gateway.retention --cov=gateway.binding --cov-branch --cov-report=term-missing
+	$(VENV_BIN)/pytest -m postgres -v --cov=gateway.ingest_store_pg --cov=gateway.retention --cov=gateway.binding --cov=gateway.state_writer --cov-branch --cov-report=term-missing
 	$(VENV_BIN)/coverage report --include='$(COVERAGE_DB_ONLY)' --show-missing --fail-under=$(COVERAGE_MIN_DB_MODULES)
 
 test-slow: venv ## Run the slow tests excluded from `make test`

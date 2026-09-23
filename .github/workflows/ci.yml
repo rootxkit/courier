@@ -82,7 +82,7 @@ jobs:
       # job instead: their tests need a database this job does not have, so
       # counting them would ratchet against coverage never measured.
       - name: Coverage gate - gateway/
-        run: coverage report --include='gateway/*' --omit='gateway/ingest_store_pg.py,gateway/retention.py,gateway/binding.py' --show-missing --fail-under=92
+        run: coverage report --include='gateway/*' --omit='gateway/ingest_store_pg.py,gateway/retention.py,gateway/binding.py,gateway/state_writer.py' --show-missing --fail-under=92
 
       - name: Coverage gate - tools/mavlink_probe.py
         run: coverage report --include='tools/mavlink_probe.py' --show-missing --fail-under=35
@@ -173,10 +173,10 @@ jobs:
           alembic -c infra/migrations/telemetry/alembic.ini upgrade head
 
       - name: Database tests
-        run: pytest -m postgres -v --cov=gateway.ingest_store_pg --cov=gateway.retention --cov=gateway.binding --cov-branch --cov-report=term-missing
+        run: pytest -m postgres -v --cov=gateway.ingest_store_pg --cov=gateway.retention --cov=gateway.binding --cov=gateway.state_writer --cov-branch --cov-report=term-missing
 
       - name: Coverage gate - database-backed modules
-        run: coverage report --include='gateway/ingest_store_pg.py,gateway/retention.py,gateway/binding.py' --show-missing --fail-under=85
+        run: coverage report --include='gateway/ingest_store_pg.py,gateway/retention.py,gateway/binding.py,gateway/state_writer.py' --show-missing --fail-under=85
 
 
   compose:

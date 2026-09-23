@@ -181,7 +181,12 @@ def is_sentinel(message_class: Any, field_name: str, value: object) -> bool:
     degrees, which no compass produces but which every downstream average,
     interpolation and plot will absorb without complaint.
     """
-    key = (getattr(message_class, "name", ""), field_name)
+    # `msgname`, not `name`: pymavlink deprecated the latter and warns on every
+    # access, which at 84 frames a second per aircraft is a log nobody reads.
+    # `name` is kept as a fallback for pymavlink 2.4.30 and earlier, which is
+    # the version boundary the library's own warning names.
+    message_name = getattr(message_class, "msgname", getattr(message_class, "name", ""))
+    key = (message_name, field_name)
     unknown = SENTINELS.get(key)
     if unknown is None:
         return False
