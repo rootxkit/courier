@@ -209,6 +209,11 @@ class RelayServer:
                 f"resolves to {station_id!r}"
             )
 
+        # Declared before the resume point is read, so a station that has
+        # recreated its queue has the previous epoch closed first. Reading the
+        # watermark first would be harmless today and wrong the moment closing
+        # an epoch affects what the watermark means.
+        await self.store.open_epoch(station_id, message.epoch)
         resume_from_seq = await self.store.resume_from_seq(station_id, message.epoch)
 
         # Protocol §11: the server asking for records that never existed is a

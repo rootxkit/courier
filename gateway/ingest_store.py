@@ -45,6 +45,16 @@ class StoreError(RuntimeError):
 class IngestStore(Protocol):
     """Everything the relay-v1 server side needs from durable storage."""
 
+    async def open_epoch(self, station_id: str, epoch: str) -> None:
+        """Declare this epoch current for the station.
+
+        Called once per connection, from the handshake. Protocol §4: the epoch
+        changes only when the relay's queue database is created, so a station
+        presenting a different one will never continue the previous epoch -
+        which is what makes closing it safe, and what bounds the dedupe state.
+        """
+        ...
+
     async def resume_from_seq(self, station_id: str, epoch: str) -> int:
         """The next sequence number this Gateway wants, from durable state.
 
@@ -96,6 +106,10 @@ class InMemoryIngestStore:
     gaps: dict[tuple[str, str], list[Gap]] = field(default_factory=dict)
     losses: list[tuple[str, str, LossEvent]] = field(default_factory=list)
     link_states: list[tuple[str, LinkState, int]] = field(default_factory=list)
+    opened: list[tuple[str, str]] = field(default_factory=list)
+
+    async def open_epoch(self, station_id: str, epoch: str) -> None:
+        self.opened.append((station_id, epoch))
 
     async def resume_from_seq(self, station_id: str, epoch: str) -> int:
         return self._watermark(station_id, epoch) + 1
