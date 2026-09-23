@@ -1,0 +1,57 @@
+# Python packages ArduPilot's waf SITL build needs.
+#
+# Taken from ArduPilot's own Tools/environment_install/install-prereqs-ubuntu.sh
+# (PYTHON_PKGS) on the ref the CI job builds, not invented here, so it tracks a
+# list maintained upstream. The GUI-only and lint-only entries from that script
+# (pygame, matplotlib, scipy, opencv, geocoder, flake8, junitparser) are left
+# out: a headless SITL build does not use them.
+#
+# Every version is pinned. A SITL job that breaks when an unrelated package
+# makes a release is not a gate, it is a coin flip.
+
+# ArduPilot's DroneCAN DSDL generator imports `pkg_resources`, which setuptools
+# removed in 82.0.0. 81.0.0 is the last release that still ships it. Without
+# this pin the SITL build fails, roughly one minute in, as:
+#
+#   No module named 'pkg_resources' -> Failed to import dronecan.dsdl
+#
+# Remove this pin - do not merely raise it - once ArduPilot's generator stops
+# importing pkg_resources. The import is the cause; the pin only holds the
+# symptom still, and an unexplained pin outlives its reason.
+# https://setuptools.pypa.io/en/latest/history.html#v82-0-0
+setuptools==81.0.0
+
+# The package that was missing outright. Nothing in the previous CI list
+# provided it, so the DSDL generator had nothing to import even before
+# pkg_resources entered the picture.
+dronecan==1.0.27
+
+# 3.3.4 because ArduPilot pins it there. empy 4.x changed its API and the waf
+# build does not work with it.
+empy==3.3.4
+
+future==1.0.0
+lxml==6.1.3
+pexpect==4.9.0
+ptyprocess==0.7.0
+pyserial==3.5
+
+# Also required by the workspace itself (pyproject `sitl` extra, >=2.4.40).
+# This exact pin satisfies that range, so the workspace install leaves it alone.
+pymavlink==2.4.49
+
+# Runs the per-vehicle MAVLink fan-out that sim/run_sitl.sh starts.
+MAVProxy==1.8.74
+
+# --- Transitive, pinned for the same reason -----------------------------------
+#
+# These are not imported by this project or by the build; they arrive as
+# dependencies of the packages above. They are pinned anyway, because an
+# unpinned transitive dependency is the same coin flip one level down.
+#
+# Verified to have artifacts for the platform this job runs on (Linux x86_64,
+# CPython 3.12): numpy and fastcrc ship cp312 manylinux wheels, pynmeagps is
+# pure Python. Re-check that before raising any of them.
+fastcrc==0.5.0
+numpy==2.5.3
+pynmeagps==1.1.7
