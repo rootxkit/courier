@@ -16,12 +16,14 @@ import pytest
 from pymavlink.dialects.v20 import ardupilotmega as mavlink
 
 from gateway.conversion import (
+    EKF_POS_HORIZ_ABS,
     JOULES_PER_WATT_HOUR,
     Position,
     air_data_from_vfr_hud,
     battery_from_battery_status,
     battery_from_sys_status,
     gps_from_gps_raw_int,
+    horizontal_position_is_valid,
     position_from_global_position_int,
 )
 from gateway.units import INT16_MAX, UINT8_MAX, UINT16_MAX
@@ -150,7 +152,7 @@ def test_there_is_no_agl_field_because_nothing_carries_one() -> None:
     look higher above it than it is, smoothly and without any signal.
     """
     assert not hasattr(
-        Position(41.0, 44.0, 1.0, 2.0, None, None, None, None), "alt_agl_m"
+        Position(41.0, 44.0, True, 1.0, 2.0, None, None, None, None), "alt_agl_m"
     )
     assert "alt_above_home_m" in Position.__slots__
 
@@ -181,16 +183,70 @@ def test_an_unknown_heading_is_none_not_655_degrees() -> None:
     assert position.lat_deg == pytest.approx(41.7151)
 
 
-def test_a_position_at_zero_is_kept() -> None:
-    """0,0 is the Gulf of Guinea, not a sentinel.
+def test_an_invalid_position_is_none_never_zero_zero() -> None:
+    """Unknown is not a value.
 
-    GLOBAL_POSITION_INT has no way to say "position unknown", so discarding
-    zeroes would throw away a real fix. Whether it is usable is what the GPS
-    fix type is for.
+    ArduPilot sends `lat = lon = 0` before the EKF has an origin - observed on
+    a real aircraft, every GLOBAL_POSITION_INT for the whole indoor session.
+    Storing that writes a coordinate indistinguishable from a real one, so it
+    is only wrong at the point where somebody forgets to check: the map draws
+    a delivery in the Gulf of Guinea, P4 computes a distance to it.
     """
-    position = position_from_global_position_int(global_position(lat=0, lon=0))
+    position = position_from_global_position_int(
+        global_position(lat=0, lon=0), horizontal_valid=False
+    )
+
+    assert position.lat_deg is None
+    assert position.lon_deg is None
+    assert position.horizontal_valid is False
+
+
+def test_an_invalid_position_keeps_everything_else() -> None:
+    """The aircraft is present and most of what it says is real.
+
+    Heading comes from the compass and works indoors with no fix at all;
+    altitude is a separate EKF estimate with its own flag. Dropping the row
+    would discard real measurements to avoid one unknown.
+    """
+    position = position_from_global_position_int(
+        global_position(lat=0, lon=0), horizontal_valid=False
+    )
+
+    assert position.heading_deg == pytest.approx(90.0)
+    assert position.alt_amsl_m == pytest.approx(450.0)
+    assert position.alt_above_home_m == pytest.approx(60.0)
+    assert position.vz_ms == pytest.approx(1.5)
+
+
+def test_a_real_position_at_zero_would_be_kept_when_the_ekf_says_so() -> None:
+    """The paired presence test, and the reason the EKF flag is the authority.
+
+    0,0 *is* a real place. If the EKF claims an absolute horizontal position
+    there, it is stored - the rule rejects positions the aircraft says are
+    invalid, not coordinates somebody finds implausible.
+    """
+    position = position_from_global_position_int(
+        global_position(lat=0, lon=0), horizontal_valid=True
+    )
+
     assert position.lat_deg == 0.0
     assert position.lon_deg == 0.0
+    assert position.horizontal_valid is True
+
+
+def test_without_an_ekf_report_an_exact_zero_is_still_refused() -> None:
+    """§6.4 forbids requiring EKF_STATUS_REPORT to arrive at all.
+
+    So the fallback is what ArduPilot actually sends with no origin, and it
+    resolves to None rather than to a stored coordinate. A real position is
+    unaffected.
+    """
+    absent = position_from_global_position_int(global_position(lat=0, lon=0))
+    real = position_from_global_position_int(global_position())
+
+    assert absent.lat_deg is None
+    assert real.lat_deg == pytest.approx(41.7151)
+    assert real.horizontal_valid is True
 
 
 # --- gps -------------------------------------------------------------------
@@ -352,3 +408,51 @@ def test_vfr_hud_and_global_position_agree_on_amsl() -> None:
 
     assert air.alt_amsl_m == pytest.approx(position.alt_amsl_m)
     assert position.alt_above_home_m == pytest.approx(60.0)
+
+
+# --- the EKF flag that decides it ------------------------------------------
+
+
+def test_the_ekf_flag_comes_from_pymavlinks_enum() -> None:
+    """Derived, not written as 16.
+
+    Cross-checked against the enum by name, because this single bit is what
+    separates a real position from a placeholder; a wrong-but-plausible value
+    would make the distinction silently useless.
+    """
+    assert EKF_POS_HORIZ_ABS == mavlink.EKF_POS_HORIZ_ABS
+    assert EKF_POS_HORIZ_ABS == 1 << 4
+
+
+def test_the_observed_indoor_flags_report_no_horizontal_position() -> None:
+    """The exact value a real aircraft sent, from the raw archive.
+
+    0xa7 = ATTITUDE | VELOCITY_HORIZ | VELOCITY_VERT | POS_VERT_ABS
+         | CONST_POS_MODE
+
+    POS_HORIZ_ABS clear and CONST_POS_MODE set: ArduPilot holding a constant
+    position because it has no horizontal source.
+    """
+    observed = 0xA7
+
+    assert horizontal_position_is_valid(observed) is False
+    assert observed & mavlink.EKF_CONST_POS_MODE
+    assert observed & mavlink.EKF_ATTITUDE, "heading was valid throughout"
+    assert observed & mavlink.EKF_POS_VERT_ABS, "altitude was valid throughout"
+
+
+def test_the_same_flags_with_horizontal_position_are_valid() -> None:
+    """The paired presence test: the check must not reject everything."""
+    assert horizontal_position_is_valid(0xA7 | mavlink.EKF_POS_HORIZ_ABS) is True
+
+
+def test_a_gps_fix_type_is_not_the_test() -> None:
+    """GLOBAL_POSITION_INT is the EKF's fused estimate, not raw GPS.
+
+    On the observed aircraft GPS_RAW_INT reported fix_type 1 with a stale
+    lat/lon in Zambia while the EKF correctly reported no horizontal position
+    and sent zeroes. Reading either message as the authority on the other
+    gives the wrong answer.
+    """
+    assert horizontal_position_is_valid(mavlink.EKF_POS_HORIZ_ABS) is True
+    assert horizontal_position_is_valid(0) is False

@@ -75,6 +75,7 @@
       .unreachable { background: var(--unreachable); }
       .data_lost { background: var(--data-lost); }
       .unclaimed { background: var(--unclaimed); }
+      .unplaced { background: #616161; }
       select { font: inherit; }
       .marker {
         width: 26px;
@@ -144,6 +145,9 @@
           unreachable: "unreachable — data buffered at the station",
           data_lost: "data lost",
           no_binding: "transmitting, no binding — register to track",
+          // Present, but the aircraft has not told us where it is. Not an
+          // error: indoors, before the EKF has an origin, this is normal.
+          unplaced: "no position yet",
         },
         ka: {
           live: "ცოცხალი რუკა",
@@ -164,6 +168,7 @@
           unreachable: "მიუწვდომელია — მონაცემები ინახება სადგურზე",
           data_lost: "მონაცემები დაკარგულია",
           no_binding: "გადასცემს, მაგრამ არ არის მიბმული",
+          unplaced: "პოზიცია ჯერ არ არის",
         },
       };
 
@@ -209,8 +214,36 @@
       }
 
       function upsertDrone(data) {
-        if (data.lat_deg === null || data.lon_deg === null) return;
+        // A drone with no position is PRESENT but UNPLACED. It is listed in
+        // the panel with its heading and battery - which are real - and no
+        // marker is drawn, because there is nowhere to draw it. Returning
+        // early here would make the aircraft vanish from the console entirely
+        // while it is transmitting perfectly well.
+        const placed = data.lat_deg !== null && data.lon_deg !== null;
+
         let entry = drones.get(data.drone_id);
+        if (!entry && !placed) {
+          drones.set(data.drone_id, {
+            marker: null,
+            element: null,
+            data,
+            seenAt: Date.now(),
+          });
+          return;
+        }
+        if (entry && !placed) {
+          // It had a position and lost it: remove the marker rather than
+          // leaving it at the last place we knew. A stale marker presented as
+          // current is the same failure as plotting 0,0.
+          if (entry.marker) {
+            entry.marker.remove();
+            entry.marker = null;
+            entry.element = null;
+          }
+          entry.data = data;
+          entry.seenAt = Date.now();
+          return;
+        }
         if (!entry) {
           const element = markerElement();
           entry = {
@@ -257,10 +290,15 @@
             entry.data.heading_deg === null || entry.data.heading_deg === undefined
               ? "—"
               : `${Math.round(entry.data.heading_deg)}°`;
+          const placed =
+            entry.data.lat_deg !== null && entry.data.lon_deg !== null;
+          const unplaced = placed
+            ? ""
+            : ` · <span class="pill unplaced">${t("unplaced")}</span>`;
           return (
             `<div class="row"><span>${id.slice(0, 8)}</span>` +
             `<span class="muted">${t("battery")} ${battery} · ` +
-            `${t("heading")} ${heading} · ${age}${t("seconds")}</span></div>`
+            `${t("heading")} ${heading} · ${age}${t("seconds")}${unplaced}</span></div>`
           );
         });
         dronesPanel.innerHTML =

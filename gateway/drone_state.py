@@ -44,6 +44,7 @@ from gateway.conversion import (
     battery_from_battery_status,
     battery_from_sys_status,
     gps_from_gps_raw_int,
+    horizontal_position_is_valid,
     position_from_global_position_int,
 )
 from gateway.parsing import ParsedMessage, SourceId
@@ -87,6 +88,12 @@ class DroneStateRow:
 
     @property
     def has_position(self) -> bool:
+        """Whether this row can be drawn on a map.
+
+        A row without a position is still worth writing: heading, attitude,
+        battery and mode are real and the aircraft is present. It is simply
+        unplaced.
+        """
         return self.lat_deg is not None and self.lon_deg is not None
 
 
@@ -119,6 +126,11 @@ class VehicleAccumulator:
     sat_count: int | None = None
     groundspeed_ms: float | None = None
     climb_ms: float | None = None
+
+    # What EKF_STATUS_REPORT last said about absolute horizontal position.
+    # None until one arrives: §6.4 forbids depending on any message arriving,
+    # so the converter falls back on what ArduPilot sends without an origin.
+    ekf_horizontal_valid: bool | None = None
 
     def apply(self, message: ParsedMessage) -> bool:
         """Fold one message in. Returns whether a row should be emitted.
@@ -160,7 +172,13 @@ class VehicleAccumulator:
 
 
 def _apply_position(accumulator: VehicleAccumulator, payload: Any) -> bool:
-    position = position_from_global_position_int(payload)
+    position = position_from_global_position_int(
+        payload, horizontal_valid=accumulator.ekf_horizontal_valid
+    )
+    # Assigned unconditionally, including when they are None. An aircraft
+    # that loses its position estimate must stop reporting the last place it
+    # knew: a stale coordinate presented as current is the same failure as
+    # 0,0, one step further along.
     accumulator.lat_deg = position.lat_deg
     accumulator.lon_deg = position.lon_deg
     accumulator.alt_amsl_m = position.alt_amsl_m
@@ -218,6 +236,12 @@ def _apply_vfr_hud(accumulator: VehicleAccumulator, payload: Any) -> bool:
     return False
 
 
+def _apply_ekf_status(accumulator: VehicleAccumulator, payload: Any) -> bool:
+    """EKF_STATUS_REPORT is what decides whether a position may be stored."""
+    accumulator.ekf_horizontal_valid = horizontal_position_is_valid(int(payload.flags))
+    return False
+
+
 def _apply_heartbeat(accumulator: VehicleAccumulator, payload: Any) -> bool:
     accumulator.mode = flight_mode_name(payload)
     accumulator.armed = is_armed(payload)
@@ -236,6 +260,7 @@ _HANDLERS: dict[str, _Handler] = {
     "BATTERY_STATUS": _apply_battery_status,
     "GPS_RAW_INT": _apply_gps,
     "VFR_HUD": _apply_vfr_hud,
+    "EKF_STATUS_REPORT": _apply_ekf_status,
     "HEARTBEAT": _apply_heartbeat,
 }
 
@@ -297,10 +322,11 @@ class StateAssembler:
         )
         if not accumulator.apply(message):
             return None
-        row = accumulator.to_row(drone_id, ts)
-        if not row.has_position:  # pragma: no cover - position implies a row
-            return None
-        return row
+        # Returned even with no position. An aircraft with no EKF origin is
+        # present, and its heading, attitude, battery and mode are real
+        # measurements that belong in the record. Only the coordinate is
+        # unknown, and unknown is written as NULL.
+        return accumulator.to_row(drone_id, ts)
 
     def snapshot(
         self, source_id: SourceId, *, drone_id: UUID, ts: datetime

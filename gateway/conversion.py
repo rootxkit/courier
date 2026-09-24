@@ -44,17 +44,29 @@ surviving into a heading as 655.35 degrees.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Final
+
+from pymavlink.dialects.v20 import ardupilotmega as mavlink
 
 from gateway.units import is_sentinel, to_si
 
 
 @dataclass(frozen=True, slots=True)
 class Position:
-    """A position fix, in SI, with both altitude datums named."""
+    """A position fix, in SI, with both altitude datums named.
 
-    lat_deg: float
-    lon_deg: float
+    `lat_deg` and `lon_deg` are `None` when the EKF has no absolute horizontal
+    position. They are never `0, 0`: a coordinate that cannot be distinguished
+    from a real one is worse than no coordinate, because it is only wrong at
+    the point where somebody forgot to check.
+    """
+
+    lat_deg: float | None
+    lon_deg: float | None
+    # False when the position is absent. Carried explicitly so a consumer can
+    # tell "the aircraft has not told us where it is" from "this row predates
+    # the field", without inferring either from a null.
+    horizontal_valid: bool
     # Above mean sea level.
     alt_amsl_m: float | None
     # Above the home point, NOT above ground. Equal to AGL only while the
@@ -125,19 +137,81 @@ JOULES_PER_WATT_HOUR = 3600.0
 # for it and the factor is applied explicitly here.
 DOP_SCALE = 0.01
 
+# Read from pymavlink's enum, not written as 16. The whole point of the flag is
+# that it is the one signal distinguishing a real position from a placeholder,
+# and a wrong-but-plausible bit would make that distinction silently useless.
+EKF_POS_HORIZ_ABS: Final[int] = int(mavlink.EKF_POS_HORIZ_ABS)
 
-def position_from_global_position_int(message: Any) -> Position:
-    """GLOBAL_POSITION_INT -> SI, with both altitude datums named."""
+# Set when ArduPilot is holding a constant position because it has no
+# horizontal source. Not used as the test - POS_HORIZ_ABS is - but recorded
+# because it is the corroborating flag in the observation above.
+EKF_CONST_POS_MODE: Final[int] = int(mavlink.EKF_CONST_POS_MODE)
+
+
+def horizontal_position_is_valid(ekf_flags: int) -> bool:
+    """Whether the EKF claims an absolute horizontal position.
+
+    `GLOBAL_POSITION_INT` is the EKF's *fused estimate*, not raw GPS, so the
+    GPS fix type is the wrong test: the EKF can hold a position through a brief
+    GPS outage, and it can lack one while the GPS reports a fix.
+    `EKF_POS_HORIZ_ABS` is the flag that says this estimate is referenced to
+    the earth.
+
+    Observed on a real aircraft indoors on 2026-09-24, from the raw archive:
+
+        EKF flags 0xa7 = ATTITUDE | VELOCITY_HORIZ | VELOCITY_VERT
+                       | POS_VERT_ABS | CONST_POS_MODE
+
+    `POS_HORIZ_ABS` clear, `CONST_POS_MODE` set - ArduPilot holding a constant
+    position because it has no horizontal source - and every
+    `GLOBAL_POSITION_INT` in that period carried `lat = lon = 0`. Meanwhile
+    `GPS_RAW_INT` reported `fix_type = 1` with a stale lat/lon in Zambia, which
+    is exactly why the GPS message is not the authority here.
+    """
+    return bool(ekf_flags & EKF_POS_HORIZ_ABS)
+
+
+def position_from_global_position_int(
+    message: Any, *, horizontal_valid: bool | None = None
+) -> Position:
+    """GLOBAL_POSITION_INT -> SI, with both altitude datums named.
+
+    **A position that is not valid is `None`, never `0, 0`.** Unknown is not a
+    value. ArduPilot sends zeroes before the EKF has an origin, and storing
+    them would put a coordinate in the database that cannot be told apart from
+    a real one without consulting another column - so every consumer would have
+    to remember a rule the row can enforce once. The map would draw a delivery
+    in the Gulf of Guinea; P4's nearest-drone query would compute a distance to
+    it.
+
+    Nothing is lost: the archive holds the raw frame either way.
+
+    `horizontal_valid` comes from the EKF (see `horizontal_position_is_valid`).
+    `None` means no `EKF_STATUS_REPORT` has been seen yet, which §6.4 requires
+    be survivable - nothing may depend on a message arriving at a given rate.
+    In that case the fallback is an exact `0, 0`, which is not a heuristic
+    about "null island" being implausible so much as the value ArduPilot
+    actually sends when it has no origin. It is used only in the absence of the
+    authoritative signal, and it too resolves to `None` rather than to a
+    stored coordinate.
+    """
+    lat_deg = to_si(message, "lat")
+    lon_deg = to_si(message, "lon")
+
+    if horizontal_valid is None:
+        horizontal_valid = not (lat_deg == 0.0 and lon_deg == 0.0)
+
     return Position(
-        # Latitude and longitude have no sentinel: MAVLink has no way to say
-        # "position unknown" in this message, and a vehicle with no fix sends
-        # zeroes. Treating 0,0 as a sentinel would discard a real position off
-        # the coast of Ghana, so it is left to the GPS fix type to say whether
-        # the fix is usable.
-        lat_deg=_require(to_si(message, "lat"), "lat"),
-        lon_deg=_require(to_si(message, "lon"), "lon"),
+        lat_deg=lat_deg if horizontal_valid else None,
+        lon_deg=lon_deg if horizontal_valid else None,
+        horizontal_valid=horizontal_valid,
+        # Vertical position is a separate estimate with its own EKF flag, and
+        # it is commonly valid while horizontal is not - barometric altitude
+        # needs no GPS. The observed aircraft had POS_VERT_ABS set throughout.
         alt_amsl_m=to_si(message, "alt"),
         alt_above_home_m=to_si(message, "relative_alt"),
+        # Heading comes from the compass and is valid indoors with no fix at
+        # all. It is the field the hardware check actually exercised.
         heading_deg=to_si(message, "hdg"),
         vx_ms=to_si(message, "vx"),
         vy_ms=to_si(message, "vy"),

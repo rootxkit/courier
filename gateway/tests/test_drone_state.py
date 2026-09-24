@@ -109,12 +109,36 @@ def heartbeat_bytes(*, armed: bool = True, custom_mode: int = 4) -> bytes:
     )
 
 
-def position_bytes(*, alt_mm: int = 450_000, rel_alt_mm: int = 60_000) -> bytes:
+def position_bytes(
+    *,
+    alt_mm: int = 450_000,
+    rel_alt_mm: int = 60_000,
+    lat: int = TBILISI_LAT_E7,
+    lon: int = TBILISI_LON_E7,
+) -> bytes:
     sender = link()
     return bytes(
         sender.global_position_int_encode(
-            0, TBILISI_LAT_E7, TBILISI_LON_E7, alt_mm, rel_alt_mm, 1000, -250, 150, 9000
+            0, lat, lon, alt_mm, rel_alt_mm, 1000, -250, 150, 9000
         ).pack(sender)
+    )
+
+
+def ekf_status_bytes(*, has_position: bool) -> bytes:
+    """EKF_STATUS_REPORT with or without absolute horizontal position.
+
+    The "without" value is the one a real aircraft sent indoors on
+    2026-09-24: attitude, both velocities and vertical position valid, and
+    CONST_POS_MODE set because there is no horizontal source.
+    """
+    sender = link()
+    flags = 0xA7
+    if has_position:
+        flags |= int(mavlink.EKF_POS_HORIZ_ABS)
+    return bytes(
+        sender.ekf_status_report_encode(flags, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1).pack(
+            sender
+        )
     )
 
 
@@ -517,3 +541,137 @@ async def test_the_database_rejects_a_heading_that_is_not_a_bearing(
 @pytest.mark.postgres
 async def test_an_empty_batch_writes_nothing(writer: DroneStateWriter) -> None:
     assert await writer.write([]) == 0
+
+
+# --- a row with no position ------------------------------------------------
+
+
+def test_a_row_is_still_emitted_without_a_position() -> None:
+    """Unknown is not a value, and it is not a reason to drop the row.
+
+    An aircraft with no EKF origin is present. Its heading, battery and mode
+    are real measurements; only the coordinate is unknown.
+    """
+    assembler = StateAssembler(station_id="s")
+    drone_id = uuid4()
+    assembler.observe(vehicle(), first(heartbeat_bytes()), drone_id=drone_id, ts=NOON)
+    assembler.observe(
+        vehicle(),
+        first(ekf_status_bytes(has_position=False)),
+        drone_id=drone_id,
+        ts=NOON,
+    )
+
+    row = assembler.observe(
+        vehicle(), first(position_bytes(lat=0, lon=0)), drone_id=drone_id, ts=NOON
+    )
+
+    assert row is not None
+    assert row.lat_deg is None
+    assert row.lon_deg is None
+    assert row.has_position is False
+    # Everything the aircraft does know is still there.
+    assert row.heading_deg == pytest.approx(90.0)
+    assert row.mode == "GUIDED"
+    assert row.alt_above_home_m == pytest.approx(60.0)
+
+
+def test_an_ekf_that_regains_position_starts_writing_one() -> None:
+    """The paired presence test.
+
+    Without it, an assembler that never stored a position would pass the one
+    above.
+    """
+    assembler = StateAssembler(station_id="s")
+    drone_id = uuid4()
+    assembler.observe(
+        vehicle(),
+        first(ekf_status_bytes(has_position=True)),
+        drone_id=drone_id,
+        ts=NOON,
+    )
+
+    row = assembler.observe(
+        vehicle(), first(position_bytes()), drone_id=drone_id, ts=NOON
+    )
+
+    assert row is not None
+    assert row.lat_deg == pytest.approx(41.7151)
+    assert row.has_position is True
+
+
+def test_losing_the_position_clears_it_rather_than_keeping_the_last_one() -> None:
+    """A stale coordinate presented as current is the same failure as 0,0.
+
+    It is worse, in fact: it is plausible, and it is exactly where the
+    aircraft was a moment ago.
+    """
+    assembler = StateAssembler(station_id="s")
+    drone_id = uuid4()
+    assembler.observe(
+        vehicle(),
+        first(ekf_status_bytes(has_position=True)),
+        drone_id=drone_id,
+        ts=NOON,
+    )
+    good = assembler.observe(
+        vehicle(), first(position_bytes()), drone_id=drone_id, ts=NOON
+    )
+    assert good is not None and good.lat_deg is not None
+
+    assembler.observe(
+        vehicle(),
+        first(ekf_status_bytes(has_position=False)),
+        drone_id=drone_id,
+        ts=NOON,
+    )
+    lost = assembler.observe(
+        vehicle(), first(position_bytes(lat=0, lon=0)), drone_id=drone_id, ts=NOON
+    )
+
+    assert lost is not None
+    assert lost.lat_deg is None
+
+
+@pytest.mark.postgres
+async def test_a_row_without_a_position_stores_geom_as_null(
+    writer: DroneStateWriter,
+    resolver: BindingResolver,
+    engine: AsyncEngine,
+    station: str,
+) -> None:
+    """NULL in the database, not a point at 0,0.
+
+    This is the whole ruling, checked where it matters: a spatial query must
+    find nothing rather than find a drone in the Gulf of Guinea.
+    """
+    drone_id = await bound_drone(resolver, station)
+    assembler = StateAssembler(station_id=station)
+    assembler.observe(
+        vehicle(),
+        first(ekf_status_bytes(has_position=False)),
+        drone_id=drone_id,
+        ts=NOON,
+    )
+    row = assembler.observe(
+        vehicle(), first(position_bytes(lat=0, lon=0)), drone_id=drone_id, ts=NOON
+    )
+    assert row is not None
+
+    await writer.write([row])
+
+    async with engine.connect() as connection:
+        stored = (
+            await connection.execute(
+                sa.text(
+                    "SELECT geom IS NULL AS no_geom, heading_deg, alt_above_home_m "
+                    "FROM drone_state WHERE station_id = :s"
+                ),
+                {"s": station},
+            )
+        ).one()
+
+    assert stored.no_geom is True
+    # The rest of the row is real and present.
+    assert stored.heading_deg == pytest.approx(90.0)
+    assert stored.alt_above_home_m == pytest.approx(60.0)
