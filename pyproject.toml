@@ -206,7 +206,28 @@ branch = true
 source = ["common", "gateway", "dispatch", "airspace", "tools", "agent"]
 # Measuring the tests themselves inflates the total towards 100% and hides the
 # code that matters: a test file is, by construction, almost fully executed.
-omit = ["*/tests/*", "*/conftest.py"]
+#
+# The other entries are process entry points and operator scripts: argument
+# parsing, settings loading and wiring, with every decision they make living in
+# a module that is covered. Counting them measures how much composition there
+# is, not how much of the system is tested, and the pressure it creates is to
+# put logic somewhere else rather than to test it.
+#
+# agent/__main__.py is deliberately NOT here: it has tests in
+# agent/tests/test_cli.py, because the refusal messages a pilot reads at a
+# flying site are behaviour, not wiring.
+#
+# The line to hold: anything here must be composition only. gateway/pipeline.py
+# was pulled OUT of this list and given tests when it turned out to carry real
+# decisions - which unclaimed sources are announced, and what happens when a
+# conversion fails.
+omit = [
+    "*/tests/*",
+    "*/conftest.py",
+    "gateway/__main__.py",
+    "tools/register_aircraft.py",
+    "tools/refresh_mavlink_units.py",
+]
 
 [tool.coverage.report]
 exclude_also = [
