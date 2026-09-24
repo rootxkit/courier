@@ -1,19 +1,37 @@
 """Scaling factors, derived here from a different source than the code uses.
 
 `gateway/units.py` reads `fieldunits_by_name` off pymavlink's generated Python
-classes. These tests read the **XML message definitions** that ship with
-pymavlink and generate those classes. Two routes to the same fact: a test that
-read the same attribute would only prove the attribute name was spelled
-correctly in two files.
+classes. These tests compare that against a table extracted from pymavlink's
+**XML message definitions** by `tools/refresh_mavlink_units.py` and committed
+as `data/mavlink_fields.json`. Two routes to the same fact: a test that read
+the same attribute would only prove it was spelled correctly twice.
 
-The XML also carries each field's prose description, which is where MAVLink
-documents its sentinels ("If unknown, set to: UINT16_MAX"). That is what
-`test_every_documented_sentinel_is_in_the_table` reads, so the sentinel table
-cannot fall behind the dialect without a test noticing.
+## Why the table is committed rather than read from the XML at test time
+
+The XML is not installed on every platform. Measured 2026-09-24: pymavlink's
+Windows wheels ship 19 definition files and the sdist 21, while the **manylinux
+wheels ship none** - the same for 2.4.49 and 2.4.50, so it is packaging, not a
+version change.
+
+The first version of this test read the XML directly. It passed on a Windows
+developer machine and failed on its first CI run with every field reporting
+`xml=None`, because the helper skipped missing files and then compared
+everything against nothing. Two faults: a source that does not exist
+everywhere, and a silent degradation that turned "the data is absent" into
+"every unit disagrees".
+
+Both are fixed. The table is committed, so the comparison runs on every
+platform, and `load_pinned_fields` fails loudly if it is missing or empty
+rather than quietly comparing against an empty dict.
+
+Where the XML *is* installed, `test_the_pinned_table_still_matches_the_xml`
+checks the committed table against it, so the pin cannot silently drift from
+upstream on the machines that can tell.
 """
 
 from __future__ import annotations
 
+import json
 import pathlib
 import xml.etree.ElementTree as ElementTree
 
@@ -32,27 +50,39 @@ from gateway.units import (
     to_si,
 )
 
+PINNED = pathlib.Path(__file__).parent / "data" / "mavlink_fields.json"
 DEFINITIONS = pathlib.Path(pymavlink.__file__).parent / "message_definitions" / "v1.0"
 
 
-def xml_fields() -> dict[tuple[str, str], tuple[str | None, str]]:
-    """(message, field) -> (units attribute, description), straight from the XML."""
-    found: dict[tuple[str, str], tuple[str | None, str]] = {}
-    for definition in ("common.xml", "ardupilotmega.xml"):
-        path = DEFINITIONS / definition
-        if not path.exists():  # pragma: no cover - dialect layout varies
-            continue
-        for message in ElementTree.parse(path).iter("message"):
-            name = message.get("name") or ""
-            for field in message.iter("field"):
-                key = (name, field.get("name") or "")
-                if key in found:
-                    continue
-                found[key] = (field.get("units"), " ".join((field.text or "").split()))
-    return found
+def load_pinned_fields() -> dict[tuple[str, str], tuple[str, str]]:
+    """(message, field) -> (units, description), from the committed table.
+
+    Raises rather than returning an empty mapping. An empty table would make
+    every comparison below pass or fail for the wrong reason, which is the
+    exact failure this file already had once.
+    """
+    if not PINNED.exists():
+        raise AssertionError(
+            f"{PINNED} is missing. Regenerate it with "
+            f"`python tools/refresh_mavlink_units.py` on a platform whose "
+            f"pymavlink ships message_definitions (Windows wheel, or sdist)."
+        )
+    payload = json.loads(PINNED.read_text(encoding="utf-8"))
+    messages = payload.get("messages", {})
+    if not messages:
+        raise AssertionError(f"{PINNED} contains no messages")
+
+    flattened: dict[tuple[str, str], tuple[str, str]] = {}
+    for message, fields in messages.items():
+        for field, detail in fields.items():
+            flattened[(message, field)] = (
+                detail.get("units", ""),
+                detail.get("description", ""),
+            )
+    return flattened
 
 
-XML_FIELDS = xml_fields()
+PINNED_FIELDS = load_pinned_fields()
 
 
 def message_class(name: str) -> type:
@@ -62,22 +92,69 @@ def message_class(name: str) -> type:
 # --- the two sources agree -------------------------------------------------
 
 
-def test_the_generated_units_match_the_xml_definitions() -> None:
+def test_the_generated_units_match_the_pinned_table() -> None:
     """The cross-check the whole module rests on.
 
-    If these ever disagree, the generated classes and the definitions have
-    drifted, and every factor derived from the former is suspect.
+    If these disagree, the installed pymavlink and the pinned definitions have
+    drifted, and every factor derived from the former is suspect. Read the
+    difference before regenerating: a changed unit is a changed scaling factor.
     """
     mismatches: list[str] = []
     for name in HOT_PATH_MESSAGE_NAMES:
         generated = getattr(message_class(name), "fieldunits_by_name", {})
         for field, unit in generated.items():
-            from_xml = XML_FIELDS.get((name, field), (None, ""))[0]
-            if from_xml != unit:
-                mismatches.append(f"{name}.{field}: python={unit!r} xml={from_xml!r}")
+            pinned = PINNED_FIELDS.get((name, field), (None, ""))[0]
+            if pinned != unit:
+                mismatches.append(f"{name}.{field}: python={unit!r} pinned={pinned!r}")
 
-    assert not mismatches, "generated units disagree with the XML:\n  " + "\n  ".join(
-        mismatches
+    assert not mismatches, (
+        "installed pymavlink disagrees with the pinned table. Read the "
+        "difference, then regenerate with tools/refresh_mavlink_units.py: "
+        + "; ".join(mismatches)
+    )
+
+
+@pytest.mark.skipif(
+    not DEFINITIONS.exists(),
+    reason="pymavlink ships no message_definitions here (Linux wheels omit them)",
+)
+def test_the_pinned_table_still_matches_the_xml() -> None:
+    """Where the XML exists, check the pin against it.
+
+    This is what stops the committed table drifting from upstream unnoticed.
+    It cannot run on Linux, which is precisely why the table is committed -
+    but it runs wherever the definitions are installed, and that is enough for
+    the pin to be checked before it is trusted.
+    """
+    wanted = set(HOT_PATH_MESSAGE_NAMES)
+    mismatches: list[str] = []
+    for definition in (
+        "minimal.xml",
+        "standard.xml",
+        "common.xml",
+        "ardupilotmega.xml",
+    ):
+        path = DEFINITIONS / definition
+        if not path.exists():
+            continue
+        for message in ElementTree.parse(path).iter("message"):
+            name = message.get("name") or ""
+            if name not in wanted:
+                continue
+            for field in message.iter("field"):
+                key = (name, field.get("name") or "")
+                if key not in PINNED_FIELDS:
+                    continue
+                units = field.get("units") or ""
+                if PINNED_FIELDS[key][0] != units:
+                    mismatches.append(
+                        f"{key[0]}.{key[1]}: pinned={PINNED_FIELDS[key][0]!r} "
+                        f"xml={units!r}"
+                    )
+
+    assert not mismatches, (
+        "the pinned table has drifted from the XML; regenerate it: "
+        + "; ".join(mismatches)
     )
 
 
@@ -194,7 +271,7 @@ def test_every_documented_sentinel_is_in_the_table() -> None:
         for field, unit in getattr(
             message_class(name), "fieldunits_by_name", {}
         ).items():
-            description = XML_FIELDS.get((name, field), (None, ""))[1]
+            description = PINNED_FIELDS.get((name, field), ("", ""))[1]
             lowered = description.lower()
             documents_sentinel = (
                 "uint16_max" in lowered

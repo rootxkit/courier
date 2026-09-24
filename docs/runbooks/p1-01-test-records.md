@@ -7,6 +7,80 @@ written down is a failure that gets rediscovered later, at worse cost.
 
 ---
 
+## 2026-09-24 — a component verified in isolation, reported as a chain
+
+Not a runbook procedure. Two findings from the same root, both instances of
+CLAUDE.md's rule about not reporting an inference as an observation.
+
+### 1. "The chain now runs" — it did not
+
+The report at the end of the 2026-09-23 session said the chain "now runs
+QGC -> relay -> Gateway -> TimescaleDB -> NATS -> browser" and that it was
+"verified against the live stack, not mocked".
+
+**There was no runnable Gateway at that moment.** `gateway/` held the modules —
+transport, store, parser, classifier, binder, assembler, writer, publisher —
+and nothing composed them. There was no `__main__.py` and no pipeline
+connecting the relay-v1 server to the conversion chain; `RelayServer` stored
+records and stopped there.
+
+What was actually verified was narrower and worth stating precisely: a NATS
+message published *directly* through `TelemetryPublisher` arrived at a browser
+over the WebSocket. That is a real check of the last two links. It says nothing
+about the six before it, because nothing was driving them.
+
+The failure is in the reporting, not the code. Every component was tested. The
+claim that they were connected was an inference from "all the parts exist",
+and the word "verified" was attached to it.
+
+**What it should have said:** "the publisher-to-browser link is verified
+end to end; the Gateway that would drive it does not exist yet." That sentence
+was available at the time and is shorter than the one that was written.
+
+Found while preparing the single-aircraft hardware check, when the step "start
+the Gateway" had nothing to start. `gateway/pipeline.py` and `python -m gateway`
+were written then.
+
+> **The pattern:** a chain is not verified by verifying its links. Each
+> component passing its own tests is evidence about components. Saying "the
+> chain runs" requires having run the chain, and the check for that is whether
+> a single command exists that starts it.
+
+### 2. A test that could never have passed on CI
+
+`test_the_generated_units_match_the_xml_definitions` read pymavlink's XML
+message definitions as an independent source for every scaling factor. It
+passed locally and failed on its first CI run, reporting `xml=None` for every
+field.
+
+Measured rather than assumed, by downloading the artifacts from PyPI:
+
+| pymavlink artifact | XML files shipped |
+|---|---|
+| 2.4.49 Windows wheel | 19 |
+| 2.4.50 Windows wheel | 19 |
+| 2.4.49 sdist | 21 |
+| 2.4.50 sdist | 21 |
+| 2.4.49 manylinux x86_64 | **0** |
+| 2.4.50 manylinux x86_64 | **0** |
+
+**A packaging difference between platforms, not a version change.** The CI log
+showed 2.4.50 against 2.4.49 locally, which was a plausible cause and the wrong
+one; checking both versions on both platforms is what separated them. Chasing
+the version would have produced a pin that fixed nothing.
+
+The test compounded it. Its helper skipped definition files that were not
+there, so an absent source became an empty table and then "every unit
+disagrees" — a silent degradation dressed up as a specific finding.
+
+Both fixed: the table is extracted by `tools/refresh_mavlink_units.py` and
+committed, so the comparison runs on every platform; the loader raises if the
+table is missing or empty instead of comparing against nothing; and where the
+XML *is* installed a second test checks the committed table against it, so the
+pin cannot drift unnoticed on the machines that can tell.
+
+---
+
 ## 2026-09-23 — an intermittent test failure, investigated
 
 Not a runbook procedure. One run of the full suite under coverage failed two
