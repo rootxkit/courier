@@ -18,6 +18,7 @@ import shutil
 import socket
 import ssl
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -93,6 +94,8 @@ async def _drive(
     ca_path: Path | None = None,
     run_s: float = 1.5,
     interrupt: Any = None,
+    wait_for_drain: bool = False,
+    drain_limit_s: float = 45.0,
 ) -> tuple[DurableQueue, int]:
     """Run a relay against a sink for a while. Returns (queue, records taken in)."""
     udp_port = free_udp_port()
@@ -116,7 +119,20 @@ async def _drive(
         await asyncio.sleep(run_s)
         if interrupt is not None:
             await interrupt()
-            await asyncio.sleep(run_s)
+            if not wait_for_drain:
+                await asyncio.sleep(run_s)
+            else:
+                # Wait for the condition, not for a clock. After the sink
+                # returns the relay may be a full backoff period from its next
+                # attempt - up to BACKOFF_MAX_S - so a fixed sleep that was
+                # long enough on one machine is a coin flip on another. This
+                # test failed in CI as `assert 94 >= 146` while passing on the
+                # same commit's pull-request run.
+                # The queue empties only when the sink has acknowledged
+                # everything, so depth reaching zero IS "the backlog drained".
+                deadline = time.monotonic() + drain_limit_s
+                while time.monotonic() < deadline and durable_queue.depth > 0:
+                    await asyncio.sleep(0.1)
     finally:
         stop.set()
         await sender
@@ -238,7 +254,7 @@ async def test_sink_restart_resumes_without_loss(tmp_path: Path) -> None:
 
     try:
         durable_queue, taken_in = await _drive(
-            tmp_path, port, run_s=2.0, interrupt=restart
+            tmp_path, port, run_s=2.0, interrupt=restart, wait_for_drain=True
         )
     finally:
         await server.stop()
