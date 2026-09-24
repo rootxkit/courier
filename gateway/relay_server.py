@@ -43,7 +43,7 @@ from gateway.relay_messages import (
     build_welcome,
     parse_control_message,
 )
-from gateway.relay_records import RecordFramingError, decode_records
+from gateway.relay_records import Record, RecordFramingError, decode_records
 from gateway.station_state import LinkState, StationLinkTracker
 
 _log = get_logger(__name__)
@@ -56,6 +56,20 @@ ACK_INTERVAL_S: Final = 1.0
 _CLOSE_PROTOCOL_ERROR: Final = 1008
 
 _AUTHORIZATION_SCHEME: Final = "Bearer "
+
+
+class RecordProcessor(Protocol):
+    """What happens to records once they are durably stored.
+
+    Called *after* `store_records` returns and before the ack is sent, so
+    obligation 9 holds: nothing parses MAVLink until the transport has done
+    its job. The implementation must not raise - a conversion fault is not a
+    transport fault - and `IngestPipeline` catches its own.
+    """
+
+    async def process(
+        self, station_id: str, epoch: str, records: list[Record]
+    ) -> None: ...
 
 
 class StationAuthenticator(Protocol):
@@ -79,6 +93,10 @@ class RelayServer:
 
     store: IngestStore
     authenticator: StationAuthenticator
+    # Optional so the transport can be tested, and run, without a conversion
+    # pipeline behind it. A Gateway with no processor still stores and
+    # acknowledges correctly; it simply produces no drone_state.
+    processor: RecordProcessor | None = None
     host: str = "127.0.0.1"
     port: int = 8081
 
@@ -284,6 +302,10 @@ class _Session:
         self._watermark = await self.server.store.store_records(
             self.station_id, self.epoch, records
         )
+        # Only now, with the bytes durable and the watermark advanced, does
+        # anything look inside them. Obligation 9.
+        if self.server.processor is not None:
+            await self.server.processor.process(self.station_id, self.epoch, records)
 
     async def _handle_control(self, payload: str) -> None:
         message = parse_control_message(payload)
