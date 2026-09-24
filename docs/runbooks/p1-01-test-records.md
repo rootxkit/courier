@@ -74,10 +74,11 @@ mode string came from pymavlink's own mapping, not a transcribed table.
 
 ### What "indoors" looks like, and why none of it is a fault
 
-`lat/lon 0,0`, `gps_fix_type 1`, `sat_count 0` — no GPS fix on a bench.
-`GLOBAL_POSITION_INT` has no way to say "position unknown", so the autopilot
-sends zeroes and they are stored rather than discarded: 0,0 is a real place.
-The marker therefore plots at 0°N 0°E.
+`gps_fix_type 1`, `sat_count 0` — no GPS fix on a bench.
+
+`lat/lon` arrived as `0, 0`. **They were stored, and that was wrong** — see the
+ruling below. They are now written as `NULL`, and the console lists such a
+drone as present but unplaced rather than drawing it at 0°N 0°E.
 
 `batt_pct 0.0`, `batt_voltage_v 0.001` — USB power, no battery attached.
 
@@ -113,6 +114,51 @@ Python evaluates the default **eagerly**, so `.name` was read on every call
 even though `msgname` existed. The form looks like a fallback and is not one.
 Replaced with an explicit `hasattr` check; measured 0 warnings from 50 calls
 afterwards, against several per datagram before.
+
+### The position ruling, and what the aircraft actually said
+
+Storing `0, 0` writes a coordinate that cannot be told apart from a real one
+without consulting another column, so it is only wrong at the point where
+somebody forgets to check. Unknown is not a value — the same principle as
+`batt_consumed_wh` being `None` rather than `0`.
+
+The validity signal was **determined from this aircraft's own output**, read
+back out of the raw archive rather than assumed:
+
+| | |
+|---|---|
+| EKF flags, all 84 reports | `0xa7` = `ATTITUDE \| VELOCITY_HORIZ \| VELOCITY_VERT \| POS_VERT_ABS \| CONST_POS_MODE` |
+| `EKF_POS_HORIZ_ABS` | **clear** |
+| `GLOBAL_POSITION_INT` lat/lon | `0, 0` for every one of the 84 |
+| `GPS_RAW_INT` | `fix_type 1`, lat/lon stale at −15.06, 26.78 — in Zambia |
+
+`GLOBAL_POSITION_INT` is the EKF's fused estimate, not raw GPS, so
+`gps_fix_type` is the wrong test — and the Zambian coordinate in `GPS_RAW_INT`
+is why reading either message as the authority on the other gives a wrong
+answer. `EKF_POS_HORIZ_ABS` is the flag, and `CONST_POS_MODE` being set
+corroborates it: ArduPilot holding a constant position because it has no
+horizontal source.
+
+4,103 rows already written at `0, 0` were cleared to `NULL`.
+
+### A test that deleted real data
+
+Running the database suite against the same database found that
+`ArchiveRetention.sweep()` covered **every** station. The tests set a 12 KiB
+ceiling, sized for a handful of synthetic segments, and applied it to the live
+station holding 3.3 MB from this run. **14,288 `archive_segments` rows had been
+marked deleted across successive runs**, while every file sat untouched on
+disk.
+
+Nothing ever failed, and that is the part worth keeping: deleting a segment
+whose file is already gone is *deliberately* not an error, because retention
+has to be re-runnable after a crash. The tolerance that makes the sweep
+restartable is the same one that made this silent.
+
+`sweep()` now takes `only_station`, every test sweep is scoped, and the index
+was repaired.
+
+> A test that can reach data it did not create will eventually delete some.
 
 ### Not covered
 
