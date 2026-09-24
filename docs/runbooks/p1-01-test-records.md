@@ -7,6 +7,123 @@ written down is a failure that gets rediscovered later, at worse cost.
 
 ---
 
+## 2026-09-24 — single-aircraft hardware check, full chain — **PASS**
+
+One aircraft on USB, QGroundControl forwarding to `localhost:14445`, the whole
+Stage 0 chain running on one machine. Procedure in
+[`local-end-to-end.md`](local-end-to-end.md).
+
+**This does not close P1-08.** That criterion is ten SITL vehicles moving in a
+browser, and it needs P0-08 first. This is a hardware check of the chain, which
+is a different claim and a weaker one.
+
+### Chain
+
+```
+aircraft --USB--> QGC --UDP 14445--> relay --ws--> Gateway --> TimescaleDB
+                                                          \--> NATS --> browser
+```
+
+Every hop ran as a separate process. Nothing was stubbed and no synthetic
+source was substituted.
+
+### What arrived
+
+`tools/mavlink_probe.py listen` before starting the relay, 12 s:
+
+| Source | Classification | Sample |
+|---|---|---|
+| SYSID 1 / COMP 1 | vehicle | `GLOBAL_POSITION_INT` 3.00 Hz, `HEARTBEAT` 1.00 Hz, 25 message types |
+| SYSID 255 / COMP 190 | ground station | `HEARTBEAT` 1.00 Hz |
+
+The ADR-001 shape exactly. The Gateway registered 1/1 as a vehicle and never
+registered 255/190 as one.
+
+### Rows
+
+`drone_state`, written continuously:
+
+```
+rows: 306 -> 324 in 6s  (3.0/s)
+```
+
+**3.0 rows/s against a 3 Hz `GLOBAL_POSITION_INT` stream.** A row is emitted on
+position and carries whatever else has accumulated, so the row rate is one
+message's rate and not the sum of all of them.
+
+A row as the browser received it over the WebSocket:
+
+```
+drone_id           0b63df96-30ba-41ba-b3fe-7647edb2b0ee
+ts                 2026-09-24T07:44:12.913530+00:00
+lat_deg            0.0
+lon_deg            0.0
+alt_amsl_m         0.1
+alt_above_home_m   1.264
+heading_deg        245.47
+batt_pct           0.0
+mode               STABILIZE
+armed              False
+gps_fix_type       1
+sat_count          0
+alt_agl_m present: False
+```
+
+`drone_id` is the registered binding, resolved at the record's timestamp. The
+mode string came from pymavlink's own mapping, not a transcribed table.
+
+### What "indoors" looks like, and why none of it is a fault
+
+`lat/lon 0,0`, `gps_fix_type 1`, `sat_count 0` — no GPS fix on a bench.
+`GLOBAL_POSITION_INT` has no way to say "position unknown", so the autopilot
+sends zeroes and they are stored rather than discarded: 0,0 is a real place.
+The marker therefore plots at 0°N 0°E.
+
+`batt_pct 0.0`, `batt_voltage_v 0.001` — USB power, no battery attached.
+
+`heading_deg 245.5` is real and tracks rotation; the compass works indoors.
+That is what the visual check exercises.
+
+### Two defects found by running it
+
+**1. `localhost` resolves to IPv6 and Docker publishes IPv4 only.** The Gateway
+failed to reach NATS, logging `TimeoutError` in a loop while `docker compose
+ps` reported every service healthy — because they were. Measured:
+
+| target | IPv4 `127.0.0.1` | IPv6 `::1` |
+|---|---|---|
+| NATS 4222 | 1 ms | times out |
+| TimescaleDB 5433 | 15 ms | times out |
+| Redis 6379 | 1 ms | times out |
+
+A stack that reports healthy while nothing can reach it is the worst shape for
+this failure, because the obvious diagnostic says everything is fine. Recorded
+in the runbook; `infra/.env.example` still ships `localhost` because CI runs on
+Linux, where it resolves to IPv4.
+
+**2. A deprecation warning firing several times per datagram.** The Gateway log
+filled with pymavlink's `.name` deprecation notice. The cause was a default
+argument:
+
+```text
+getattr(message_class, "msgname", getattr(message_class, "name", ""))
+```
+
+Python evaluates the default **eagerly**, so `.name` was read on every call
+even though `msgname` existed. The form looks like a fallback and is not one.
+Replaced with an explicit `hasattr` check; measured 0 warnings from 50 calls
+afterwards, against several per datagram before.
+
+### Not covered
+
+- Flight. A bench aircraft does not arm, move or acquire a fix, so nothing
+  here exercises position, velocity or the altitude fields under real values.
+- Ten vehicles. P1-08's criterion, blocked on P0-08.
+- Any outage. The relay's queue, reconnection and gap reporting were verified
+  in the Procedure B run of 2026-09-22, not here.
+
+---
+
 ## 2026-09-24 — a component verified in isolation, reported as a chain
 
 Not a runbook procedure. Two findings from the same root, both instances of

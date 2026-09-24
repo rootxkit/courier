@@ -185,7 +185,15 @@ def is_sentinel(message_class: Any, field_name: str, value: object) -> bool:
     # access, which at 84 frames a second per aircraft is a log nobody reads.
     # `name` is kept as a fallback for pymavlink 2.4.30 and earlier, which is
     # the version boundary the library's own warning names.
-    message_name = getattr(message_class, "msgname", getattr(message_class, "name", ""))
+    # Not `getattr(cls, "msgname", getattr(cls, "name", ""))`: Python evaluates
+    # a default argument eagerly, so that form reads `.name` on every call even
+    # when `msgname` exists - firing the deprecation warning several times per
+    # datagram. It filled the Gateway log during the first hardware run.
+    message_name = (
+        message_class.msgname
+        if hasattr(message_class, "msgname")
+        else getattr(message_class, "name", "")
+    )
     key = (message_name, field_name)
     unknown = SENTINELS.get(key)
     if unknown is None:
