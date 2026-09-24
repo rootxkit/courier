@@ -137,11 +137,27 @@ class ArchiveRetention:
     retention_days: int
     max_bytes_per_station: int
 
-    async def sweep(self, *, now: datetime | None = None) -> SweepResult:
-        """Apply both rules and return what was removed."""
+    async def sweep(
+        self, *, now: datetime | None = None, only_station: str | None = None
+    ) -> SweepResult:
+        """Apply both rules and return what was removed.
+
+        `only_station` bounds the sweep to one station. Production sweeps
+        everything, but a caller working on one station's data - a test, or an
+        operator repairing a single station - should not be able to reach the
+        rest of the fleet.
+
+        That is not hypothetical. These tests ran unscoped against a shared
+        development database and applied a 12 KiB ceiling, meant for a few
+        synthetic segments, to a live station holding 3.3 MB from a hardware
+        run: 14,288 index rows across successive runs were marked deleted
+        while their files sat untouched on disk. Nothing failed, because
+        deleting a segment whose file is already gone is deliberately not an
+        error - the sweep has to be re-runnable after a crash.
+        """
         moment = now if now is not None else datetime.now(tz=UTC)
-        by_age = await self._sweep_by_age(moment)
-        by_ceiling = await self._sweep_by_ceiling(moment)
+        by_age = await self._sweep_by_age(moment, only_station)
+        by_ceiling = await self._sweep_by_ceiling(moment, only_station)
         return SweepResult(
             deleted_by_age=by_age.deleted_by_age,
             deleted_by_ceiling=by_ceiling.deleted_by_ceiling,
@@ -282,9 +298,13 @@ class ArchiveRetention:
 
     # --- the two rules -----------------------------------------------------
 
-    async def _sweep_by_age(self, now: datetime) -> SweepResult:
+    async def _sweep_by_age(
+        self, now: datetime, only_station: str | None = None
+    ) -> SweepResult:
         cutoff = now - timedelta(days=self.retention_days)
-        candidates = await self._live_segments(older_than=cutoff)
+        candidates = await self._live_segments(
+            older_than=cutoff, station_id=only_station
+        )
         deleted, reclaimed, records, held = await self._delete_all(
             candidates, reason="age", now=now
         )
@@ -295,10 +315,12 @@ class ArchiveRetention:
             skipped_held=held,
         )
 
-    async def _sweep_by_ceiling(self, now: datetime) -> SweepResult:
+    async def _sweep_by_ceiling(
+        self, now: datetime, only_station: str | None = None
+    ) -> SweepResult:
         deleted = reclaimed = records = held = 0
 
-        for station_id, total_bytes in await self._station_sizes():
+        for station_id, total_bytes in await self._station_sizes(only_station):
             if total_bytes <= self.max_bytes_per_station:
                 continue
 
@@ -356,19 +378,22 @@ class ArchiveRetention:
         except SQLAlchemyError as error:
             raise StoreError(f"could not list segments: {error}") from error
 
-    async def _station_sizes(self) -> list[tuple[str, int]]:
+    async def _station_sizes(
+        self, only_station: str | None = None
+    ) -> list[tuple[str, int]]:
+        query = (
+            sa.select(
+                _segments.c.station_id,
+                sa.func.sum(_segments.c.compressed_bytes),
+            )
+            .where(_segments.c.deleted_at.is_(None))
+            .group_by(_segments.c.station_id)
+        )
+        if only_station is not None:
+            query = query.where(_segments.c.station_id == only_station)
         try:
             async with self.engine.connect() as connection:
-                rows = (
-                    await connection.execute(
-                        sa.select(
-                            _segments.c.station_id,
-                            sa.func.sum(_segments.c.compressed_bytes),
-                        )
-                        .where(_segments.c.deleted_at.is_(None))
-                        .group_by(_segments.c.station_id)
-                    )
-                ).all()
+                rows = (await connection.execute(query)).all()
         except SQLAlchemyError as error:
             raise StoreError(f"could not measure stations: {error}") from error
         return [(row[0], int(row[1] or 0)) for row in rows]

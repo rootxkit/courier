@@ -1,5 +1,14 @@
 """Archive retention, against a real TimescaleDB.
 
+**Every sweep here is scoped with `only_station`.** These tests share a
+database with whatever else is using it, and they set a 12 KiB ceiling meant
+for a few synthetic segments. Run unscoped, that ceiling was applied to a live
+station holding a hardware run - 14,288 index rows marked deleted across
+successive runs, while the files sat untouched on disk, and nothing failed
+because deleting an already-missing segment is deliberately not an error.
+
+A test that can reach data it did not create will eventually delete some.
+
 Every "this is not deleted" assertion is paired with one that makes the
 deletion happen. A retention sweep that silently did nothing would satisfy
 every absence assertion here, and would also be the most dangerous possible
@@ -150,7 +159,7 @@ async def test_a_segment_past_retention_is_deleted(
     await store.store_records(station, EPOCH, records_at(old, 0, 10))
     assert await live_segments(engine, station) == 1
 
-    result = await retention.sweep(now=NOW)
+    result = await retention.sweep(now=NOW, only_station=station)
 
     assert result.deleted_by_age == 1
     assert result.records_destroyed == 10
@@ -174,7 +183,7 @@ async def test_a_segment_within_retention_is_kept(
     recent = NOW - timedelta(days=RETENTION_DAYS - 1)
     await store.store_records(station, EPOCH, records_at(recent, 0, 10))
 
-    result = await retention.sweep(now=NOW)
+    result = await retention.sweep(now=NOW, only_station=station)
 
     assert result.deleted_total == 0
     assert await live_segments(engine, station) == 1
@@ -194,7 +203,7 @@ async def test_deleting_a_segment_records_an_event(
     old = NOW - timedelta(days=RETENTION_DAYS + 1)
     await store.store_records(station, EPOCH, records_at(old, 0, 10))
 
-    await retention.sweep(now=NOW)
+    await retention.sweep(now=NOW, only_station=station)
 
     assert "retention.deleted.age" in await events_of(engine, station)
 
@@ -209,7 +218,7 @@ async def test_the_index_row_survives_and_says_what_was_there(
     old = NOW - timedelta(days=RETENTION_DAYS + 1)
     await store.store_records(station, EPOCH, records_at(old, 0, 10))
 
-    await retention.sweep(now=NOW)
+    await retention.sweep(now=NOW, only_station=station)
 
     async with engine.connect() as connection:
         row = (
@@ -243,7 +252,7 @@ async def test_the_ceiling_deletes_oldest_first(
         )
 
     before = await live_segments(engine, station)
-    result = await retention.sweep(now=NOW)
+    result = await retention.sweep(now=NOW, only_station=station)
 
     assert result.deleted_by_age == 0
     assert result.deleted_by_ceiling > 0
@@ -285,7 +294,7 @@ async def test_a_station_under_the_ceiling_is_untouched(
     await store.store_records(
         station, EPOCH, records_at(NOW - timedelta(hours=1), 0, 1)
     )
-    result = await retention.sweep(now=NOW)
+    result = await retention.sweep(now=NOW, only_station=station)
     assert result.deleted_total == 0
     assert await live_segments(engine, station) == 1
 
@@ -307,7 +316,7 @@ async def test_the_ceiling_event_names_the_ceiling(
             station, EPOCH, records_at(base + timedelta(hours=hour), hour * 20, 20)
         )
 
-    await retention.sweep(now=NOW)
+    await retention.sweep(now=NOW, only_station=station)
 
     assert "retention.deleted.ceiling" in await events_of(engine, station)
 
@@ -332,7 +341,7 @@ async def test_a_hold_exempts_an_epoch_from_age(
         now=NOW,
     )
 
-    result = await retention.sweep(now=NOW)
+    result = await retention.sweep(now=NOW, only_station=station)
 
     assert result.deleted_total == 0
     assert result.skipped_held == 1
@@ -362,9 +371,9 @@ async def test_an_expired_hold_stops_exempting(
     )
 
     # Still held.
-    assert (await retention.sweep(now=NOW)).deleted_total == 0
+    assert (await retention.sweep(now=NOW, only_station=station)).deleted_total == 0
     # Past the date.
-    result = await retention.sweep(now=NOW + timedelta(days=6))
+    result = await retention.sweep(now=NOW + timedelta(days=6), only_station=station)
 
     assert result.deleted_by_age == 1
     assert await live_segments(engine, station) == 0
@@ -443,7 +452,7 @@ async def test_a_released_hold_stops_exempting_immediately(
     )
     await retention.release_hold(station, EPOCH)
 
-    assert (await retention.sweep(now=NOW)).deleted_by_age == 1
+    assert (await retention.sweep(now=NOW, only_station=station)).deleted_by_age == 1
 
 
 async def test_a_hold_exempts_only_its_own_epoch(
@@ -464,7 +473,7 @@ async def test_a_hold_exempts_only_its_own_epoch(
         now=NOW,
     )
 
-    result = await retention.sweep(now=NOW)
+    result = await retention.sweep(now=NOW, only_station=station)
 
     assert result.deleted_by_age == 1
     assert result.skipped_held == 1
