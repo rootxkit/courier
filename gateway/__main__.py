@@ -108,16 +108,22 @@ async def run(args: argparse.Namespace) -> int:
     store = TimescaleIngestStore(engine=engine, archive=archive)
 
     bus = await nats.connect(str(settings.nats_url))
+    # One publisher, two producers. The pipeline publishes what it parsed out
+    # of the datagrams; the relay server publishes the health of the link that
+    # carried them. The console needs both, and a station with no aircraft on
+    # it produces only the second.
+    publisher = TelemetryPublisher(bus=bus)
     pipelines = StationPipelines(
         resolver=BindingResolver(engine=engine),
         writer=DroneStateWriter(engine=engine),
-        publisher=TelemetryPublisher(bus=bus),
+        publisher=publisher,
     )
 
     server = RelayServer(
         store=store,
         authenticator=authenticator,
         processor=pipelines,
+        station_reporter=publisher,
         host=args.host,
         port=args.port,
     )

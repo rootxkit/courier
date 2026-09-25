@@ -44,12 +44,18 @@ from gateway.relay_messages import (
     parse_control_message,
 )
 from gateway.relay_records import Record, RecordFramingError, decode_records
-from gateway.station_state import LinkState, StationLinkTracker
+from gateway.station_state import LinkState, LossEvent, StationLinkTracker
 
 _log = get_logger(__name__)
 
 # protocol §7: "at least once per second while data is flowing".
 ACK_INTERVAL_S: Final = 1.0
+
+# How often a connected station's live state is republished to the bus.
+# Not a protocol value: §8 fixes when a station becomes unreachable, not how
+# often we say so. It matches the relay's `status` cadence so the console is
+# never more than one relay heartbeat behind.
+STATION_REPORT_INTERVAL_S: Final = 1.0
 
 # WebSocket close codes. 1008 is "policy violation", which is what a
 # protocol-conformance failure is once the connection is already open.
@@ -69,6 +75,28 @@ class RecordProcessor(Protocol):
 
     async def process(
         self, station_id: str, epoch: str, records: list[Record]
+    ) -> None: ...
+
+
+class StationReporter(Protocol):
+    """Publishes a station's live link state to whatever is watching.
+
+    Deliberately not the same thing as `IngestStore.record_link_state`, which
+    appends to the event log. The two answer different questions: the log
+    answers "when did this station change state", and this answers "what is
+    this station doing now". A console attaching at 14:03 cannot be served by
+    an event written at 13:58, which is why this is driven by a timer and the
+    log is driven by change.
+    """
+
+    async def publish_station(
+        self,
+        station_id: str,
+        state: LinkState,
+        *,
+        last_datagram_age_ms: int | None = None,
+        queue_depth: int | None = None,
+        losses: list[LossEvent] | None = None,
     ) -> None: ...
 
 
@@ -97,10 +125,17 @@ class RelayServer:
     # pipeline behind it. A Gateway with no processor still stores and
     # acknowledges correctly; it simply produces no drone_state.
     processor: RecordProcessor | None = None
+    # Optional for the same reason as `processor`, and absent for the same
+    # reason it was missed: the transport is complete and correct without it.
+    # Nothing failed while it was unset - the link state went to `ingest_events`
+    # exactly as specified - and the only symptom was a console reading
+    # "Stations: none" beside a station that was connected and streaming.
+    station_reporter: StationReporter | None = None
     host: str = "127.0.0.1"
     port: int = 8081
 
     ack_interval_s: float = ACK_INTERVAL_S
+    station_report_interval_s: float = STATION_REPORT_INTERVAL_S
     unreachable_after_s: float = 3.0
     radio_silent_after_ms: int = 3_000
 
@@ -271,7 +306,14 @@ class _Session:
         self._last_state: LinkState | None = None
 
     async def run(self) -> None:
+        # The state at connect, recorded and reported before anything is
+        # waited for. Without it both are left to a race: whether the log
+        # opens with `unreachable` depends on whether a timer tick beat the
+        # station's first `status`, and a console watching a station come up
+        # sees nothing until a tick has passed.
+        await self._tick()
         acker = asyncio.create_task(self._acknowledge_periodically())
+        reporter = asyncio.create_task(self._report_periodically())
         try:
             async for message in self.connection:
                 if isinstance(message, bytes):
@@ -285,14 +327,16 @@ class _Session:
             with contextlib.suppress(websockets.WebSocketException):
                 await self.connection.close(_CLOSE_PROTOCOL_ERROR, str(error)[:120])
         finally:
-            acker.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await acker
+            for task in (acker, reporter):
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
             # A final ack for anything stored since the last tick. The relay
             # survives without it - protocol §5 makes a lost ack cost a
             # retransmission, never a gap - but sending it saves the station
             # resending a batch it will only be told to discard.
             await self._acknowledge()
+            await self._report_disconnected()
 
     async def _ingest_batch(self, frame: bytes) -> None:
         """Store a batch durably. Nothing is acknowledged before this returns."""
@@ -314,7 +358,7 @@ class _Session:
         if isinstance(message, Status):
             for loss in self.tracker.observe_status(message, now_s=now_s):
                 await self.server.store.record_loss(self.station_id, self.epoch, loss)
-            await self._publish_state_change(now_s, message.utc_ns)
+            await self._record_state_change(now_s, message.utc_ns)
             return
 
         if isinstance(message, Gap):
@@ -362,11 +406,80 @@ class _Session:
             await self.connection.send(build_ack(self.epoch, self._watermark))
             self._acked = self._watermark
 
-    async def _publish_state_change(self, now_s: float, at_utc_ns: int) -> None:
+    async def _record_state_change(self, now_s: float, at_utc_ns: int) -> LinkState:
+        """Append to the event log, but only when the state actually changed.
+
+        The log stays a log. Writing a row every second would bury the four
+        transitions that matter under a heartbeat, and `ingest_events` is what
+        an incident is reconstructed from.
+        """
         state = self.tracker.state(now_s=now_s)
-        if state == self._last_state:
+        if state != self._last_state:
+            self._last_state = state
+            await self.server.store.record_link_state(
+                self.station_id, state, at_utc_ns=at_utc_ns
+            )
+        return state
+
+    async def _report_periodically(self) -> None:
+        """Publish live state on a timer, not only when it changes.
+
+        Two separate things fail if this only runs on change:
+
+        1. A console attaching after the change never learns the state. This
+           is what left the stations panel empty during the SITL run - the
+           station went `healthy` once, seconds before the browser opened, and
+           nothing said so again.
+        2. `unreachable` is defined by the *absence* of `status` messages, so
+           the transition into it can only be noticed by something that runs
+           when nothing is arriving. Driven from `_handle_control` alone, the
+           one state §9 exists to distinguish was unreachable in both senses.
+        """
+        while True:
+            await asyncio.sleep(self.server.station_report_interval_s)
+            await self._tick()
+
+    async def _tick(self) -> None:
+        """Log the state if it changed, and report it either way."""
+        now_s = time.monotonic()
+        # `time.time_ns` because a transition detected by a timer has no
+        # message to take a timestamp from.
+        state = await self._record_state_change(now_s, time.time_ns())
+        await self._report(state)
+
+    async def _report_disconnected(self) -> None:
+        """One last report, so a station that left does not freeze as healthy.
+
+        The reporter dies with the session, so whatever it published last is
+        what the console keeps showing. For a station that has just
+        disconnected that would be `healthy`, indefinitely - a live link drawn
+        to a relay that is gone.
+
+        §9: a relay we cannot reach is presumed buffering, not losing.
+        `unreachable` says that; `data_lost` stays reserved for loss that has
+        actually been observed, and so is never overwritten here.
+        """
+        state = self.tracker.state(now_s=time.monotonic())
+        if state is not LinkState.DATA_LOST:
+            state = LinkState.UNREACHABLE
+        await self._report(state)
+
+    async def _report(self, state: LinkState) -> None:
+        reporter = self.server.station_reporter
+        if reporter is None:
             return
-        self._last_state = state
-        await self.server.store.record_link_state(
-            self.station_id, state, at_utc_ns=at_utc_ns
+        status = self.tracker.last_status
+        # `last_datagram_age_ms` is carried forward unaged on purpose. It is
+        # the relay's measurement of how long since *it* heard the aircraft,
+        # and once the relay is unreachable we have no basis to advance it -
+        # doing so would report radio silence we cannot observe, on a link
+        # that may be carrying telemetry into a buffer perfectly well.
+        await reporter.publish_station(
+            self.station_id,
+            state,
+            last_datagram_age_ms=None
+            if status is None
+            else status.last_datagram_age_ms,
+            queue_depth=None if status is None else status.queue_depth,
+            losses=list(self.tracker.losses),
         )

@@ -530,7 +530,15 @@ async def test_a_healthy_station_records_no_loss() -> None:
         await asyncio.sleep(0.2)
 
     assert store.losses == []
-    assert [state for _, state, _ in store.link_states] == [LinkState.HEALTHY]
+    # `unreachable` first: the session records its state at connect, when no
+    # `status` has arrived yet. `StationLinkTracker.state` has always called
+    # that unreachable - "connected, no status yet, not healthy" - but until
+    # the state was reported on a timer nothing ever wrote it down, so the log
+    # began wherever the first `status` put it.
+    assert [state for _, state, _ in store.link_states] == [
+        LinkState.UNREACHABLE,
+        LinkState.HEALTHY,
+    ]
 
 
 async def test_an_unknown_control_message_is_ignored_and_counted() -> None:
@@ -548,3 +556,201 @@ async def test_an_unknown_control_message_is_ignored_and_counted() -> None:
         assert server.trackers[STATION].ignored_message_count == 1
 
     assert ack["seq"] == 2
+
+
+# --- station state reaches the console -------------------------------------
+#
+# All of this exists because of one screenshot: the console said "Stations:
+# none" while `tbilisi-base-1` was connected and streaming ten aircraft. The
+# link state was being computed correctly and written to `ingest_events`
+# correctly. Nothing published it - `TelemetryPublisher.publish_station` had no
+# caller anywhere outside its own unit test - and every test passed.
+#
+# So these tests assert that something is *published*, from a real session over
+# a real socket, rather than that the state is *computed*, which was never the
+# broken half.
+
+
+@dataclass
+class RecordingReporter:
+    """Captures what a console would have received."""
+
+    reports: list[tuple[str, LinkState]] = field(default_factory=list)
+    last_datagram_age_ms: int | None = None
+    queue_depth: int | None = None
+
+    async def publish_station(
+        self,
+        station_id: str,
+        state: LinkState,
+        *,
+        last_datagram_age_ms: int | None = None,
+        queue_depth: int | None = None,
+        losses: Any = None,
+    ) -> None:
+        self.reports.append((station_id, state))
+        self.last_datagram_age_ms = last_datagram_age_ms
+        self.queue_depth = queue_depth
+        self.losses = list(losses or [])
+
+
+async def wait_for_reports(reporter: RecordingReporter, count: int) -> None:
+    """Wait until `count` reports have been published, or say what did arrive."""
+    started = time.monotonic()
+    while len(reporter.reports) < count:
+        if time.monotonic() - started > 5.0:
+            raise AssertionError(
+                f"only {len(reporter.reports)} report(s) after "
+                f"{time.monotonic() - started:.2f}s, wanted {count}: "
+                f"{reporter.reports}"
+            )
+        await asyncio.sleep(0.01)
+
+
+async def wait_for_state(reporter: RecordingReporter, state: LinkState) -> None:
+    started = time.monotonic()
+    while time.monotonic() - started < 5.0:
+        if reporter.reports and reporter.reports[-1][1] is state:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(
+        f"never reported {state} within {time.monotonic() - started:.2f}s; "
+        f"saw {reporter.reports}"
+    )
+
+
+async def test_a_connected_station_is_reported_to_the_bus() -> None:
+    """The presence test for the whole defect.
+
+    Before the fix this failed on a Gateway that was otherwise working
+    perfectly: storing, acknowledging, converting and writing drone_state.
+    """
+    reporter = RecordingReporter()
+    async with running(
+        station_reporter=reporter, station_report_interval_s=0.02
+    ) as server, connect(url(server), additional_headers=auth()) as connection:
+        await handshake(connection, hello())
+        await connection.send(status())
+        await wait_for_state(reporter, LinkState.HEALTHY)
+
+    assert (STATION, LinkState.HEALTHY) in reporter.reports
+
+
+async def test_the_station_is_reported_again_although_nothing_changed() -> None:
+    """A console attaching late must still be able to learn the state.
+
+    Publishing only on change is why the panel was empty: the station went
+    healthy once, seconds before the browser was opened, and nothing ever said
+    so again. Repetition is what makes a late subscriber serviceable.
+    """
+    reporter = RecordingReporter()
+    async with running(
+        station_reporter=reporter, station_report_interval_s=0.02
+    ) as server, connect(url(server), additional_headers=auth()) as connection:
+        await handshake(connection, hello())
+        await connection.send(status())
+        # Four, not three: the first report is the `unreachable` at
+        # connect, before the station has said anything.
+        await wait_for_reports(reporter, 4)
+
+    healthy = [state for _, state in reporter.reports if state is LinkState.HEALTHY]
+    assert len(healthy) >= 3
+
+
+async def test_the_event_log_keeps_only_transitions() -> None:
+    """The paired absence test, and the reason the two paths are separate.
+
+    The bus repeats; the log must not. `ingest_events` is what an incident is
+    reconstructed from, and a state written once a second would bury the
+    transitions under a heartbeat.
+    """
+    store = InMemoryIngestStore()
+    reporter = RecordingReporter()
+    async with running(
+        store=store, station_reporter=reporter, station_report_interval_s=0.02
+    ) as server, connect(url(server), additional_headers=auth()) as connection:
+        await handshake(connection, hello())
+        await connection.send(status())
+        await wait_for_reports(reporter, 5)
+
+    assert len(reporter.reports) >= 5
+    # UNREACHABLE on connect, because no status has arrived yet, then HEALTHY.
+    # Never a third row for a state that did not change.
+    states = [state for _, state, _ in store.link_states]
+    assert states == [LinkState.UNREACHABLE, LinkState.HEALTHY]
+
+
+async def test_a_station_that_stops_sending_status_becomes_unreachable() -> None:
+    """The transition §9 exists for, which nothing could previously notice.
+
+    `unreachable` is defined by the *absence* of `status` messages. While the
+    state was evaluated only on an incoming message, a station that went quiet
+    held whatever it last reported forever, and the transport saw nothing wrong
+    either because the socket stays open.
+    """
+    reporter = RecordingReporter()
+    async with running(
+        station_reporter=reporter,
+        station_report_interval_s=0.02,
+        unreachable_after_s=0.1,
+    ) as server, connect(url(server), additional_headers=auth()) as connection:
+        await handshake(connection, hello())
+        await connection.send(status())
+        await wait_for_state(reporter, LinkState.HEALTHY)
+        # Say nothing at all from here. The socket stays open.
+        await wait_for_state(reporter, LinkState.UNREACHABLE)
+
+    assert LinkState.HEALTHY in [state for _, state in reporter.reports]
+    assert reporter.reports[-1] == (STATION, LinkState.UNREACHABLE)
+
+
+async def test_a_station_that_disconnects_is_not_left_reported_healthy() -> None:
+    """The reporter dies with the session; its last word must not be `healthy`.
+
+    §9: a relay we cannot reach is presumed to be buffering, so `unreachable`
+    is the honest state and `data_lost` stays reserved for observed loss.
+    """
+    reporter = RecordingReporter()
+    async with running(
+        station_reporter=reporter, station_report_interval_s=0.02
+    ) as server:
+        async with connect(url(server), additional_headers=auth()) as connection:
+            await handshake(connection, hello())
+            await connection.send(status())
+            await wait_for_state(reporter, LinkState.HEALTHY)
+        # The session's `finally` runs after the client closes.
+        await wait_for_state(reporter, LinkState.UNREACHABLE)
+
+    assert reporter.reports[-1] == (STATION, LinkState.UNREACHABLE)
+
+
+async def test_the_report_carries_the_relay_queue_depth_and_datagram_age() -> None:
+    """The console renders these; they must be the station's, not placeholders."""
+    reporter = RecordingReporter()
+    async with running(
+        station_reporter=reporter, station_report_interval_s=0.02
+    ) as server, connect(url(server), additional_headers=auth()) as connection:
+        await handshake(connection, hello())
+        await connection.send(status(queue_depth=17, last_datagram_age_ms=42))
+        await wait_for_state(reporter, LinkState.HEALTHY)
+
+    assert reporter.queue_depth == 17
+    assert reporter.last_datagram_age_ms == 42
+
+
+async def test_a_gateway_with_no_reporter_still_serves_the_transport() -> None:
+    """The reporter is optional, and its absence must stay a console problem.
+
+    Publishing to the bus must never be able to break ingest: the archive and
+    the hypertable are the record, and the console is a view of it.
+    """
+    store = InMemoryIngestStore()
+    async with (
+        running(store=store, station_report_interval_s=0.02) as server,
+        connect(url(server), additional_headers=auth()) as connection,
+    ):
+        await handshake(connection, hello())
+        await connection.send(batch(0, 4))
+        await read_until(connection, "ack")
+
+    assert len(store.records[(STATION, EPOCH)]) == 4
