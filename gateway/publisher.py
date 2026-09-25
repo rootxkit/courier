@@ -74,7 +74,7 @@ def event_subject(event_type: str) -> str:
     return f"{EVENTS_SUBJECT}.{event_type}"
 
 
-def encode_row(row: DroneStateRow) -> dict[str, Any]:
+def encode_row(row: DroneStateRow, label: str | None = None) -> dict[str, Any]:
     """A drone_state row as the console reads it.
 
     Field names match the database columns exactly, including
@@ -85,6 +85,12 @@ def encode_row(row: DroneStateRow) -> dict[str, Any]:
     """
     return {
         "drone_id": str(row.drone_id),
+        # The registry name, when the Gateway could read one. The console shows
+        # this and keeps the id secondary: a pilot reads "SITL-01", not
+        # "0b63df96". Carried per message rather than looked up by the console
+        # so that the console stays a pure subscriber and a browser attaching
+        # late is served entirely from the snapshot.
+        "label": label,
         "ts": row.ts.isoformat(),
         "station_id": row.station_id,
         "lat_deg": row.lat_deg,
@@ -161,12 +167,15 @@ class TelemetryPublisher:
 
     bus: Bus
 
-    async def publish_row(self, row: DroneStateRow) -> None:
-        await self._send(telemetry_subject(row.drone_id), encode_row(row))
+    async def publish_row(self, row: DroneStateRow, label: str | None = None) -> None:
+        await self._send(telemetry_subject(row.drone_id), encode_row(row, label))
 
-    async def publish_rows(self, rows: list[DroneStateRow]) -> None:
+    async def publish_rows(
+        self, rows: list[DroneStateRow], labels: dict[UUID, str] | None = None
+    ) -> None:
+        labels = labels or {}
         for row in rows:
-            await self.publish_row(row)
+            await self.publish_row(row, labels.get(row.drone_id))
 
     async def publish_station(
         self,

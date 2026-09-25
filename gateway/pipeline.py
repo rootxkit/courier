@@ -24,6 +24,7 @@ was captured, which is the whole reason bindings have validity.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from uuid import UUID
 
 from common import get_logger
 from gateway.binding import BindingResolver, Resolution
@@ -89,13 +90,31 @@ class IngestPipeline:
         if rows:
             try:
                 await self.writer.write(rows)
-                await self.publisher.publish_rows(rows)
+                await self.publisher.publish_rows(rows, await self._labels(rows))
             except Exception as error:
                 _log.error(
                     "could not write drone_state",
                     extra={"station_id": self.station_id, "error": repr(error)},
                 )
         return rows
+
+    async def _labels(self, rows: list[DroneStateRow]) -> dict[UUID, str]:
+        """Registry names for the console, and never a reason to lose a row.
+
+        Isolated in its own handler rather than sharing the one around the
+        write and the publish. A label is decoration on a position; if looking
+        one up fails, the position must still be written and still reach the
+        console unnamed. Sharing the handler would have made a registry
+        hiccup cost live telemetry, which is the wrong trade by a wide margin.
+        """
+        try:
+            return await self.resolver.labels_for({row.drone_id for row in rows})
+        except Exception as error:
+            _log.warning(
+                "could not read drone labels",
+                extra={"station_id": self.station_id, "error": repr(error)},
+            )
+            return {}
 
     async def _process_record(self, epoch: str, record: Record) -> list[DroneStateRow]:
         parsed = parse_datagram(record.datagram)

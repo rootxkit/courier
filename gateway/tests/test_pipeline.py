@@ -34,9 +34,26 @@ NOON_NS = int(datetime(2026, 9, 24, 12, 0, tzinfo=UTC).timestamp()) * 1_000_000_
 class FakeResolver:
     """Resolves everything to one drone, or to nothing."""
 
-    def __init__(self, *, drone_id: UUID | None = DRONE) -> None:
+    def __init__(
+        self,
+        *,
+        drone_id: UUID | None = DRONE,
+        labels: dict[UUID, str] | None = None,
+        labels_fail: bool = False,
+    ) -> None:
         self.drone_id = drone_id
         self.unclaimed: list[Resolution] = []
+        self.labels = labels if labels is not None else {DRONE: "SITL-01"}
+        self.labels_fail = labels_fail
+
+    async def labels_for(self, drone_ids: set[UUID]) -> dict[UUID, str]:
+        if self.labels_fail:
+            raise RuntimeError("known_drones is unreachable")
+        return {
+            drone_id: self.labels[drone_id]
+            for drone_id in drone_ids
+            if drone_id in self.labels
+        }
 
     async def resolve(
         self, station_id: str, source: Any, *, at: datetime
@@ -67,10 +84,14 @@ class FakeWriter:
 class FakePublisher:
     def __init__(self) -> None:
         self.rows: list[DroneStateRow] = []
+        self.labels: dict[UUID, str] = {}
         self.unclaimed: list[SourceId] = []
 
-    async def publish_rows(self, rows: list[DroneStateRow]) -> None:
+    async def publish_rows(
+        self, rows: list[DroneStateRow], labels: dict[UUID, str] | None = None
+    ) -> None:
         self.rows.extend(rows)
+        self.labels = labels or {}
 
     async def publish_unclaimed(
         self, station_id: str, resolution: Resolution, source_id: SourceId
@@ -340,3 +361,53 @@ async def test_the_same_station_reuses_its_pipeline() -> None:
 
     assert len(pipelines.pipelines) == 1
     assert writer.written[0].mode == "GUIDED"
+
+
+# --- the registry label travels with the row -------------------------------
+#
+# The console listed ten aircraft as `9e1e607e`, `ba7f9168`, `685def77` and so
+# on. Every one of them was correct and none of them was usable: with ten SITL
+# vehicles in a row on the map there was no way to tell which entry was which
+# airframe, which is also how a heading was compared against the wrong vehicle.
+
+
+async def test_the_label_is_published_with_the_row() -> None:
+    pipeline, _, _, publisher = build()
+
+    await pipeline.process(
+        EPOCH, [record(0, heartbeat()), record(1, position(), offset_ns=300_000_000)]
+    )
+
+    assert publisher.labels == {DRONE: "SITL-01"}
+
+
+async def test_a_row_is_still_published_when_the_label_is_unknown() -> None:
+    """An unregistered label must cost the name, not the position."""
+    pipeline, _, _, publisher = build(resolver=FakeResolver(labels={}))
+
+    rows = await pipeline.process(
+        EPOCH, [record(0, heartbeat()), record(1, position(), offset_ns=300_000_000)]
+    )
+
+    assert publisher.rows == rows
+    assert publisher.labels == {}
+
+
+async def test_a_row_is_still_published_when_the_label_lookup_fails() -> None:
+    """The paired failure test: the registry falling over is cosmetic.
+
+    Written because the first version of this change put the lookup inside the
+    handler that already wrapped the write and the publish, so a resolver
+    without the method took the telemetry down with it - live positions lost to
+    a missing display name.
+    """
+    pipeline, _, writer, publisher = build(resolver=FakeResolver(labels_fail=True))
+
+    rows = await pipeline.process(
+        EPOCH, [record(0, heartbeat()), record(1, position(), offset_ns=300_000_000)]
+    )
+
+    assert rows
+    assert writer.written == rows
+    assert publisher.rows == rows
+    assert publisher.labels == {}

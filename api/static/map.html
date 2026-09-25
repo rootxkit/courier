@@ -62,6 +62,7 @@
         border-top: 1px solid rgba(128, 128, 128, 0.25);
       }
       .muted { opacity: 0.7; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
       .pill {
         display: inline-block;
         padding: 1px 7px;
@@ -148,6 +149,9 @@
           // Present, but the aircraft has not told us where it is. Not an
           // error: indoors, before the EKF has an origin, this is normal.
           unplaced: "no position yet",
+          // Telemetry is arriving and the drone is bound, but the Gateway
+          // could not read a label for it from known_drones.
+          unnamed: "unnamed",
         },
         ka: {
           live: "ცოცხალი რუკა",
@@ -168,12 +172,29 @@
           unreachable: "მიუწვდომელია — მონაცემები ინახება სადგურზე",
           data_lost: "მონაცემები დაკარგულია",
           no_binding: "გადასცემს, მაგრამ არ არის მიბმული",
+          unnamed: "უსახელო",
           unplaced: "პოზიცია ჯერ არ არის",
         },
       };
 
       let lang = "en";
       const t = (key) => (STRINGS[lang] && STRINGS[lang][key]) || STRINGS.en[key] || key;
+
+      // Labels come from the database, so they reach this page as data and are
+      // never trusted as markup. A drone registered as `<img onerror=...>`
+      // must render as that text, not run as it.
+      const escapeHtml = (value) =>
+        String(value).replace(
+          /[&<>"']/g,
+          (c) =>
+            ({
+              "&": "&amp;",
+              "<": "&lt;",
+              ">": "&gt;",
+              '"': "&quot;",
+              "'": "&#39;",
+            })[c],
+        );
 
       function applyStaticStrings() {
         document.documentElement.lang = lang;
@@ -295,8 +316,17 @@
           const unplaced = placed
             ? ""
             : ` · <span class="pill unplaced">${t("unplaced")}</span>`;
+          // The registry label leads and the id follows. A pilot knows
+          // "SITL-01"; nobody recognises an aircraft by the first eight
+          // characters of a UUID, and during the SITL run that made it
+          // impossible to tell which row was which airframe. The id stays
+          // visible because it is the identity everything else is keyed on.
+          const label = entry.data.label
+            ? escapeHtml(entry.data.label)
+            : `<span class="muted">${t("unnamed")}</span>`;
           return (
-            `<div class="row"><span>${id.slice(0, 8)}</span>` +
+            `<div class="row"><span>${label} ` +
+            `<span class="muted mono">${id.slice(0, 8)}</span></span>` +
             `<span class="muted">${t("battery")} ${battery} · ` +
             `${t("heading")} ${heading} · ${age}${t("seconds")}${unplaced}</span></div>`
           );

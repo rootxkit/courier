@@ -140,6 +140,10 @@ class BindingResolver:
 
     engine: AsyncEngine
 
+    def __post_init__(self) -> None:
+        # Registry labels, read once per drone. See `labels_for`.
+        self._labels: dict[UUID, str] = {}
+
     async def register_drone(
         self, drone_id: UUID, label: str, *, retired_at: datetime | None = None
     ) -> None:
@@ -160,6 +164,44 @@ class BindingResolver:
                 )
         except SQLAlchemyError as error:
             raise StoreError(f"could not register drone: {error}") from error
+
+    async def labels_for(self, drone_ids: set[UUID]) -> dict[UUID, str]:
+        """The registry label for each drone, for whatever has to name one.
+
+        Nothing else in this module needs a label: a `drone_id` is the identity
+        and a label is a convenience for people. But a console that can only
+        show `0b63df96` cannot tell a pilot which aircraft that is, and the
+        pilot is who the console exists for.
+
+        Cached in process and never invalidated, deliberately. A label is
+        registry data that changes when someone renames an airframe, not
+        telemetry, and looking it up per row at 4 Hz per drone would put a
+        query on the hot path to save a restart after a rename. Keeping the
+        projection in step with the relational registry is P2-05's job and is
+        already recorded as a gap; this inherits that limitation rather than
+        inventing a second, worse answer to it.
+        """
+        missing = drone_ids - self._labels.keys()
+        if missing:
+            try:
+                async with self.engine.connect() as connection:
+                    result = await connection.execute(
+                        sa.select(_drones.c.drone_id, _drones.c.label).where(
+                            _drones.c.drone_id.in_(missing)
+                        )
+                    )
+                    for drone_id, label in result:
+                        self._labels[drone_id] = label
+            except SQLAlchemyError as error:
+                # A missing label is a cosmetic failure. It must never stop a
+                # row being published, because the position is what matters
+                # and the name is what makes it readable.
+                _log.warning("could not read drone labels", extra={"error": str(error)})
+        return {
+            drone_id: self._labels[drone_id]
+            for drone_id in drone_ids
+            if drone_id in self._labels
+        }
 
     async def bind(
         self,
