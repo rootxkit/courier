@@ -122,6 +122,11 @@ class SweepResult:
     bytes_reclaimed: int = 0
     records_destroyed: int = 0
     skipped_held: int = 0
+    # Segments the index listed but whose file was already gone. Expected
+    # during crash recovery - the sweep is restartable precisely because this
+    # is tolerated - and a sign the index and the disk disagree at any other
+    # time. Never silent: see `_report_missing_files`.
+    already_missing: int = 0
 
     @property
     def deleted_total(self) -> int:
@@ -158,12 +163,58 @@ class ArchiveRetention:
         moment = now if now is not None else datetime.now(tz=UTC)
         by_age = await self._sweep_by_age(moment, only_station)
         by_ceiling = await self._sweep_by_ceiling(moment, only_station)
-        return SweepResult(
+        result = SweepResult(
             deleted_by_age=by_age.deleted_by_age,
             deleted_by_ceiling=by_ceiling.deleted_by_ceiling,
             bytes_reclaimed=by_age.bytes_reclaimed + by_ceiling.bytes_reclaimed,
             records_destroyed=by_age.records_destroyed + by_ceiling.records_destroyed,
             skipped_held=by_age.skipped_held + by_ceiling.skipped_held,
+            already_missing=by_age.already_missing + by_ceiling.already_missing,
+        )
+        if result.already_missing:
+            await self._report_missing_files(result, only_station)
+        return result
+
+    async def _report_missing_files(
+        self, result: SweepResult, only_station: str | None
+    ) -> None:
+        """Record that the index and the disk disagreed.
+
+        Deleting a segment whose file is already gone is deliberately not an
+        error - retention has to be re-runnable after a crash, and on the
+        second run every file it removed is already absent. That tolerance is
+        correct and it is also what let 14,288 index rows be marked deleted
+        against a live station without anything failing.
+
+        So the tolerance stays and the silence goes. In crash recovery a
+        non-zero count is expected and this row is a footnote. In an ordinary
+        sweep it means segments the index still listed are not on disk, which
+        is either a bug or data loss, and it should be visible on the first
+        sweep rather than the ten-thousandth.
+        """
+        _log.warning(
+            "archive index and disk disagree",
+            extra={
+                "already_missing": result.already_missing,
+                "deleted_total": result.deleted_total,
+                "station_id": only_station,
+                "archive_root": str(self.archive.root),
+            },
+        )
+        await self._record_event(
+            only_station or "*",
+            None,
+            "retention.missing_files",
+            {
+                "already_missing": result.already_missing,
+                "deleted_total": result.deleted_total,
+                "archive_root": str(self.archive.root),
+                "note": (
+                    "segments the index listed were not on disk. Expected "
+                    "during crash recovery; otherwise the index and the "
+                    "archive disagree."
+                ),
+            },
         )
 
     # --- holds -------------------------------------------------------------
@@ -305,7 +356,7 @@ class ArchiveRetention:
         candidates = await self._live_segments(
             older_than=cutoff, station_id=only_station
         )
-        deleted, reclaimed, records, held = await self._delete_all(
+        deleted, reclaimed, records, held, missing = await self._delete_all(
             candidates, reason="age", now=now
         )
         return SweepResult(
@@ -313,12 +364,13 @@ class ArchiveRetention:
             bytes_reclaimed=reclaimed,
             records_destroyed=records,
             skipped_held=held,
+            already_missing=missing,
         )
 
     async def _sweep_by_ceiling(
         self, now: datetime, only_station: str | None = None
     ) -> SweepResult:
-        deleted = reclaimed = records = held = 0
+        deleted = reclaimed = records = held = missing = 0
 
         for station_id, total_bytes in await self._station_sizes(only_station):
             if total_bytes <= self.max_bytes_per_station:
@@ -333,10 +385,13 @@ class ArchiveRetention:
                 if await self._is_held(segment.station_id, segment.epoch, now):
                     held += 1
                     continue
-                freed, count = await self._delete_one(segment, reason="ceiling")
+                freed, count, existed = await self._delete_one(
+                    segment, reason="ceiling"
+                )
                 deleted += 1
                 reclaimed += freed
                 records += count
+                missing += 0 if existed else 1
                 over_by -= segment.compressed_bytes
 
         return SweepResult(
@@ -344,6 +399,7 @@ class ArchiveRetention:
             bytes_reclaimed=reclaimed,
             records_destroyed=records,
             skipped_held=held,
+            already_missing=missing,
         )
 
     # --- internals ---------------------------------------------------------
@@ -419,24 +475,25 @@ class ArchiveRetention:
         *,
         reason: str,
         now: datetime,
-    ) -> tuple[int, int, int, int]:
-        deleted = reclaimed = records = held = 0
+    ) -> tuple[int, int, int, int, int]:
+        deleted = reclaimed = records = held = missing = 0
         for segment in segments:
             if await self._is_held(segment.station_id, segment.epoch, now):
                 held += 1
                 continue
-            freed, count = await self._delete_one(segment, reason=reason)
+            freed, count, existed = await self._delete_one(segment, reason=reason)
             deleted += 1
             reclaimed += freed
             records += count
-        return deleted, reclaimed, records, held
+            missing += 0 if existed else 1
+        return deleted, reclaimed, records, held, missing
 
     async def _delete_one(
         self,
         segment: sa.Row[tuple[int, str, str, str, datetime, int, int]],
         *,
         reason: str,
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, bool]:
         """Delete the file, mark the index, record the event. In that order.
 
         File first: a crash after deleting but before marking leaves an index
@@ -444,6 +501,7 @@ class ArchiveRetention:
         The reverse leaves a file nothing points at, which nothing will ever
         clean up.
         """
+        existed = (self.archive.root / segment.relative_path).exists()
         freed = self.archive.delete_segment(segment.relative_path)
 
         try:
@@ -467,7 +525,7 @@ class ArchiveRetention:
                 "bytes_reclaimed": freed,
             },
         )
-        return freed, segment.record_count
+        return freed, segment.record_count, existed
 
     async def _record_event(
         self,

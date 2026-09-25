@@ -144,6 +144,9 @@ jobs:
           --health-start-period 40s
     env:
       TELEMETRY_DATABASE_URL: postgresql+asyncpg://courier:courier_dev@localhost:5433/courier_telemetry
+      # Tests create and drop this one themselves; the fixture refuses any
+      # name that does not end in _test.
+      TELEMETRY_TEST_DATABASE_URL: postgresql+asyncpg://courier:courier_dev@localhost:5433/courier_telemetry_test
     steps:
       - uses: actions/checkout@v4
 

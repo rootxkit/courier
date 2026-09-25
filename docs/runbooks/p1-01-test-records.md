@@ -160,6 +160,33 @@ was repaired.
 
 > A test that can reach data it did not create will eventually delete some.
 
+### What found these
+
+Three of the four defects from this run were found by **running the system
+against itself**, not by writing more tests:
+
+| Defect | Found by |
+|---|---|
+| Position stored as `0,0` | Reading a real row on the console |
+| Retention sweeping every station | Running the database suite while the Gateway was live |
+| `.name` deprecation on every datagram | Watching the Gateway's log under real traffic |
+| EKF flag being the right signal | Reading the aircraft's own frames out of the archive |
+
+None of them would have been caught by more unit tests, because each was a
+property of the system *in operation*: a real row, a shared database, a log
+under load, an aircraft with no fix. The unit tests all passed throughout.
+
+> A test suite answers "does this component do what I said it does". Running
+> the thing answers "is what I said still true when everything is connected".
+> They are different questions and the second one found more today.
+
+The retention finding is the one to remember, because it was a near miss
+rather than a defect: the index rows it touched were live, and only the file
+paths were wrong. With a matching archive root it would have deleted recorded
+flight data, and nothing would have failed. The guards in
+`gateway/tests/conftest.py` exist so that the next version of that mistake
+cannot reach anything real.
+
 ### Not covered
 
 - Flight. A bench aircraft does not arm, move or acquire a fix, so nothing

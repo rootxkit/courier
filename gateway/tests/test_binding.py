@@ -13,14 +13,13 @@ concurrent writers; asserting the database refuses it proves the property.
 
 from __future__ import annotations
 
-import os
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from gateway.binding import (
     UNBOUND,
@@ -40,22 +39,6 @@ NOON = datetime(2026, 9, 23, 12, 0, tzinfo=UTC)
 # The reassignment instant used throughout: the old airframe's binding ends
 # here and the new one begins at the same moment.
 HANDOVER = datetime(2026, 9, 23, 14, 0, tzinfo=UTC)
-
-
-def database_url() -> str:
-    url = os.environ.get("TELEMETRY_DATABASE_URL")
-    if not url:
-        pytest.skip("TELEMETRY_DATABASE_URL is not set; `make up` starts the stack")
-    return url
-
-
-@pytest.fixture
-async def engine() -> AsyncIterator[AsyncEngine]:
-    created = create_async_engine(database_url())
-    try:
-        yield created
-    finally:
-        await created.dispose()
 
 
 @pytest.fixture

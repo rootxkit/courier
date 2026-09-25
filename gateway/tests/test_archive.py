@@ -19,6 +19,7 @@ from gateway.archive import (
     segment_relative_path,
 )
 from gateway.relay_records import Record
+from gateway.tests.conftest import require_temporary_path
 
 EPOCH = "9f2c1b7d4e6a58039ab1c2d3e4f50617"
 STATION = "tbilisi-base-1"
@@ -28,7 +29,13 @@ BASE_NS = int(datetime(2026, 9, 23, 14, 30, tzinfo=UTC).timestamp()) * 1_000_000
 
 
 def archive(tmp_path: Path) -> RawArchive:
-    return RawArchive(root=tmp_path / "archive")
+    """Guarded, because these tests delete segments.
+
+    `require_temporary_path` refuses anything outside the system temporary
+    directory, so this cannot be pointed at a real archive root even by
+    editing one line.
+    """
+    return RawArchive(root=require_temporary_path(tmp_path / "archive"))
 
 
 def records(first_seq: int, count: int, *, base_ns: int = BASE_NS) -> list[Record]:

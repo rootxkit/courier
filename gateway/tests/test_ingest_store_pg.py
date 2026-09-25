@@ -13,13 +13,12 @@ epoch of the wrong shape. A fake would agree with whatever the code did.
 
 from __future__ import annotations
 
-import os
 from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from gateway.archive import RawArchive
 from gateway.ingest_store_pg import EMPTY_WATERMARK, TimescaleIngestStore
@@ -32,22 +31,6 @@ pytestmark = pytest.mark.postgres
 EPOCH = "9f2c1b7d4e6a58039ab1c2d3e4f50617"
 OTHER_EPOCH = "00112233445566778899aabbccddeeff"
 BASE_NS = 1_790_000_000_000_000_000
-
-
-def database_url() -> str:
-    url = os.environ.get("TELEMETRY_DATABASE_URL")
-    if not url:
-        pytest.skip("TELEMETRY_DATABASE_URL is not set; `make up` starts the stack")
-    return url
-
-
-@pytest.fixture
-async def engine() -> AsyncIterator[AsyncEngine]:
-    created = create_async_engine(database_url())
-    try:
-        yield created
-    finally:
-        await created.dispose()
 
 
 @pytest.fixture
@@ -73,10 +56,9 @@ async def station(
 
 
 @pytest.fixture
-def store(engine: AsyncEngine, tmp_path: Path) -> TimescaleIngestStore:
-    return TimescaleIngestStore(
-        engine=engine, archive=RawArchive(root=tmp_path / "archive")
-    )
+def store(engine: AsyncEngine, archive_root: Path) -> TimescaleIngestStore:
+    """Rooted at the guarded temporary path, never a real archive."""
+    return TimescaleIngestStore(engine=engine, archive=RawArchive(root=archive_root))
 
 
 def records(first_seq: int, count: int) -> list[Record]:
@@ -118,7 +100,7 @@ async def test_the_resume_point_follows_what_was_stored(
 
 
 async def test_the_resume_point_survives_a_new_store_object(
-    store: TimescaleIngestStore, engine: AsyncEngine, tmp_path: Path, station: str
+    store: TimescaleIngestStore, engine: AsyncEngine, archive_root: Path, station: str
 ) -> None:
     """§4.2: a restarted Gateway must answer the same number.
 
@@ -127,7 +109,7 @@ async def test_the_resume_point_survives_a_new_store_object(
     await store.store_records(station, EPOCH, records(0, 42))
 
     restarted = TimescaleIngestStore(
-        engine=engine, archive=RawArchive(root=tmp_path / "archive")
+        engine=engine, archive=RawArchive(root=archive_root)
     )
 
     assert await restarted.resume_from_seq(station, EPOCH) == 42

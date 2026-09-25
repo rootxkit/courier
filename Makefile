@@ -171,8 +171,13 @@ console: venv ## Serve the P1-08 map on :8000 (needs .env and `make up`)
 test-bus: venv ## Run tests that need NATS (make up first)
 	$(VENV_BIN)/pytest -m nats -v
 
+# Database tests create and drop their OWN database. The name must end in
+# _test; the fixture refuses anything else, because pointing them at the
+# development database once marked 14,288 archive rows deleted.
+TELEMETRY_TEST_DATABASE_URL ?= postgresql+asyncpg://courier:courier_dev@127.0.0.1:5433/courier_telemetry_test
+
 test-db: venv ## Run tests that need the telemetry database (make up first)
-	$(VENV_BIN)/pytest -m postgres -v --cov=gateway.ingest_store_pg --cov=gateway.retention --cov=gateway.binding --cov=gateway.state_writer --cov-branch --cov-report=term-missing
+	TELEMETRY_TEST_DATABASE_URL="$(TELEMETRY_TEST_DATABASE_URL)" $(VENV_BIN)/pytest -m postgres -v --cov=gateway.ingest_store_pg --cov=gateway.retention --cov=gateway.binding --cov=gateway.state_writer --cov-branch --cov-report=term-missing
 	$(VENV_BIN)/coverage report --include='$(COVERAGE_DB_ONLY)' --show-missing --fail-under=$(COVERAGE_MIN_DB_MODULES)
 
 test-slow: venv ## Run the slow tests excluded from `make test`

@@ -17,7 +17,6 @@ bug: the archive grows until the disk decides the policy instead.
 
 from __future__ import annotations
 
-import os
 import secrets
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -25,7 +24,7 @@ from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from gateway.archive import RawArchive
 from gateway.ingest_store import StoreError
@@ -40,22 +39,6 @@ OTHER_EPOCH = "00112233445566778899aabbccddeeff"
 
 NOW = datetime(2026, 9, 23, 12, 0, tzinfo=UTC)
 RETENTION_DAYS = 90
-
-
-def database_url() -> str:
-    url = os.environ.get("TELEMETRY_DATABASE_URL")
-    if not url:
-        pytest.skip("TELEMETRY_DATABASE_URL is not set; `make up` starts the stack")
-    return url
-
-
-@pytest.fixture
-async def engine() -> AsyncIterator[AsyncEngine]:
-    created = create_async_engine(database_url())
-    try:
-        yield created
-    finally:
-        await created.dispose()
 
 
 @pytest.fixture
@@ -75,8 +58,9 @@ async def station(
 
 
 @pytest.fixture
-def archive(tmp_path: Path) -> RawArchive:
-    return RawArchive(root=tmp_path / "archive")
+def archive(archive_root: Path) -> RawArchive:
+    """Rooted at the guarded temporary path, never a real archive."""
+    return RawArchive(root=archive_root)
 
 
 @pytest.fixture
@@ -560,3 +544,76 @@ async def test_an_incomplete_hold_is_refused_by_the_database(
                 ),
                 {"s": station, "e": EPOCH},
             )
+
+
+# --- the index and the disk disagreeing ------------------------------------
+
+
+async def test_a_segment_whose_file_is_gone_is_counted_and_reported(
+    store: TimescaleIngestStore,
+    retention: ArchiveRetention,
+    engine: AsyncEngine,
+    archive: RawArchive,
+    station: str,
+) -> None:
+    """The tolerance stays; the silence goes.
+
+    Deleting an already-absent segment must not fail - retention has to be
+    re-runnable after a crash. But it must be visible, because that same
+    tolerance is what let 14,288 index rows be marked deleted against a live
+    station with nothing failing.
+    """
+    old = NOW - timedelta(days=RETENTION_DAYS + 1)
+    await store.store_records(station, EPOCH, records_at(old, 0, 10))
+
+    # The file vanishes behind the index's back.
+    for segment in archive.root.rglob("*.zst"):
+        segment.unlink()
+
+    result = await retention.sweep(now=NOW, only_station=station)
+
+    assert result.already_missing == 1
+    assert result.deleted_by_age == 1
+    assert "retention.missing_files" in await events_of(engine, station)
+
+
+async def test_an_ordinary_sweep_reports_nothing_missing(
+    store: TimescaleIngestStore,
+    retention: ArchiveRetention,
+    engine: AsyncEngine,
+    station: str,
+) -> None:
+    """The paired absence test.
+
+    A counter that always fired would make the warning worthless, which is how
+    a real signal becomes something operators filter out.
+    """
+    old = NOW - timedelta(days=RETENTION_DAYS + 1)
+    await store.store_records(station, EPOCH, records_at(old, 0, 10))
+
+    result = await retention.sweep(now=NOW, only_station=station)
+
+    assert result.deleted_by_age == 1
+    assert result.already_missing == 0
+    assert "retention.missing_files" not in await events_of(engine, station)
+
+
+async def test_re_running_a_sweep_is_still_safe(
+    store: TimescaleIngestStore,
+    retention: ArchiveRetention,
+    station: str,
+) -> None:
+    """Restartability is the property the tolerance exists for.
+
+    A second sweep must not raise; it simply finds nothing left to do, because
+    the first marked the index.
+    """
+    old = NOW - timedelta(days=RETENTION_DAYS + 1)
+    await store.store_records(station, EPOCH, records_at(old, 0, 10))
+
+    first = await retention.sweep(now=NOW, only_station=station)
+    second = await retention.sweep(now=NOW, only_station=station)
+
+    assert first.deleted_by_age == 1
+    assert second.deleted_total == 0
+    assert second.already_missing == 0

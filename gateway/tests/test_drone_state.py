@@ -8,7 +8,6 @@ in the wrong column, and no unit test looks at a seam.
 
 from __future__ import annotations
 
-import os
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -16,7 +15,7 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 from pymavlink.dialects.v20 import ardupilotmega as mavlink
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from gateway.binding import BindingResolver
 from gateway.classify import Source, SourceKind, SourceRegistry
@@ -37,22 +36,6 @@ ADDRESS = SourceId(sysid=1, compid=1)
 NOON = datetime(2026, 9, 23, 12, 0, tzinfo=UTC)
 TBILISI_LAT_E7 = 417_151_000
 TBILISI_LON_E7 = 448_271_000
-
-
-def database_url() -> str:
-    url = os.environ.get("TELEMETRY_DATABASE_URL")
-    if not url:
-        pytest.skip("TELEMETRY_DATABASE_URL is not set; `make up` starts the stack")
-    return url
-
-
-@pytest.fixture
-async def engine() -> AsyncIterator[AsyncEngine]:
-    created = create_async_engine(database_url())
-    try:
-        yield created
-    finally:
-        await created.dispose()
 
 
 @pytest.fixture
