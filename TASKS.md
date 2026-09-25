@@ -31,16 +31,21 @@ be launched and observed. No real hardware.
       *Done when:* `make sim N=10` gives 10 vehicles with distinct SYSIDs.
       *Closed* on the first green `sitl` job (PR #5): three vehicles launched
       with distinct SYSIDs and the integration tests passed against them.
-      *Still pending:* visual confirmation in QGC, which needs local SITL
-      (P0-08). CI proves the SYSIDs are distinct on the wire; it cannot prove
-      they render as three vehicles in the console. Do not treat P0-08 as
-      optional on the strength of this checkbox.
+      *Fully closed* 2026-09-25: ten vehicles launched from WSL appeared in
+      QGC on the Windows side as SYSIDs 201-210, in a row near Kukia Cemetery,
+      Tbilisi. That is the visual confirmation CI could not give.
 
-- [ ] **P0-08** WSL2 development environment per `docs/DEV_SETUP_WSL.md`:
-      mirrored networking, Docker integration, repo on the WSL filesystem,
-      ArduPilot SITL built locally.
+- [x] **P0-08** WSL2 environment for SITL per `docs/DEV_SETUP_WSL.md`:
+      mirrored networking and ArduPilot SITL built locally.
       *Done when:* `make sim N=3` runs locally and all three vehicles appear in
       QGC on the Windows side.
+      *Closed* 2026-09-25 with ten, not three.
+      *Scope corrected while doing it:* the task said "repo on the WSL
+      filesystem" and "Docker integration", and both were wrong. Only SITL
+      lives in WSL. The repository, Gateway, relay agent, console, tests and
+      Docker stack stay on Windows, because the relay ships to a pilot's bare
+      Windows laptop and developing it anywhere else tests something we do not
+      fly. `docs/DEV_SETUP_WSL.md` is rewritten around that.
 
 - [x] **P0-05** Python tooling: `ruff`, `mypy` config, `pytest` with async
       support, shared `pyproject.toml` conventions.
@@ -176,10 +181,16 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
       *Done when:* a spoofed SYSID is rejected, and a valid station presenting
       a vehicle it is not assigned is rejected and logged.
 
-- [ ] **P1-08** WebSocket endpoint + minimal map page: MapLibre, one marker per
+- [x] **P1-08** WebSocket endpoint + minimal map page: MapLibre, one marker per
       drone, heading arrow, battery label.
       *Done when:* 10 markers move in the browser with under 500 ms end-to-end
       latency.
+      *Closed* 2026-09-25: 11 drones listed, 10 markers placed from SITL, and
+      `hexa-01` correctly listed as present but unplaced.
+      *Known gap, not blocking:* the map has no base layer. The style is
+      MapLibre's demo style, whose tiles stop at zoom 6 and contain only
+      country outlines, so at city zoom there is nothing to draw. Choosing a
+      tile provider is its own decision, with licensing attached; see P6-01.
 
 - [ ] **P1-09** Link-quality tracking: packet loss, round-trip latency,
       heartbeat gaps per vehicle.

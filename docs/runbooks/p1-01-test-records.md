@@ -694,3 +694,153 @@ the queue and sink data deleted before the clean start.
   and remains untested.
 - QGC → relay integrity. See `tools/analyze_capture.py` and the MAVLink-seq
   criterion added to the runbook.
+
+---
+
+## 2026-09-25 — ten-vehicle SITL run, and four things only a screenshot showed
+
+Ten SITL vehicles in WSL (SYSIDs 201-210), one real aircraft (`hexa-01`,
+SYSID 1), QGC forwarding to the relay on Windows. Both acceptance halves
+confirmed visually: QGC showed 201-210 with distinct SYSIDs, and the console
+listed 11 drones with 10 markers placed.
+
+Four defects were then found by *looking at the running system* rather than by
+any test. This is the second time that has been the dominant source of real
+findings, against a suite of 478 passing tests.
+
+### 1. Station state was computed, recorded, and never published
+
+The console showed "Stations: none" beside a station that was connected and
+streaming. Three separate faults, each of which alone would have caused it:
+
+- `TelemetryPublisher.publish_station` had no caller anywhere outside its own
+  unit test. `_Session._publish_state_change` wrote to `ingest_events` and
+  stopped there. `RelayServer.trackers` even carried the docstring "for
+  whoever publishes to the console" — the seam was designed and the consumer
+  was never written.
+- State was published only *on change*, so a console attaching after the
+  station came up could never learn it.
+- State was evaluated only when a `status` message arrived. `unreachable` is
+  defined by the **absence** of `status`, so the one transition §9 exists to
+  distinguish could not be reached while a session was open: no message, no
+  evaluation. A station that went quiet held `healthy` indefinitely.
+
+The third is the one worth remembering. It is the same shape as the relay
+`gap` that shipped unexecuted and the PARAM_VALUE offset that made
+BIDIRECTIONAL unreportable: **code that is structurally unable to produce one
+of its own outcomes**, with tests that pass because they only ever exercise
+the outcomes it can produce.
+
+Fixed by reporting on a timer and logging on change, with the state at connect
+recorded explicitly so the log does not depend on whether a tick beat the
+first `status`.
+
+### 2. The map has no base layer, and never could have
+
+`https://demotiles.maplibre.org/style.json` loads fine. Measured, not assumed:
+its tile set declares `maxzoom: 6` and its only vector layers are `geolines`,
+`centroids` and `countries`. The page opens at zoom 11 and eases to 14. Above
+zoom 6 there is no data at all, and even in range there are no streets in the
+data. The blue is the style's own `background` layer.
+
+Nothing is broken. The style was chosen for having no API key and no vendor
+account, and the consequence — that it is not a street map — was never stated.
+Choosing a provider is a licensing decision and is deferred.
+
+### 3. Drones were listed by UUID prefix
+
+Ten aircraft shown as `9e1e607e`, `ba7f9168`, `685def77`. Each correct, none
+usable. The registry label now travels on the bus with each row and the id is
+secondary.
+
+This one was not only cosmetic: it is why the heading comparison below was
+made against the wrong vehicle.
+
+### 4. Heading: 358° in QGC, 1° in the console
+
+Reported as a three-degree disagreement between two fields. It was neither.
+
+Measured from the archive, for SYSID 201 over 1015 samples: circular mean
+**359.40°**, maximum deviation from it **1.92°**, and every single sample
+within three degrees of north. The fleet sits on the 0/360 wrap. At the end of
+the run the ten vehicles read 0.26, 0.23, 0.20 … 359.99 — SITL-09 at 0.01° and
+SITL-10 at 359.99° are two hundredths of a degree apart in reality and 360
+apart as numbers.
+
+So "358 and 1" is one heading read twice, on either side of the wrap, on two
+vehicles that could not be told apart because of defect 3.
+
+The fields themselves agree. Pinned from pymavlink, not memory:
+`GLOBAL_POSITION_INT.hdg` is `cdeg`, `VFR_HUD.heading` is `deg`. Both derive
+from ArduPilot's AHRS yaw, which is true north, as ARCHITECTURE.md specifies.
+On the real aircraft at the same instant: `ATTITUDE.yaw` 254.82°,
+`GLOBAL_POSITION_INT.hdg` 254.82°, `VFR_HUD.heading` 254.00°.
+
+**A latent defect found on the way.** `drone_state.heading_deg` is
+last-writer-wins between the two fields, one of which has 0.01° resolution and
+one 1°. It does not currently surface, because a row is emitted by the
+`GLOBAL_POSITION_INT` handler *after* that handler sets the heading, so the
+`VFR_HUD` value never reaches a row — confirmed against the database: 237 of
+16,642 stored headings are whole degrees, which is chance for a `cdeg` field,
+not the ~50% a real interleave would give. It would surface the moment row
+emission moves.
+
+### The aircraft's firmware version is not in the archive
+
+Searched both segments from the hardware run. No `AUTOPILOT_VERSION` and no
+boot banner: capture began after boot, and QGC had already consumed the reply
+to its own request. What is there is `HEARTBEAT.autopilot=3`
+(ARDUPILOTMEGA), `type=2` (QUADROTOR).
+
+Stage 0 is receive-only, so we cannot request the version ourselves. But QGC
+requests it at every connect, so a relay attached *before* QGC connects would
+capture the reply. That is a Stage-0-compatible way to record what each
+airframe is flying, and it needs a task.
+
+### TERRAIN_REPORT is present and empty, which vindicates dropping `alt_agl_m`
+
+The real aircraft sent 3,280 `TERRAIN_REPORT` messages. Every one has
+`loaded=0`, `pending=0`, `terrain_height=0.0`, `current_height=0.0` — the
+message is emitted whether or not terrain data is aboard, and this airframe
+has none.
+
+`current_height` is documented in metres AGL. Had it been mapped to an
+`alt_agl_m` column, an entire flight would have been recorded at 0.0 m above
+ground: an aircraft shown as landed while flying. The value is not missing, it
+is confidently wrong, which is the exact failure mode P5-00 exists to prevent.
+
+### `stop_sitl.sh` cried wolf
+
+The teardown reported "WARNING - 2 SITL process(es) still running" and exited
+1. Both had already been killed and were awaiting reaping; a check moments
+later found zero. `SIGKILL` is not synchronous, and the verification ran
+immediately after it.
+
+Worth fixing rather than tolerating for the reason the project keeps returning
+to: a warning that is sometimes false is one people learn to scroll past, and
+this particular warning exists because a silent teardown once left five
+simulators flying.
+
+### The Gateway does not keep up with ten SITL vehicles
+
+Observed while verifying the fix, after a deliberate two-minute Gateway outage
+to restart it on new code. Relay queue depth, sampled through the console
+feed:
+
+```
++ 0.1s  1291968
++20.1s  1327326
++40.1s  1333538
++60.1s  1339448
+```
+
+Growing by roughly 790 records per second, so the backlog from that outage
+never drains at this fleet size. The relay behaved exactly as designed —
+buffered, reported `buffering=True`, `data_is_lost=False`, lost nothing — and
+the console said so correctly. But an outage that cannot be recovered from is
+a capacity limit, and it is not yet written down anywhere as a number.
+
+Ten simulated vehicles streaming at full rate through one station is heavier
+than the Stage 0 target, so this is a bound to establish rather than a
+regression. It needs its own task and a measurement that is not a side effect
+of a restart.
