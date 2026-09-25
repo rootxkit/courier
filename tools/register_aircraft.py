@@ -47,6 +47,7 @@ import asyncio
 import os
 import sys
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
@@ -88,6 +89,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="close the open binding for this address first",
     )
     parser.add_argument(
+        "--retire",
+        action="store_true",
+        help=(
+            "teardown: close the open binding and mark the drone retired. "
+            "Nothing is deleted - a drone that has flown keeps its history, "
+            "and its telemetry stays resolvable"
+        ),
+    )
+    parser.add_argument(
         "--by",
         default=os.environ.get("USERNAME") or os.environ.get("USER") or "unknown",
         help="who is making this binding, recorded on the row",
@@ -123,6 +133,8 @@ async def run(args: argparse.Namespace) -> int:
     engine = create_async_engine(url)
     resolver = BindingResolver(engine=engine)
     try:
+        if args.retire:
+            return await retire(resolver, engine, args, address, bound_from)
         await resolver.register_drone(drone_id, args.label)
         print(f"known_drones: {drone_id}  {args.label}")
 
@@ -161,6 +173,42 @@ async def run(args: argparse.Namespace) -> int:
         print(f"{args.station} now has {total} binding(s)")
     finally:
         await engine.dispose()
+    return 0
+
+
+async def retire(
+    resolver: BindingResolver,
+    engine: Any,
+    args: argparse.Namespace,
+    address: SourceId,
+    at: datetime,
+) -> int:
+    """Close the binding and mark the drone retired.
+
+    Retired, not deleted. An aircraft that has flown keeps its identity so its
+    telemetry stays resolvable - reading a two-year-old flight is exactly when
+    the airframe is most likely to be long gone - and the foreign key would
+    refuse the delete anyway.
+    """
+    closed = await resolver.close_binding(args.station, address, at=at)
+    print(f"closed {closed} binding(s) for {args.station} {address}")
+
+    async with engine.connect() as connection:
+        found = (
+            await connection.execute(
+                sa.text(
+                    "SELECT drone_id, label FROM known_drones WHERE label = :label"
+                ),
+                {"label": args.label},
+            )
+        ).all()
+
+    for row in found:
+        await resolver.register_drone(row.drone_id, row.label, retired_at=at)
+        print(f"retired {row.label} ({row.drone_id})")
+
+    if not found:
+        print(f"no drone labelled {args.label!r} to retire", file=sys.stderr)
     return 0
 
 
