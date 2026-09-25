@@ -626,9 +626,10 @@ async def test_a_connected_station_is_reported_to_the_bus() -> None:
     perfectly: storing, acknowledging, converting and writing drone_state.
     """
     reporter = RecordingReporter()
-    async with running(
-        station_reporter=reporter, station_report_interval_s=0.02
-    ) as server, connect(url(server), additional_headers=auth()) as connection:
+    async with (
+        running(station_reporter=reporter, station_report_interval_s=0.02) as server,
+        connect(url(server), additional_headers=auth()) as connection,
+    ):
         await handshake(connection, hello())
         await connection.send(status())
         await wait_for_state(reporter, LinkState.HEALTHY)
@@ -644,9 +645,10 @@ async def test_the_station_is_reported_again_although_nothing_changed() -> None:
     so again. Repetition is what makes a late subscriber serviceable.
     """
     reporter = RecordingReporter()
-    async with running(
-        station_reporter=reporter, station_report_interval_s=0.02
-    ) as server, connect(url(server), additional_headers=auth()) as connection:
+    async with (
+        running(station_reporter=reporter, station_report_interval_s=0.02) as server,
+        connect(url(server), additional_headers=auth()) as connection,
+    ):
         await handshake(connection, hello())
         await connection.send(status())
         # Four, not three: the first report is the `unreachable` at
@@ -666,9 +668,12 @@ async def test_the_event_log_keeps_only_transitions() -> None:
     """
     store = InMemoryIngestStore()
     reporter = RecordingReporter()
-    async with running(
-        store=store, station_reporter=reporter, station_report_interval_s=0.02
-    ) as server, connect(url(server), additional_headers=auth()) as connection:
+    async with (
+        running(
+            store=store, station_reporter=reporter, station_report_interval_s=0.02
+        ) as server,
+        connect(url(server), additional_headers=auth()) as connection,
+    ):
         await handshake(connection, hello())
         await connection.send(status())
         await wait_for_reports(reporter, 5)
@@ -689,11 +694,14 @@ async def test_a_station_that_stops_sending_status_becomes_unreachable() -> None
     either because the socket stays open.
     """
     reporter = RecordingReporter()
-    async with running(
-        station_reporter=reporter,
-        station_report_interval_s=0.02,
-        unreachable_after_s=0.1,
-    ) as server, connect(url(server), additional_headers=auth()) as connection:
+    async with (
+        running(
+            station_reporter=reporter,
+            station_report_interval_s=0.02,
+            unreachable_after_s=0.1,
+        ) as server,
+        connect(url(server), additional_headers=auth()) as connection,
+    ):
         await handshake(connection, hello())
         await connection.send(status())
         await wait_for_state(reporter, LinkState.HEALTHY)
@@ -727,9 +735,10 @@ async def test_a_station_that_disconnects_is_not_left_reported_healthy() -> None
 async def test_the_report_carries_the_relay_queue_depth_and_datagram_age() -> None:
     """The console renders these; they must be the station's, not placeholders."""
     reporter = RecordingReporter()
-    async with running(
-        station_reporter=reporter, station_report_interval_s=0.02
-    ) as server, connect(url(server), additional_headers=auth()) as connection:
+    async with (
+        running(station_reporter=reporter, station_report_interval_s=0.02) as server,
+        connect(url(server), additional_headers=auth()) as connection,
+    ):
         await handshake(connection, hello())
         await connection.send(status(queue_depth=17, last_datagram_age_ms=42))
         await wait_for_state(reporter, LinkState.HEALTHY)
