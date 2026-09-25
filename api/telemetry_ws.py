@@ -50,6 +50,23 @@ _log = get_logger(__name__)
 # subjects added later for services that are not a browser.
 SUBSCRIBED_SUBJECTS = ("telemetry.*", "station.*", "events.*")
 
+# Subjects that carry *state* - the latest message on one of these replaces the
+# previous one, so the latest is a complete picture and is worth replaying to a
+# console that attaches later.
+#
+# `events` is deliberately not in here. An event is not superseded by the next
+# one: two unclaimed sources are two facts, and keeping only the newest per
+# subject would quietly turn them into one. A console that attaches after an
+# event was published does not see it, and that is a real gap - P6-01 fixes it
+# with a queried event history, not by pretending the bus remembers.
+SNAPSHOT_KINDS = frozenset({"telemetry", "station"})
+
+# A bound on the snapshot, which is otherwise one entry per distinct drone and
+# station the process has ever seen. In a fleet that is small; over a long
+# uptime with retired airframes it is not, and an unbounded cache in the
+# console feed is exactly the kind of slow leak nobody attributes correctly.
+SNAPSHOT_MAX_ENTRIES = 512
+
 STATIC = Path(__file__).parent / "static"
 
 
@@ -62,12 +79,23 @@ class ConsoleHub:
     """
 
     clients: set[asyncio.Queue[str]] = field(default_factory=set)
+    # The latest state message per `(kind, name)`, replayed to each new
+    # console. Insertion-ordered, so the oldest entry is the one evicted.
+    snapshot: dict[tuple[str, str], str] = field(default_factory=dict)
 
     def attach(self) -> asyncio.Queue[str]:
         # Bounded. A browser on a slow link must not grow an unbounded backlog
         # in the server's memory; it is dropped from instead, because stale
         # positions have no value once newer ones exist.
         queue: asyncio.Queue[str] = asyncio.Queue(maxsize=256)
+        # Current state first, before any live message. Without this a console
+        # sees only what changes after it connects: a station that went healthy
+        # a minute ago is invisible, and so is a drone that is holding station
+        # and not moving. The bus carries the present, but it does not
+        # remember it, so the hub does.
+        for message in list(self.snapshot.values()):
+            with contextlib.suppress(asyncio.QueueFull):
+                queue.put_nowait(message)
         self.clients.add(queue)
         return queue
 
@@ -83,6 +111,8 @@ class ConsoleHub:
             return
 
         message = json.dumps({"kind": kind, "name": name, "data": body})
+        if kind in SNAPSHOT_KINDS:
+            self._remember(kind, name, message)
         for queue in list(self.clients):
             try:
                 queue.put_nowait(message)
@@ -93,6 +123,21 @@ class ConsoleHub:
                     queue.get_nowait()
                 with contextlib.suppress(asyncio.QueueFull):
                     queue.put_nowait(message)
+
+    def _remember(self, kind: str, name: str, message: str) -> None:
+        key = (kind, name)
+        # Re-inserting moves the key to the end, so a drone still reporting is
+        # never the one evicted; the entry that goes is the one that has been
+        # silent longest.
+        self.snapshot.pop(key, None)
+        self.snapshot[key] = message
+        while len(self.snapshot) > SNAPSHOT_MAX_ENTRIES:
+            evicted = next(iter(self.snapshot))
+            del self.snapshot[evicted]
+            _log.warning(
+                "console snapshot full; dropped the least recently seen source",
+                extra={"dropped": evicted, "limit": SNAPSHOT_MAX_ENTRIES},
+            )
 
 
 def create_app(nats_url: str) -> FastAPI:
