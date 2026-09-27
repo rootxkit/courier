@@ -35,6 +35,7 @@ from tools.ingest_capacity import (
     SeverableProxy,
     after_settling,
     check_instrument,
+    drain_stop_index,
     read_relay_counters,
     report,
     summarise,
@@ -514,6 +515,115 @@ def test_drain_that_continues_past_the_settling_window_still_voids_the_run() -> 
 
     assert any("drain continued through the outage" in p for p in problems)
     assert any("gateway_url" in p for p in problems)
+
+
+# --- a Gateway that is behind when the link is cut ------------------------
+#
+# The eleven-source run on 2026-09-27. The relay was on the proxy, the proxy
+# refused its reconnections, and drain still ran for fifty seconds after the
+# cut: the Gateway was storing what it had already received, one 1,240-record
+# batch every four seconds. The fixed five-second window called that "the proxy
+# is probably not in the relay's path", which was false.
+
+
+def batched_outage(*, batches: int, quiet_s: float) -> list[Sample]:
+    """Drain in whole batches every 4 s after the cut, then flat for quiet_s."""
+    samples = [sample(0.0, 0, 0, severed=True)]
+    drained = 0
+    at_s = 0.0
+    for _ in range(batches):
+        for _ in range(3):
+            at_s += 1.0
+            samples.append(sample(at_s, int(at_s * 1300), drained, severed=True))
+        at_s += 1.0
+        drained += 1240
+        samples.append(sample(at_s, int(at_s * 1300), drained, severed=True))
+    end_s = at_s + quiet_s
+    while at_s < end_s:
+        at_s += 1.0
+        samples.append(sample(at_s, int(at_s * 1300), drained, severed=True))
+    return samples
+
+
+def a_run_with_outage(outage: list[Sample], refused: int | None) -> Run:
+    run = Run(sources=11, baseline_s=1.0, outage_s=60.0, recovery_s=1.0)
+    run.outage_settle_s = 5.0
+    run.outage_quiet_s = 10.0
+    run.refused_while_severed = refused
+    last = outage[-1]
+    run.samples = {
+        "baseline": [sample(-1.0, 0, 0), sample(0.0, 1300, 290)],
+        "outage": outage,
+        "recovery": [
+            sample(last.at_s, last.intake_total, last.drained_total),
+            sample(
+                last.at_s + 10.0, last.intake_total + 13000, last.drained_total + 2900
+            ),
+        ],
+    }
+    run.phases = summarise_run(run)
+    return run
+
+
+def test_a_flat_gap_between_batches_is_not_a_stop() -> None:
+    samples = batched_outage(batches=12, quiet_s=3.0)
+
+    assert drain_stop_index(samples, quiet_s=10.0) is None
+
+
+def test_drain_that_went_quiet_long_enough_has_stopped() -> None:
+    samples = batched_outage(batches=12, quiet_s=12.0)
+
+    stop = drain_stop_index(samples, quiet_s=10.0)
+
+    assert stop is not None
+    assert samples[stop].at_s == 48.0
+
+
+def test_drain_moving_in_the_final_interval_has_not_stopped() -> None:
+    samples = [sample(0.0, 0, 0), sample(1.0, 10, 0), sample(2.0, 20, 5)]
+
+    assert drain_stop_index(samples, quiet_s=0.0) is None
+
+
+def test_a_gateway_that_catches_up_during_the_outage_is_a_valid_run() -> None:
+    """The presence half: fifty seconds of backlog is not an instrument fault."""
+    run = a_run_with_outage(batched_outage(batches=12, quiet_s=12.0), refused=5)
+
+    assert check_instrument(run) == []
+    assert run.drain_stopped_after_s == 48.0
+    assert run.in_flight_records == 12 * 1240
+    assert run.phase("outage").drained_records == 0
+
+
+def test_a_gateway_still_behind_at_the_end_names_the_gateway_not_the_proxy() -> None:
+    run = a_run_with_outage(batched_outage(batches=14, quiet_s=3.0), refused=5)
+
+    problems = check_instrument(run)
+
+    assert run.drain_stopped_after_s is None
+    assert any("refused 5 reconnection(s)" in p for p in problems)
+    assert any("lengthen --outage-s" in p for p in problems)
+    assert not any("not in the relay's path" in p for p in problems)
+
+
+def test_a_relay_that_never_knocks_is_not_on_the_proxy() -> None:
+    run = a_run_with_outage(batched_outage(batches=14, quiet_s=3.0), refused=0)
+
+    problems = check_instrument(run)
+
+    assert any("not in the relay's path" in p for p in problems)
+    assert not any("lengthen --outage-s" in p for p in problems)
+
+
+def test_the_stop_and_refusals_are_recorded_with_the_numbers() -> None:
+    run = a_run_with_outage(batched_outage(batches=12, quiet_s=12.0), refused=5)
+
+    payload = to_json(run, [])
+
+    assert payload["drain_stopped_after_s"] == 48.0
+    assert payload["refused_while_severed"] == 5
+    assert payload["in_flight_records"] == 12 * 1240
 
 
 def test_a_phase_reports_its_depth_range_not_just_the_end() -> None:
