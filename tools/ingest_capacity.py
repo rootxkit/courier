@@ -365,6 +365,19 @@ class Run:
     # hidden, because it is how much the Gateway had swallowed but not yet made
     # durable, which is worth knowing on its own.
     in_flight_records: int = 0
+    # How long drain must stay flat at the end of the outage for it to count
+    # as having stopped. Not "one flat interval": the Gateway stores in whole
+    # batches, so under load drain moves in steps of about 1,240 records a few
+    # seconds apart, and the gap between two steps looks like a stop.
+    outage_quiet_s: float = 0.0
+    # Seconds from the cut until drain last moved. None when it was still
+    # moving at the end of the outage, which is the case the outage exists to
+    # rule out.
+    drain_stopped_after_s: float | None = None
+    # Reconnection attempts the proxy refused while severed. Direct evidence
+    # that the relay is pointed at the proxy: a relay that is not never knocks.
+    # None when not recorded, which is not the same as zero.
+    refused_while_severed: int | None = None
     # Whether the queue went shallow before the baseline began. False means
     # the baseline is saturation rather than steady state: the relay was
     # already falling behind with no outage at all, so there is no steady
@@ -406,16 +419,53 @@ def after_settling(samples: list[Sample], settle_s: float) -> list[Sample]:
     return kept if len(kept) >= 2 else samples[-2:]
 
 
+def drain_stop_index(samples: list[Sample], quiet_s: float) -> int | None:
+    """Index of the sample after which drain never moves again, or None.
+
+    None when drain was still moving within the last `quiet_s` of the phase.
+    That is judged from the end of the phase rather than by the first flat
+    interval, because drain under load arrives in whole batches with flat
+    intervals between them: at eleven sources, 1,240 records every four
+    seconds, for fifty seconds after the cut.
+    """
+    if len(samples) < 2:
+        return None
+    last_move = 0
+    for index in range(1, len(samples)):
+        if samples[index].drained_total != samples[index - 1].drained_total:
+            last_move = index
+    # Moving in the final interval is never a stop, whatever quiet_s says:
+    # there is no flat interval after it to measure the outage over.
+    if last_move == len(samples) - 1:
+        return None
+    if samples[-1].at_s - samples[last_move].at_s < quiet_s:
+        return None
+    return last_move
+
+
 def summarise_run(run: Run) -> list[PhaseResult]:
-    """Per-phase rates, with the outage measured after its in-flight tail."""
+    """Per-phase rates, with the outage measured after its in-flight tail.
+
+    The tail is whatever the Gateway had already received when the link was
+    cut. It is excluded from the outage rate and counted separately, and it
+    ends where drain actually stopped - which at eleven sources was fifty
+    seconds after the cut, not the few seconds a fixed window assumed.
+    """
     results: list[PhaseResult] = []
     for name, samples in run.samples.items():
-        if name == "outage" and run.outage_settle_s > 0.0:
-            kept = after_settling(samples, run.outage_settle_s)
-            run.in_flight_records = kept[0].drained_total - samples[0].drained_total
-            results.append(summarise(name, kept))
-        else:
+        if name != "outage":
             results.append(summarise(name, samples))
+            continue
+        kept = after_settling(samples, run.outage_settle_s)
+        stop = drain_stop_index(samples, run.outage_quiet_s)
+        if stop is None:
+            run.drain_stopped_after_s = None
+        else:
+            run.drain_stopped_after_s = samples[stop].at_s - samples[0].at_s
+            if samples[stop].at_s > kept[0].at_s:
+                kept = samples[stop:]
+        run.in_flight_records = kept[0].drained_total - samples[0].drained_total
+        results.append(summarise(name, kept))
     return results
 
 
@@ -598,9 +648,12 @@ async def run_measurement(args: argparse.Namespace, engine: AsyncEngine) -> Run:
         run.samples["baseline"] = await measurement.collect(args.baseline_s, "baseline")
 
         sys.stderr.write(f"\nsevering the uplink for {args.outage_s:.0f}s\n")
+        refused_before = proxy.refused_while_severed
         await proxy.sever()
         run.samples["outage"] = await measurement.collect(args.outage_s, "outage")
+        run.refused_while_severed = proxy.refused_while_severed - refused_before
         run.outage_settle_s = args.outage_settle_s
+        run.outage_quiet_s = args.outage_quiet_s
 
         sys.stderr.write(f"\nrestoring; recovery for {args.recovery_s:.0f}s\n")
         proxy.restore()
@@ -626,13 +679,37 @@ def check_instrument(run: Run) -> list[str]:
     outage = run.phase("outage")
     baseline = run.phase("baseline")
 
+    # Drain that has not stopped has two causes that need opposite fixes, and
+    # the proxy's refusal count tells them apart. Naming only one was how the
+    # eleven-source run came to accuse a correct gateway_url: the relay was on
+    # the proxy, and the Gateway was fifty seconds behind.
     if outage.drained_records != 0:
-        problems.append(
+        stated = (
             f"drain continued through the outage at {outage.drain_per_s:.1f} "
             f"records/s, {outage.drained_records} records after the in-flight "
-            "tail was excluded - the proxy is probably not in the relay's path, "
-            "so check that gateway_url names the proxy's port"
+            "tail was excluded"
         )
+        if run.refused_while_severed == 0:
+            problems.append(
+                f"{stated}, and the relay never tried to reconnect through the "
+                "severed proxy - the proxy is not in the relay's path, so check "
+                "that gateway_url names the proxy's port"
+            )
+        elif run.refused_while_severed is not None:
+            problems.append(
+                f"{stated}, although the proxy refused "
+                f"{run.refused_while_severed} reconnection(s), so it is in the "
+                "path - the Gateway was still storing records it received "
+                "before the cut, so the outage was too short to separate intake "
+                "from drain: lengthen --outage-s"
+            )
+        else:
+            problems.append(
+                f"{stated} - either the proxy is not in the relay's path (check "
+                "that gateway_url names the proxy's port), or the Gateway was "
+                "still storing records received before the cut (lengthen "
+                "--outage-s)"
+            )
     if outage.intake_records <= 0:
         problems.append(
             "intake stopped during the outage, so nothing was buffered and "
@@ -683,13 +760,18 @@ def report(run: Run, problems: list[str]) -> None:
             f"{depth:>15s} {phase.queued_bytes_end / 1048576:11.1f} "
             f"{phase.dropped_intake:8d} {phase.dropped_cap:9d}"
         )
-    if run.outage_settle_s > 0.0:
+    if run.drain_stopped_after_s is not None:
         print()
         print(
-            f"Outage measured after a {run.outage_settle_s:.0f}s settling window; "
-            f"{run.in_flight_records} record(s) were already in flight when the "
-            "link was cut."
+            f"Drain stopped {run.drain_stopped_after_s:.1f}s after the cut; "
+            f"{run.in_flight_records} record(s) the Gateway had already received "
+            "were stored after it."
         )
+    elif run.outage_settle_s > 0.0 or run.outage_quiet_s > 0.0:
+        print()
+        print("Drain never stopped during the outage; see below.")
+    if run.refused_while_severed is not None:
+        print(f"The severed proxy refused {run.refused_while_severed} reconnection(s).")
 
     recovery = run.phase("recovery")
     baseline = run.phase("baseline")
@@ -785,7 +867,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--outage-settle-s",
         type=float,
         default=5.0,
-        help="ignore this much of the outage as in-flight tail",
+        help="ignore at least this much of the outage as in-flight tail",
+    )
+    parser.add_argument(
+        "--outage-quiet-s",
+        type=float,
+        default=10.0,
+        help="drain must be flat for this long at the end of the outage",
     )
     parser.add_argument(
         "--json", type=Path, default=None, help="also write the samples and rates here"
@@ -837,6 +925,9 @@ def to_json(run: Run, problems: list[str]) -> dict[str, Any]:
         "settle_max_depth": run.settle_max_depth,
         "outage_settle_s": run.outage_settle_s,
         "in_flight_records": run.in_flight_records,
+        "outage_quiet_s": run.outage_quiet_s,
+        "drain_stopped_after_s": run.drain_stopped_after_s,
+        "refused_while_severed": run.refused_while_severed,
         "phases": [
             {**asdict(phase), "drain_over_intake": phase.drain_over_intake}
             for phase in run.phases

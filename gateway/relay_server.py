@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Final, Protocol
 
 import websockets
@@ -44,6 +44,7 @@ from gateway.relay_messages import (
     parse_control_message,
 )
 from gateway.relay_records import Record, RecordFramingError, decode_records
+from gateway.stage_timing import StageTimings, shared_timings
 from gateway.station_state import LinkState, LossEvent, StationLinkTracker
 
 _log = get_logger(__name__)
@@ -138,6 +139,9 @@ class RelayServer:
     station_report_interval_s: float = STATION_REPORT_INTERVAL_S
     unreachable_after_s: float = 3.0
     radio_silent_after_ms: int = 3_000
+    # P1-10: where the time of storing a batch goes. Shared with the store and
+    # the pipeline so one log line shows every stage's share.
+    timings: StageTimings = field(default_factory=shared_timings)
 
     def __post_init__(self) -> None:
         self._server: Server | None = None
@@ -340,16 +344,25 @@ class _Session:
 
     async def _ingest_batch(self, frame: bytes) -> None:
         """Store a batch durably. Nothing is acknowledged before this returns."""
-        records = decode_records(frame)
+        timings = self.server.timings
+        with timings.measure("decode"):
+            records = decode_records(frame)
         if not records:
             return
-        self._watermark = await self.server.store.store_records(
-            self.station_id, self.epoch, records
-        )
+        with timings.measure("store"):
+            self._watermark = await self.server.store.store_records(
+                self.station_id, self.epoch, records
+            )
         # Only now, with the bytes durable and the watermark advanced, does
         # anything look inside them. Obligation 9.
         if self.server.processor is not None:
-            await self.server.processor.process(self.station_id, self.epoch, records)
+            with timings.measure("process"):
+                await self.server.processor.process(
+                    self.station_id, self.epoch, records
+                )
+        timings.count("batches", 1)
+        timings.count("records", len(records))
+        timings.report_if_due()
 
     async def _handle_control(self, payload: str) -> None:
         message = parse_control_message(payload)

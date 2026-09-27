@@ -37,6 +37,7 @@ from gateway.drone_state import (
 from gateway.parsing import SourceId, parse_datagram
 from gateway.publisher import TelemetryPublisher
 from gateway.relay_records import Record
+from gateway.stage_timing import StageTimings, shared_timings
 from gateway.state_writer import DroneStateWriter
 
 _log = get_logger(__name__)
@@ -55,6 +56,7 @@ class IngestPipeline:
     resolver: BindingResolver
     writer: DroneStateWriter
     publisher: TelemetryPublisher
+    timings: StageTimings = field(default_factory=shared_timings)
 
     registry: SourceRegistry = field(init=False)
     assembler: StateAssembler = field(init=False)
@@ -89,8 +91,12 @@ class IngestPipeline:
 
         if rows:
             try:
-                await self.writer.write(rows)
-                await self.publisher.publish_rows(rows, await self._labels(rows))
+                with self.timings.measure("process.write"):
+                    await self.writer.write(rows)
+                with self.timings.measure("process.labels"):
+                    labels = await self._labels(rows)
+                with self.timings.measure("process.publish"):
+                    await self.publisher.publish_rows(rows, labels)
             except Exception as error:
                 _log.error(
                     "could not write drone_state",
@@ -117,7 +123,8 @@ class IngestPipeline:
             return {}
 
     async def _process_record(self, epoch: str, record: Record) -> list[DroneStateRow]:
-        parsed = parse_datagram(record.datagram)
+        with self.timings.measure("process.parse"):
+            parsed = parse_datagram(record.datagram)
         self._bad_frames += parsed.bad_frame_count
 
         # The record's own capture time. Used for the binding lookup and for
@@ -128,7 +135,8 @@ class IngestPipeline:
         rows: list[DroneStateRow] = []
         for message in parsed.messages:
             source = self.registry.observe(message)
-            resolution = await self.resolver.resolve(self.station_id, source, at=ts)
+            with self.timings.measure("process.resolve"):
+                resolution = await self.resolver.resolve(self.station_id, source, at=ts)
 
             if resolution.drone_id is None:
                 await self._announce_unclaimed(epoch, source.source_id, resolution)
