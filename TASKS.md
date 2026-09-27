@@ -196,6 +196,65 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
       heartbeat gaps per vehicle.
       *Done when:* the metric degrades measurably under simulated packet loss.
 
+- [ ] **P1-10** Ingest capacity: measure intake and drain separately, find the
+      bottleneck, and turn relay-v1 §10 into measured numbers.
+      **Highest priority in Phase 1.** §10 claims a 30-minute outage "drains in
+      seconds". That was bandwidth arithmetic only, and it is false: on
+      2026-09-25, after a deliberate two-minute Gateway outage with 11 sources,
+      the relay queue grew by roughly 790 records/s and never drained.
+      Why it matters more than it looks. If drain rate is at or below intake
+      rate, *any* outage becomes permanent lag rather than a recoverable
+      backlog. Nothing reports a fault: the relay is buffering exactly as
+      designed, `data_is_lost` is correctly false, the Gateway is healthy, the
+      console is connected — and the fleet on screen is quietly getting older
+      every second. It is the §9 failure mode one level up, where every
+      component is honest and the system is still lying.
+      Scope:
+      - Measure intake and drain **as separate rates**, from a deliberate
+        outage rather than a restart side-effect, at 1, 3 and 11 sources.
+      - Locate the bottleneck by instrumentation, not by guessing. Candidates
+        to measure, not to assume: the relay's SQLite commit rate, batch size
+        and flush interval, the ack round trip, and the Gateway's
+        persist-before-ack fsync.
+      - Propose a requirement — drain rate at least N times intake at a stated
+        fleet size per station — and say what the relay reports when it cannot
+        meet it. **Stop with the proposal. Do not change the protocol.**
+      *Done when:* intake and drain are recorded numbers at all three fleet
+      sizes, the bottleneck is named with the measurement that identifies it,
+      §10 is corrected, and a requirement is on the table for a ruling.
+
+- [ ] **P1-11** Record `AUTOPILOT_VERSION` per vehicle, so firmware is fleet
+      data rather than something read off a screen.
+      The aircraft's firmware version is not in the raw archive: the message is
+      only sent on request, Stage 0 is receive-only and cannot ask, and by the
+      time the relay attaches QGC has already consumed the reply to its own
+      request. So "the SITL that gates merges matches the aircraft" is
+      currently unverifiable.
+      A relay attached *before* QGC connects does see the reply, because QGC
+      requests the version at every connect. That is Stage-0 compatible: the
+      Gateway records what it observes and asks for nothing.
+      Also serves P10-05 maintenance tracking, which needs firmware per
+      airframe over time rather than a current value.
+      *Done when:* connecting QGC to an aircraft results in a recorded flight
+      software version for that `drone_id`, and a vehicle that never offers one
+      is visibly unknown rather than silently absent.
+
+- [ ] **P1-12** Self-hosted base map: a Georgia PMTiles extract served by the
+      console itself.
+      The P1-08 map has no base layer. The demo style's tiles stop at zoom 6 and
+      contain only country outlines, so at city zoom there is nothing to draw —
+      it was never a street map.
+      Self-hosted rather than a tile provider: no API key, no per-request
+      dependency on a third party, and it works with no internet at all, which
+      is the case a pilot in the field is actually in.
+      **Self-hosting does not remove the attribution obligation.** The data is
+      OpenStreetMap, so the map must display "© OpenStreetMap contributors"
+      wherever it is shown, including on the minimal P1-08 page and in
+      `web-pilot/` afterwards. Record the extract's date and source, because an
+      offline basemap has no way of telling anyone it is stale.
+      *Done when:* the map renders streets over the operating area with no
+      network access beyond the console itself, and attribution is visible.
+
 ---
 
 ## Phase 2 — Data model and order lifecycle (1-1.5 weeks)
@@ -399,10 +458,31 @@ This is the phase where a bug means physical damage. Budget the most time here.
         loading behaviour, it can be absent or stale, and a value that is
         missing in flight is worse than one that was never offered. Whether it
         agrees with a DEM is itself worth measuring.
+        **Measured 2026-09-25, and it rules `TERRAIN_REPORT` out as a sole
+        source.** Read back from the raw archive, per source, so the two are
+        not confused:
+        - **`hexa-01`, the aircraft we fly** (SYSID 1): 3,280 messages in the
+          2026-09-24 hardware run and 381 more on 2026-09-25, every one of them
+          `loaded=0`, `pending=0`, `terrain_height=0.0`, `current_height=0.0`.
+          The message is emitted at 3 Hz whether or not any terrain data is
+          aboard. Identified as the airframe rather than a simulator by
+          `GIMBAL_DEVICE_ATTITUDE_STATUS`, `GIMBAL_MANAGER_STATUS`,
+          `MCU_STATUS` and `RPM`, none of which any SITL instance sent, and by
+          the Siyi A8 mount announcing itself in `STATUSTEXT`.
+        - **SITL** (SYSIDs 201-210): `loaded=336`, `pending=0`, and plausible
+          `terrain_height` of 584-656 m. SITL fetches terrain tiles, so it has
+          the data the aircraft lacks.
+        So the simulator would have concealed this: an `alt_agl_m` mapped from
+        `current_height` looks correct in SITL and is a flat 0.0 m on the real
+        aircraft — a drone reported as on the ground for an entire flight. The
+        value is not missing, it is confidently wrong, which is the failure this
+        task exists to prevent. `TERRAIN_REPORT` may still be useful as a
+        cross-check where tiles *are* loaded; it cannot be the source.
       *Done when:* ground elevation can be queried for any point in the
       operating area, the two sources have been compared over that area, and
       the disagreement between them is a recorded number rather than an
-      assumption.
+      assumption. Any use of `TERRAIN_REPORT` must treat `loaded == 0` as "no
+      answer", never as zero.
 
 - [ ] **P5-01** Corridor generation: route → buffered polygon + altitude band +
       time window, stored as a reservation.
