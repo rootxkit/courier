@@ -65,17 +65,39 @@ def a_row() -> DroneStateRow:
     )
 
 
+def assert_subscribed(app: Any) -> None:
+    """Fail on a bus the app never reached, rather than on the wait that follows.
+
+    `create_app` logs and carries on when NATS is unreachable, because a
+    console that loads and shows nothing arriving is more useful to an operator
+    than one that will not load. In a test that same tolerance is a trap: a
+    failed connection produces no subscription, no messages, and a five second
+    timeout reporting "no station message" - which points at delivery when the
+    fault was the connection.
+
+    Checked once, before anything is awaited, so the two cannot be confused.
+    """
+    client = app.state.nats
+    assert client is not None, (
+        "the app did not connect to NATS, so nothing was ever subscribed; "
+        "check NATS_URL and that the broker is running"
+    )
+    assert client.is_connected, "the app's NATS connection dropped before the publish"
+
+
 async def drain_until(
     received: list[dict[str, Any]], kind: str, limit_s: float = 5.0
 ) -> dict[str, Any]:
-    deadline = asyncio.get_running_loop().time() + limit_s
+    started = asyncio.get_running_loop().time()
+    deadline = started + limit_s
     while asyncio.get_running_loop().time() < deadline:
         for message in received:
             if message["kind"] == kind:
                 return message
         await asyncio.sleep(0.05)
+    waited = asyncio.get_running_loop().time() - started
     raise AssertionError(
-        f"no {kind!r} message within {limit_s}s; saw {[m['kind'] for m in received]}"
+        f"no {kind!r} message within {waited:.2f}s; saw {[m['kind'] for m in received]}"
     )
 
 
@@ -149,6 +171,7 @@ async def test_a_published_row_reaches_a_browser(bus: Any) -> None:
         AsyncClient(transport=ASGITransport(app=app), base_url="http://test"),
         app.router.lifespan_context(app),
     ):
+        assert_subscribed(app)
         queue = app.state.hub.attach()
 
         async def collect() -> None:
@@ -159,6 +182,12 @@ async def test_a_published_row_reaches_a_browser(bus: Any) -> None:
         try:
             row = a_row()
             await TelemetryPublisher(bus=bus).publish_row(row)
+            # `publish` buffers; the flush is what puts the bytes on the wire.
+            # `create_app` documents the same hazard on the subscribe side, and
+            # it is symmetric: without this the test relies on the client's
+            # background flusher being prompt, which is not a guarantee and is
+            # exactly the kind of assumption that holds locally and flaps in CI.
+            await bus.flush()
             message = await drain_until(received, "telemetry")
         finally:
             collector.cancel()
@@ -177,6 +206,7 @@ async def test_station_state_reaches_a_browser_with_the_distinction(
     received: list[dict[str, Any]] = []
 
     async with app.router.lifespan_context(app):
+        assert_subscribed(app)
         queue = app.state.hub.attach()
 
         async def collect() -> None:
@@ -188,6 +218,7 @@ async def test_station_state_reaches_a_browser_with_the_distinction(
             await TelemetryPublisher(bus=bus).publish_station(
                 "tbilisi-base-1", LinkState.UNREACHABLE, last_datagram_age_ms=40
             )
+            await bus.flush()
             message = await drain_until(received, "station")
         finally:
             collector.cancel()
