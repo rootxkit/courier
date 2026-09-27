@@ -358,7 +358,7 @@ state on both sides and a materially more complex protocol — the part of a
 transport most likely to harbour a bug that appears only under the conditions
 nobody can reproduce.
 
-The arithmetic does not justify it:
+The original arithmetic, kept because the correction is instructive:
 
 ```
 3 aircraft x 2.8 KiB/s          =  8.4 KiB/s
@@ -366,11 +366,51 @@ The arithmetic does not justify it:
 15 MB over a 10 Mbit/s uplink   =  ~12 seconds to drain
 ```
 
-Twelve seconds of stale map after a half-hour outage, against a permanent
-increase in the complexity of the one component whose job is not to lose data.
-**Do not "improve" this without redoing the arithmetic** — if aircraft counts
-or stream rates rise by an order of magnitude, the trade changes, and then the
-change is justified by numbers rather than by discomfort.
+**That was bandwidth arithmetic only, and it is wrong.** The wire is not what
+limits drain. A record is not drained when it crosses the uplink but when the
+Gateway has stored it, and the Gateway stores far more slowly than the link
+carries. Measured by `tools/ingest_capacity.py` on 2026-09-27 (P1-10; evidence
+in `docs/decisions/002-drain-rate-requirement.md`):
+
+| Sources on one station | Intake | Maximum drain | Drain / intake |
+|---|---|---|---|
+| 1 | 194 records/s | 290 records/s | 1.5x |
+| 3 | 416 records/s | 398 records/s | 0.96x |
+| 11 | 1,281 records/s | 289 records/s | 0.23x |
+
+Drain is roughly constant at about 300 records/s whatever the load, while
+intake grows with every aircraft. At one source a 60 s outage takes about
+two minutes to recover; at three or more the backlog **never** clears, and at
+eleven the relay falls behind with no outage at all.
+
+The ceiling is in the Gateway, not in this protocol: 96% of the time spent
+storing a batch goes to resolving each MAVLink message's source binding with
+its own database query. That is a Gateway defect with its own task (P1-13), and
+nothing in relay-v1 has to change to fix it.
+
+### What this means for live-first reordering
+
+The decision above stands, and the measurement strengthens it. Sending live
+telemetry ahead of the backlog helps only when drain exceeds intake, so that
+there is spare capacity to spend on the present. Where drain is below intake
+there is no such capacity: live-first would show a current map while the
+backlog grew without limit behind it, and the flight record would never
+complete. The cure for stale telemetry here is a Gateway that stores faster,
+not a protocol that chooses which records to be late with.
+
+The trade must still be redone with numbers if drain is raised well above
+intake and a stale map after an outage is still judged too long. The numbers
+to redo it with are drain and intake as measured by the harness, not link
+bandwidth.
+
+### Slow drain also breaks the half-open detection in §8
+
+At eleven sources the relay's session ended 15 times in one run with
+`keepalive ping timeout`, on a link that was up throughout. A Gateway that
+cannot keep up stops reading from the connection, and pings wait behind the
+data. The mechanism is inferred, not measured; the reconnections are measured.
+Either way, §8's detector cannot tell a slow Gateway from a dead link, so until
+drain exceeds intake the station's link state is unreliable as well as late.
 
 ## 11. Loss accounting
 
