@@ -196,7 +196,7 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
       heartbeat gaps per vehicle.
       *Done when:* the metric degrades measurably under simulated packet loss.
 
-- [ ] **P1-10** Ingest capacity: measure intake and drain separately, find the
+- [x] **P1-10** Ingest capacity: measure intake and drain separately, find the
       bottleneck, and turn relay-v1 §10 into measured numbers.
       **Highest priority in Phase 1.** §10 claims a 30-minute outage "drains in
       seconds". That was bandwidth arithmetic only, and it is false: on
@@ -222,6 +222,14 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
       *Done when:* intake and drain are recorded numbers at all three fleet
       sizes, the bottleneck is named with the measurement that identifies it,
       §10 is corrected, and a requirement is on the table for a ruling.
+      *Closed* 2026-09-27. Drain stays near 300 records/s at 1, 3 and 11
+      sources, against intake of 194, 416 and 1,281 records/s. The bottleneck
+      is the Gateway resolving each MAVLink message's binding with its own
+      query: 96% of the time spent storing a batch, 119,751 calls for 119,751
+      records, measured by `gateway/stage_timing.py`. §10 is corrected. The
+      requirement (drain ≥ 5× intake at design load, plus a `lagging` station
+      state) is in `docs/decisions/002-drain-rate-requirement.md` **awaiting a
+      ruling**. The fixes are P1-13 and P1-14.
 
 - [ ] **P1-11** Record `AUTOPILOT_VERSION` per vehicle, so firmware is fleet
       data rather than something read off a screen.
@@ -254,6 +262,35 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
       offline basemap has no way of telling anyone it is stale.
       *Done when:* the map renders streets over the operating area with no
       network access beyond the console itself, and attribution is visible.
+
+- [ ] **P1-13** Resolve source bindings per batch, not per message.
+      P1-10 measured this as the Gateway's ceiling. `IngestPipeline` calls
+      `BindingResolver.resolve` for every MAVLink message, and each call runs
+      its own `source_bindings` SELECT - about 3.3 ms, so about 300 records/s
+      whatever the fleet size. `resolve_batch` already exists for this case and
+      is not called.
+      **Resolution stays per record's capture time.** A backlog that straddles
+      a binding change must still resolve each record against the binding in
+      force when it was captured; batching changes how often the bindings are
+      read, not which binding applies. Test that a batch crossing a rebinding
+      yields two `drone_id`s.
+      *Done when:* `tools/ingest_capacity.py` at 11 SITL sources reports drain
+      above intake with a steady baseline, the stage timings show `resolve`
+      calls per batch rather than per record, and the drain figure is recorded
+      against ADR-002's requirement.
+
+- [ ] **P1-14** A `lagging` station state: the backlog is not clearing.
+      Proposed in ADR-002. Today a station whose backlog grows looks healthy -
+      buffering is correct, nothing is lost, the Gateway is up - and the
+      console shows an ever-older fleet. Enter `lagging` when the age of the
+      newest stored record (`now - recv_utc_ns`) exceeds a configured threshold
+      and `status.queue_depth` is rising; publish it with `lag_s`. No protocol
+      change: both signals already reach the Gateway.
+      Like `unreachable`, it does not mean telemetry is lost, and the console
+      must not say it does.
+      *Done when:* a test drives a station into `lagging` and back out, and the
+      state reaches the console. Blocked on the ADR-002 ruling for the
+      threshold.
 
 ---
 
