@@ -229,7 +229,17 @@ jobs:
       # Pin the firmware line the fleet actually flies. When the fleet moves,
       # this moves with it — the SITL that gates merges must be the SITL that
       # matches the aircraft.
-      ARDUPILOT_REF: Copter-4.5
+      #
+      # A tag, not a branch. `Copter-4.5` is `refs/heads/Copter-4.5` and moves
+      # whenever ArduPilot touches the 4.5 maintenance line, so the previous
+      # value was not a pin at all: two CI runs a week apart could build
+      # different firmware with nothing in the diff to say so.
+      #
+      # The "matches the aircraft" claim above is still unverified: the
+      # aircraft's firmware version is not in the archive, because
+      # AUTOPILOT_VERSION is only sent on request and Stage 0 cannot ask. P1-11
+      # makes it fleet data instead of something read off a screen.
+      ARDUPILOT_REF: Copter-4.5.7
       SITL_INSTANCE_COUNT: "3"
       # CI test area. Real operating coordinates live in configuration, never
       # in the repository; this is a simulation fixture and nothing else.
