@@ -175,6 +175,33 @@ Do not add a dependency without a one-line justification in the commit body.
   a WebSocket close so the relay's fatal-auth path never ran, and a relay `gap`
   that shipped unexecuted behind `assert gaps == []`. All three had passing
   tests. Branch coverage (`make cover`) is the backstop, not the rule.
+- **Run the branch that says nothing is wrong.** The generalisation of the rule
+  above, and the one that keeps being missed. A test suite builds working
+  conditions, so the code that reports success, reports health, or degrades
+  gracefully is the code least likely to have ever executed — and it fails
+  *quietly*, because its whole purpose is to be unremarkable. Exercise it
+  deliberately: make the thing succeed and read what it says; take the
+  dependency away and watch what happens.
+  Four instances, all with green suites:
+  - `stop_sitl.sh` exited 1 in silence whenever the teardown *worked*. `pgrep`
+    exits 1 when nothing matches, `pipefail` propagated it, `set -e` killed the
+    script before the success message. The failure path ran constantly and was
+    correct; the success path had never run to completion. It broke CI.
+  - The console's documented promise that an unreachable bus leaves it
+    "serving but empty" was false by minutes: `nats.connect` retries the
+    initial connection about sixty times, so the page hung instead of loading.
+    The `except` branch and its comment had never run.
+  - Station link state was evaluated only when a `status` message arrived, but
+    §9 defines `unreachable` by the *absence* of `status`. The one transition
+    the state machine existed to detect was structurally unreachable while a
+    session was open.
+  - `TelemetryPublisher.publish_station` had no caller outside its own unit
+    test, and `RelayServer.trackers` documented itself as being "for whoever
+    publishes to the console". A seam can be designed, tested, and have no
+    consumer; nothing fails, and the console just shows nothing.
+  Corollary for cleanup and teardown: a path that reports success while doing
+  nothing is worse than one that fails, and a warning that is sometimes false
+  is one people learn to scroll past. Verify, then report what was verified.
 - **Never write a wire-format offset from memory.** Derive it from pymavlink —
   from `ordered_fieldnames`, or by diffing two frames that differ in one field
   — and pin it with a test that derives it the same way. An offset that is
