@@ -16,9 +16,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import Any
 
-from api.telemetry_ws import SNAPSHOT_MAX_ENTRIES, ConsoleHub
+from httpx import ASGITransport, AsyncClient
+
+from api.telemetry_ws import (
+    CONNECT_TIMEOUT_S,
+    SNAPSHOT_MAX_ENTRIES,
+    ConsoleHub,
+    create_app,
+)
+from tests.ports import free_tcp_port
 
 
 def publish(hub: ConsoleHub, subject: str, **body: Any) -> None:
@@ -183,3 +192,65 @@ def test_an_undecodable_payload_is_dropped_rather_than_remembered() -> None:
 
     assert hub.snapshot == {}
     assert drain(hub.attach()) == []
+
+
+# --- starting up without a broker ------------------------------------------
+#
+# `create_app` promises that a console with an unreachable bus "will serve but
+# stay empty", on the grounds that an operator learns more from a page saying
+# nothing is arriving than from a page that will not load.
+#
+# That path had never been executed. `nats.connect` does not fail fast: with
+# library defaults it retries the initial connection roughly sixty times, a few
+# seconds apart, so the promise was false by minutes. It was found by trying to
+# point a test at a dead port and watching the test hang.
+
+
+async def test_the_console_starts_when_the_bus_is_unreachable() -> None:
+    """The presence test for the degradation, and it must be quick.
+
+    The bound is generous against a slow CI runner but far below the library's
+    own retry budget, which is the thing being ruled out.
+    """
+    # The production default deliberately, because the bound is the claim.
+    app = create_app(f"nats://127.0.0.1:{free_tcp_port()}")
+
+    started = time.monotonic()
+    async with app.router.lifespan_context(app):
+        elapsed = time.monotonic() - started
+        assert app.state.nats is None
+        assert app.state.hub is not None
+
+    assert elapsed < CONNECT_TIMEOUT_S + 10.0, (
+        f"startup took {elapsed:.1f}s against a dead broker; the initial "
+        "connect is not bounded"
+    )
+
+
+async def test_a_console_can_attach_with_no_bus_and_is_simply_empty() -> None:
+    """The point of degrading rather than refusing to start.
+
+    A browser must still get a WebSocket, so the page loads and shows an empty
+    fleet, instead of failing to connect and showing nothing at all.
+    """
+    app = create_app(f"nats://127.0.0.1:{free_tcp_port()}")
+
+    async with app.router.lifespan_context(app):
+        queue = app.state.hub.attach()
+
+        assert queue.empty()
+        assert len(app.state.hub.clients) == 1
+
+
+async def test_health_reports_the_bus_as_disconnected_rather_than_lying() -> None:
+    """An operator has to be able to see that the bus is the problem."""
+    app = create_app(f"nats://127.0.0.1:{free_tcp_port()}", connect_timeout_s=0.5)
+
+    async with (
+        app.router.lifespan_context(app),
+        AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client,
+    ):
+        response = await client.get("/healthz")
+
+    assert response.status_code == 200
+    assert response.json()["bus_connected"] is False

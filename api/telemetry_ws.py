@@ -67,6 +67,17 @@ SNAPSHOT_KINDS = frozenset({"telemetry", "station"})
 # console feed is exactly the kind of slow leak nobody attributes correctly.
 SNAPSHOT_MAX_ENTRIES = 512
 
+# How long startup may spend trying to reach the bus before giving up and
+# serving anyway.
+#
+# This exists because `nats.connect` does not fail fast: with library defaults
+# it retries the initial connection about sixty times, several seconds apart,
+# so a console started while the broker is down hangs for minutes instead of
+# loading. The `except` below, and the promise in its comment, had never run.
+# Bounding startup here leaves the client's own reconnect policy untouched for
+# the case that matters - a broker that goes away *after* a good connection.
+CONNECT_TIMEOUT_S = 5.0
+
 STATIC = Path(__file__).parent / "static"
 
 
@@ -140,15 +151,24 @@ class ConsoleHub:
             )
 
 
-def create_app(nats_url: str) -> FastAPI:
-    """Build the app. The NATS URL is injected so tests can point elsewhere."""
+def create_app(
+    nats_url: str, *, connect_timeout_s: float = CONNECT_TIMEOUT_S
+) -> FastAPI:
+    """Build the app. The NATS URL is injected so tests can point elsewhere.
+
+    `connect_timeout_s` is injected for the same reason: a test that only needs
+    to prove the app serves without a bus should not pay the production
+    timeout to do it.
+    """
     hub = ConsoleHub()
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         client: NatsClient | None = None
         try:
-            client = await nats.connect(nats_url)
+            client = await asyncio.wait_for(
+                nats.connect(nats_url), timeout=connect_timeout_s
+            )
         except Exception as error:
             # A console that will not load because the bus is down is worse
             # than one that loads and says nothing is arriving: the second at
