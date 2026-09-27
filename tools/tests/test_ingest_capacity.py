@@ -53,11 +53,13 @@ def test_the_counters_are_read_from_a_queue_the_relay_wrote(tmp_path: Path) -> N
         expected_depth = queue.depth
         expected_bytes = queue.total_bytes
 
-        next_seq, depth, queued_bytes = read_relay_counters(path)
+        counters = read_relay_counters(path)
 
-    assert next_seq == expected_next_seq == 250
-    assert depth == expected_depth == 250
-    assert queued_bytes == expected_bytes
+    assert counters.next_seq == expected_next_seq == 250
+    assert counters.depth == expected_depth == 250
+    assert counters.queued_bytes == expected_bytes
+    assert counters.dropped_intake == 0
+    assert counters.dropped_cap == 0
 
 
 def test_next_seq_counts_intake_and_does_not_fall_on_acknowledgement(
@@ -73,10 +75,10 @@ def test_next_seq_counts_intake_and_does_not_fall_on_acknowledgement(
     with a_queue(path, 100) as queue:
         queue.acknowledge(79)
 
-        next_seq, depth, _ = read_relay_counters(path)
+        counters = read_relay_counters(path)
 
-    assert next_seq == 100
-    assert depth == 20
+    assert counters.next_seq == 100
+    assert counters.depth == 20
 
 
 def test_a_queue_that_grows_after_acknowledgement_still_counts_up(
@@ -87,10 +89,10 @@ def test_a_queue_that_grows_after_acknowledgement_still_counts_up(
         queue.acknowledge(49)
         queue.append([(1, b"\xfd" * 10)])
 
-        next_seq, depth, _ = read_relay_counters(path)
+        counters = read_relay_counters(path)
 
-    assert next_seq == 51
-    assert depth == 1
+    assert counters.next_seq == 51
+    assert counters.depth == 1
 
 
 def test_a_database_that_is_not_a_relay_queue_is_refused(tmp_path: Path) -> None:
@@ -238,13 +240,22 @@ async def test_a_restored_proxy_carries_traffic_again() -> None:
 # --- rates -----------------------------------------------------------------
 
 
-def sample(at_s: float, intake: int, drained: int, severed: bool = False) -> Sample:
+def sample(
+    at_s: float,
+    intake: int,
+    drained: int,
+    severed: bool = False,
+    dropped_intake: int = 0,
+    dropped_cap: int = 0,
+) -> Sample:
     return Sample(
         at_s=at_s,
         intake_total=intake,
         drained_total=drained,
         depth=intake - drained,
         queued_bytes=(intake - drained) * 40,
+        dropped_intake=dropped_intake,
+        dropped_cap=dropped_cap,
         severed=severed,
     )
 
@@ -358,8 +369,62 @@ def test_a_missing_phase_is_an_error_rather_than_a_default() -> None:
             depth_start=0,
             depth_end=0,
             queued_bytes_end=0,
+            dropped_intake=0,
+            dropped_cap=0,
         )
     ]
 
     with pytest.raises(MeasurementError, match="no phase named 'outage'"):
         run.phase("outage")
+
+
+def a_run_with_drops(*, dropped_intake: int = 0, dropped_cap: int = 0) -> Run:
+    """A sound run except for drops during recovery."""
+    run = Run(sources=11, baseline_s=10.0, outage_s=10.0, recovery_s=10.0)
+    run.samples = {
+        "baseline": [sample(0.0, 0, 0), sample(10.0, 1000, 1000)],
+        "outage": [
+            sample(10.0, 1000, 1000, severed=True),
+            sample(20.0, 2000, 1000, severed=True),
+        ],
+        "recovery": [
+            sample(20.0, 2000, 1000),
+            sample(
+                30.0,
+                3000,
+                4000,
+                dropped_intake=dropped_intake,
+                dropped_cap=dropped_cap,
+            ),
+        ],
+    }
+    run.phases = [summarise(name, s) for name, s in run.samples.items()]
+    return run
+
+
+def test_an_intake_drop_is_reported_because_it_flatters_the_ratio() -> None:
+    """A dropped datagram never gets a sequence number.
+
+    So `next_seq` is short of what arrived, measured intake is below actual, and
+    drain/intake looks better than the truth. Silence here would turn an
+    overloaded relay into a passing grade.
+    """
+    problems = check_instrument(a_run_with_drops(dropped_intake=42))
+
+    assert len(problems) == 1
+    assert "42 datagram(s) dropped at intake" in problems[0]
+    assert "better than the truth" in problems[0]
+
+
+def test_a_cap_drop_is_reported_because_the_drain_figure_is_then_void() -> None:
+    """Records the cap destroyed are gone. A drain rate measured while data is
+    being thrown away is not measuring drain."""
+    problems = check_instrument(a_run_with_drops(dropped_cap=7))
+
+    assert len(problems) == 1
+    assert "7 record(s) destroyed by the queue cap" in problems[0]
+
+
+def test_a_run_with_no_drops_reports_nothing_about_drops() -> None:
+    """The paired presence test: a counter that always complains is noise."""
+    assert check_instrument(a_run_with_drops()) == []

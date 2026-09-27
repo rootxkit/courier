@@ -209,8 +209,26 @@ class SeverableProxy:
 # --- reading the two counters ----------------------------------------------
 
 
-def read_relay_counters(queue_path: Path) -> tuple[int, int, int]:
-    """`(next_seq, depth, queued_bytes)` from the relay's queue, read-only.
+@dataclass(frozen=True, slots=True)
+class RelayCounters:
+    """What the relay's own queue knows about itself."""
+
+    next_seq: int
+    depth: int
+    queued_bytes: int
+    # Datagrams the UDP thread handed over that the writer could not take,
+    # because the in-memory intake queue was full. These never received a
+    # sequence number, so `next_seq` undercounts arrivals by exactly this much.
+    # Intake is therefore "accepted", not "offered", and the difference has to
+    # be visible or the measurement flatters itself.
+    dropped_intake: int
+    # Records the queue cap destroyed. Real data loss, and a reason to distrust
+    # any drain figure measured over the same window.
+    dropped_cap: int
+
+
+def read_relay_counters(queue_path: Path) -> RelayCounters:
+    """The queue's counters, read-only.
 
     Opened `mode=ro` through a URI so this can never write to a queue that is
     the only copy of unacknowledged flight data. WAL lets it read while the
@@ -219,18 +237,21 @@ def read_relay_counters(queue_path: Path) -> tuple[int, int, int]:
     uri = f"file:{queue_path.as_posix()}?mode=ro"
     connection = sqlite3.connect(uri, uri=True, timeout=5.0)
     try:
-        row = connection.execute(
-            "SELECT value FROM meta WHERE key = 'next_seq'"
-        ).fetchone()
-        if row is None:
+        meta = dict(connection.execute("SELECT key, value FROM meta").fetchall())
+        if "next_seq" not in meta:
             raise MeasurementError(
                 f"{queue_path} has no next_seq; is it a relay queue?"
             )
-        next_seq = int(row[0])
         depth, queued_bytes = connection.execute(
             "SELECT COUNT(*), COALESCE(SUM(nbytes), 0) FROM records"
         ).fetchone()
-        return next_seq, int(depth), int(queued_bytes)
+        return RelayCounters(
+            next_seq=int(meta["next_seq"]),
+            depth=int(depth),
+            queued_bytes=int(queued_bytes),
+            dropped_intake=int(meta.get("dropped_intake_total", 0)),
+            dropped_cap=int(meta.get("dropped_cap_total", 0)),
+        )
     finally:
         connection.close()
 
@@ -264,6 +285,8 @@ class Sample:
     drained_total: int
     depth: int
     queued_bytes: int
+    dropped_intake: int
+    dropped_cap: int
     severed: bool
 
 
@@ -278,6 +301,8 @@ class PhaseResult:
     depth_start: int
     depth_end: int
     queued_bytes_end: int
+    dropped_intake: int
+    dropped_cap: int
 
     @property
     def drain_over_intake(self) -> float | None:
@@ -309,6 +334,8 @@ def summarise(name: str, samples: list[Sample]) -> PhaseResult:
         depth_start=first.depth,
         depth_end=last.depth,
         queued_bytes_end=last.queued_bytes,
+        dropped_intake=last.dropped_intake - first.dropped_intake,
+        dropped_cap=last.dropped_cap - first.dropped_cap,
     )
 
 
@@ -346,16 +373,16 @@ class Measurement:
         self._t0 = time.monotonic()
 
     async def sample(self) -> Sample:
-        next_seq, depth, queued_bytes = await asyncio.to_thread(
-            read_relay_counters, self._queue_path
-        )
+        counters = await asyncio.to_thread(read_relay_counters, self._queue_path)
         drained = await read_watermark(self._engine, self._station_id)
         return Sample(
             at_s=time.monotonic() - self._t0,
-            intake_total=next_seq,
+            intake_total=counters.next_seq,
             drained_total=drained,
-            depth=depth,
-            queued_bytes=queued_bytes,
+            depth=counters.depth,
+            queued_bytes=counters.queued_bytes,
+            dropped_intake=counters.dropped_intake,
+            dropped_cap=counters.dropped_cap,
             severed=self._proxy.severed,
         )
 
@@ -450,6 +477,26 @@ def check_instrument(run: Run) -> list[str]:
         )
     if baseline.intake_records <= 0:
         problems.append("no intake during baseline - the relay is receiving nothing")
+
+    # Drops do not void the run, but they change what the numbers mean, so they
+    # are reported as loudly as a fault. An intake drop means `next_seq` is
+    # short of what actually arrived, so the true intake rate is higher than
+    # measured and the drain/intake ratio is optimistic. A cap drop means
+    # telemetry was destroyed, and a drain rate measured while records are being
+    # thrown away is not a drain rate at all.
+    for phase in run.phases:
+        if phase.dropped_intake:
+            problems.append(
+                f"{phase.dropped_intake} datagram(s) dropped at intake during "
+                f"{phase.name}: measured intake is below actual, so drain/intake "
+                "is better than the truth"
+            )
+        if phase.dropped_cap:
+            problems.append(
+                f"{phase.dropped_cap} record(s) destroyed by the queue cap during "
+                f"{phase.name}: data was lost, and drain measured over that "
+                "window is meaningless"
+            )
     return problems
 
 
@@ -459,7 +506,7 @@ def report(run: Run, problems: list[str]) -> None:
     print()
     header = (
         f"{'phase':10s} {'secs':>7s} {'intake/s':>10s} {'drain/s':>10s} "
-        f"{'depth end':>10s} {'queued MiB':>11s}"
+        f"{'depth end':>10s} {'queued MiB':>11s} {'drop in':>8s} {'drop cap':>9s}"
     )
     print(header)
     print("-" * len(header))
@@ -467,7 +514,8 @@ def report(run: Run, problems: list[str]) -> None:
         print(
             f"{phase.name:10s} {phase.duration_s:7.1f} "
             f"{phase.intake_per_s:10.1f} {phase.drain_per_s:10.1f} "
-            f"{phase.depth_end:10d} {phase.queued_bytes_end / 1048576:11.1f}"
+            f"{phase.depth_end:10d} {phase.queued_bytes_end / 1048576:11.1f} "
+            f"{phase.dropped_intake:8d} {phase.dropped_cap:9d}"
         )
 
     recovery = run.phase("recovery")
