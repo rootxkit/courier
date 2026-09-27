@@ -42,14 +42,24 @@ nothing else.
 
 ## Phases
 
+    settle     wait for flow, then for the queue to go shallow
     baseline   the system keeping up, or not; intake and drain should match
-    outage     proxy severed; drain must be 0 and intake must continue
+    outage     proxy severed; drain must stop and intake must continue
     recovery   proxy restored; drain is now the maximum the Gateway can do,
                because the relay always has a backlog ready to send
 
-The `outage` phase doubles as the instrument's own check. If drain is not zero
-while the uplink is severed, the measurement is wrong and the numbers that
-follow mean nothing, so it is asserted rather than assumed.
+The settle phase is not politeness. The relay starts after the proxy and spends
+its backoff buffering, so without it the baseline measures that backlog draining
+and reports a catch-up rate as a steady-state one -- which is how the first run
+of this harness produced a drain of 426 records/s against an intake of 194.
+
+The `outage` phase doubles as the instrument's own check: if drain continues
+while the uplink is severed, the proxy is not in the relay's path and every
+number after it is the steady state wearing a different label. Drain does not
+stop *instantly*, though -- whatever the relay had already put on the wire is in
+the Gateway's socket buffer and is still made durable, 1,207 records in the
+first run -- so an initial window is excluded and reported separately rather
+than failing a system that was behaving correctly.
 
 ## Usage
 
@@ -347,12 +357,56 @@ class Run:
     recovery_s: float
     samples: dict[str, list[Sample]] = field(default_factory=dict)
     phases: list[PhaseResult] = field(default_factory=list)
+    # How much of the outage phase is treated as settling rather than outage.
+    outage_settle_s: float = 0.0
+    # Records ingested during that settling window: data already in the
+    # Gateway's socket buffer when the link was cut. Reported rather than
+    # hidden, because it is how much the Gateway had swallowed but not yet made
+    # durable, which is worth knowing on its own.
+    in_flight_records: int = 0
 
     def phase(self, name: str) -> PhaseResult:
         for result in self.phases:
             if result.name == name:
                 return result
         raise MeasurementError(f"no phase named {name!r}")
+
+
+def after_settling(samples: list[Sample], settle_s: float) -> list[Sample]:
+    """The samples from `settle_s` into the phase onwards.
+
+    Severing the link does not stop drain instantly: whatever the relay had
+    already put on the wire is sitting in the Gateway's socket buffer and is
+    still made durable. In the first run that was 1,207 records, essentially all
+    of them in the first second or two.
+
+    Requiring zero drain across the whole outage therefore failed a system that
+    was behaving correctly, and it failed it with a message accusing the
+    operator of misconfiguring `gateway_url`. A check that cries wolf gets
+    switched off, so the in-flight tail is excluded from the rate and reported
+    separately instead.
+    """
+    if not samples:
+        return samples
+    cutoff = samples[0].at_s + settle_s
+    kept = [sample for sample in samples if sample.at_s >= cutoff]
+    # Never return fewer than two samples: a rate needs two, and a settling
+    # window longer than the phase is a configuration error, not a reason to
+    # silently report nothing.
+    return kept if len(kept) >= 2 else samples[-2:]
+
+
+def summarise_run(run: Run) -> list[PhaseResult]:
+    """Per-phase rates, with the outage measured after its in-flight tail."""
+    results: list[PhaseResult] = []
+    for name, samples in run.samples.items():
+        if name == "outage" and run.outage_settle_s > 0.0:
+            kept = after_settling(samples, run.outage_settle_s)
+            run.in_flight_records = kept[0].drained_total - samples[0].drained_total
+            results.append(summarise(name, kept))
+        else:
+            results.append(summarise(name, samples))
+    return results
 
 
 class Measurement:
@@ -365,7 +419,7 @@ class Measurement:
         proxy: SeverableProxy,
         interval_s: float,
     ) -> None:
-        self._queue_path = queue_path
+        self.queue_path = queue_path
         self._engine = engine
         self._station_id = station_id
         self._proxy = proxy
@@ -373,7 +427,7 @@ class Measurement:
         self._t0 = time.monotonic()
 
     async def sample(self) -> Sample:
-        counters = await asyncio.to_thread(read_relay_counters, self._queue_path)
+        counters = await asyncio.to_thread(read_relay_counters, self.queue_path)
         drained = await read_watermark(self._engine, self._station_id)
         return Sample(
             at_s=time.monotonic() - self._t0,
@@ -405,6 +459,88 @@ class Measurement:
         return samples
 
 
+async def wait_for_flow(measurement: Measurement, timeout_s: float) -> None:
+    """Block until records are actually being ingested, then return.
+
+    The proxy has to be listening before the relay can connect, so the harness
+    comes up first and the relay follows. Without this wait the baseline phase
+    would start during that gap, measure a drain of zero, and describe a healthy
+    system as stalled - and then the outage would have nothing to differ from.
+
+    Waits on drain rather than intake, because intake starts moving as soon as
+    the relay's UDP socket is bound, which says nothing about the uplink.
+    """
+    sys.stderr.write("waiting for the relay to connect and records to flow\n")
+    started = time.monotonic()
+
+    # The queue file may not exist yet, and cannot be required up front: the
+    # relay creates it, the relay needs the proxy, and the proxy is this
+    # process. Demanding it before starting was a genuine ordering bug - it made
+    # the first run of a fresh fleet impossible, because the only way to have a
+    # queue was to have already run once.
+    while not measurement.queue_path.exists():
+        if time.monotonic() - started >= timeout_s:
+            raise MeasurementError(
+                f"{measurement.queue_path} never appeared within {timeout_s:.0f}s. "
+                "Start the relay with this queue path, or correct --relay-queue."
+            )
+        await asyncio.sleep(0.5)
+
+    first = await measurement.sample()
+    while time.monotonic() - started < timeout_s:
+        await asyncio.sleep(1.0)
+        current = await measurement.sample()
+        if current.drained_total > first.drained_total:
+            flowed = current.drained_total - first.drained_total
+            sys.stderr.write(
+                f"  flowing after {time.monotonic() - started:.1f}s "
+                f"({flowed} records)\n\n"
+            )
+            return
+    raise MeasurementError(
+        f"no records were ingested within {timeout_s:.0f}s. The relay is probably "
+        "not pointed at the proxy: its gateway_url must name the proxy's port, "
+        "not the Gateway's."
+    )
+
+
+async def wait_for_steady_state(
+    measurement: Measurement, *, max_depth: int, timeout_s: float
+) -> None:
+    """Wait until the queue is shallow, so the baseline measures steady state.
+
+    The relay is started after the proxy and spends its §12 backoff buffering:
+    in the first run of this harness it had queued about 9,500 records before it
+    connected. The baseline phase then measured that backlog draining -- 426
+    records/s against an intake of 194 -- and reported a drain *rate* that was
+    really a catch-up rate. Depth falling while "intake" and "drain" disagreed
+    was the tell, and it is the kind of number that looks like good news.
+
+    So: wait for the queue to be shallow and stay shallow. Drain above intake is
+    the interesting measurement, and it belongs to the recovery phase, where it
+    is produced deliberately.
+    """
+    sys.stderr.write(f"waiting for the queue to settle below {max_depth} records\n")
+    started = time.monotonic()
+    shallow = 0
+    while time.monotonic() - started < timeout_s:
+        sample = await measurement.sample()
+        shallow = shallow + 1 if sample.depth <= max_depth else 0
+        if shallow >= 3:
+            sys.stderr.write(
+                f"  settled after {time.monotonic() - started:.1f}s "
+                f"at depth {sample.depth}\n\n"
+            )
+            return
+        await asyncio.sleep(1.0)
+    raise MeasurementError(
+        f"the queue did not settle below {max_depth} records within "
+        f"{timeout_s:.0f}s. The relay is not keeping up even before an outage, "
+        "which is itself the finding - record it and raise --settle-max-depth "
+        "rather than waiting longer."
+    )
+
+
 async def run_measurement(args: argparse.Namespace, engine: AsyncEngine) -> Run:
     proxy = SeverableProxy(
         listen_port=args.listen_port,
@@ -433,12 +569,20 @@ async def run_measurement(args: argparse.Namespace, engine: AsyncEngine) -> Run:
     )
 
     try:
+        await wait_for_flow(measurement, args.settle_timeout_s)
+        await wait_for_steady_state(
+            measurement,
+            max_depth=args.settle_max_depth,
+            timeout_s=args.settle_timeout_s,
+        )
+
         sys.stderr.write(f"baseline for {args.baseline_s:.0f}s\n")
         run.samples["baseline"] = await measurement.collect(args.baseline_s, "baseline")
 
         sys.stderr.write(f"\nsevering the uplink for {args.outage_s:.0f}s\n")
         await proxy.sever()
         run.samples["outage"] = await measurement.collect(args.outage_s, "outage")
+        run.outage_settle_s = args.outage_settle_s
 
         sys.stderr.write(f"\nrestoring; recovery for {args.recovery_s:.0f}s\n")
         proxy.restore()
@@ -446,7 +590,7 @@ async def run_measurement(args: argparse.Namespace, engine: AsyncEngine) -> Run:
     finally:
         await proxy.stop()
 
-    run.phases = [summarise(name, s) for name, s in run.samples.items()]
+    run.phases = summarise_run(run)
     return run
 
 
@@ -466,9 +610,10 @@ def check_instrument(run: Run) -> list[str]:
 
     if outage.drained_records != 0:
         problems.append(
-            f"drain did not stop during the outage ({outage.drained_records} "
-            "records ingested with the uplink severed) - the proxy is probably "
-            "not in the relay's path, so check gateway_url"
+            f"drain continued through the outage at {outage.drain_per_s:.1f} "
+            f"records/s, {outage.drained_records} records after the in-flight "
+            "tail was excluded - the proxy is probably not in the relay's path, "
+            "so check that gateway_url names the proxy's port"
         )
     if outage.intake_records <= 0:
         problems.append(
@@ -506,16 +651,26 @@ def report(run: Run, problems: list[str]) -> None:
     print()
     header = (
         f"{'phase':10s} {'secs':>7s} {'intake/s':>10s} {'drain/s':>10s} "
-        f"{'depth end':>10s} {'queued MiB':>11s} {'drop in':>8s} {'drop cap':>9s}"
+        f"{'depth':>15s} {'queued MiB':>11s} {'drop in':>8s} {'drop cap':>9s}"
     )
     print(header)
     print("-" * len(header))
     for phase in run.phases:
+        # Depth as a range, not an endpoint. An endpoint alone hid that the
+        # first baseline was draining a backlog rather than holding steady.
+        depth = f"{phase.depth_start} -> {phase.depth_end}"
         print(
             f"{phase.name:10s} {phase.duration_s:7.1f} "
             f"{phase.intake_per_s:10.1f} {phase.drain_per_s:10.1f} "
-            f"{phase.depth_end:10d} {phase.queued_bytes_end / 1048576:11.1f} "
+            f"{depth:>15s} {phase.queued_bytes_end / 1048576:11.1f} "
             f"{phase.dropped_intake:8d} {phase.dropped_cap:9d}"
+        )
+    if run.outage_settle_s > 0.0:
+        print()
+        print(
+            f"Outage measured after a {run.outage_settle_s:.0f}s settling window; "
+            f"{run.in_flight_records} record(s) were already in flight when the "
+            "link was cut."
         )
 
     recovery = run.phase("recovery")
@@ -580,6 +735,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--recovery-s", type=float, default=120.0)
     parser.add_argument("--interval-s", type=float, default=DEFAULT_SAMPLE_INTERVAL_S)
     parser.add_argument(
+        "--settle-timeout-s",
+        type=float,
+        default=90.0,
+        help="how long to wait for flow and for the queue to settle",
+    )
+    parser.add_argument(
+        "--settle-max-depth",
+        type=int,
+        default=500,
+        help="queue depth below which the baseline is steady state",
+    )
+    parser.add_argument(
+        "--outage-settle-s",
+        type=float,
+        default=5.0,
+        help="ignore this much of the outage as in-flight tail",
+    )
+    parser.add_argument(
         "--json", type=Path, default=None, help="also write the samples and rates here"
     )
     parser.add_argument(
@@ -597,10 +770,6 @@ async def main_async(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    if not args.relay_queue.exists():
-        print(f"{args.relay_queue} does not exist.", file=sys.stderr)
-        return 2
-
     engine = create_async_engine(args.database_url)
     try:
         run = await run_measurement(args, engine)

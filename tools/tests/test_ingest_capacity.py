@@ -28,9 +28,11 @@ from tools.ingest_capacity import (
     Run,
     Sample,
     SeverableProxy,
+    after_settling,
     check_instrument,
     read_relay_counters,
     summarise,
+    summarise_run,
 )
 
 # --- reading the relay's counters ------------------------------------------
@@ -335,7 +337,7 @@ def test_drain_continuing_through_the_outage_voids_the_run() -> None:
     problems = check_instrument(run)
 
     assert len(problems) == 1
-    assert "drain did not stop" in problems[0]
+    assert "drain continued through the outage" in problems[0]
     assert "gateway_url" in problems[0]
 
 
@@ -428,3 +430,88 @@ def test_a_cap_drop_is_reported_because_the_drain_figure_is_then_void() -> None:
 def test_a_run_with_no_drops_reports_nothing_about_drops() -> None:
     """The paired presence test: a counter that always complains is noise."""
     assert check_instrument(a_run_with_drops()) == []
+
+
+# --- the in-flight tail ----------------------------------------------------
+#
+# The first live run failed its own check: 1,207 records were ingested during a
+# 60 s outage and the harness accused the operator of misconfiguring
+# gateway_url. The relay was configured correctly. Severing the link does not
+# stop drain instantly, because what the relay already put on the wire is in the
+# Gateway's socket buffer and is still made durable.
+
+
+def test_the_settling_window_is_excluded_from_the_outage_rate() -> None:
+    samples = [
+        sample(0.0, 1000, 5000),
+        sample(1.0, 1100, 5600),  # in-flight tail lands here
+        sample(2.0, 1200, 5600),
+        sample(10.0, 2000, 5600),
+    ]
+
+    kept = after_settling(samples, 2.0)
+
+    assert [s.at_s for s in kept] == [2.0, 10.0]
+    assert summarise("outage", kept).drained_records == 0
+
+
+def test_a_settling_window_longer_than_the_phase_keeps_two_samples() -> None:
+    """A misconfigured window must not silently report nothing."""
+    samples = [sample(0.0, 0, 0), sample(1.0, 100, 100), sample(2.0, 200, 200)]
+
+    kept = after_settling(samples, 999.0)
+
+    assert len(kept) == 2
+    assert kept == samples[-2:]
+
+
+def test_the_in_flight_tail_is_counted_and_reported() -> None:
+    run = Run(sources=1, baseline_s=1.0, outage_s=10.0, recovery_s=1.0)
+    run.outage_settle_s = 2.0
+    run.samples = {
+        "baseline": [sample(0.0, 0, 0), sample(1.0, 200, 200)],
+        "outage": [
+            sample(1.0, 200, 200, severed=True),
+            sample(2.0, 300, 1407, severed=True),
+            sample(4.0, 500, 1407, severed=True),
+            sample(11.0, 1200, 1407, severed=True),
+        ],
+        "recovery": [sample(11.0, 1200, 1407), sample(12.0, 1400, 2600)],
+    }
+
+    run.phases = summarise_run(run)
+
+    assert run.in_flight_records == 1207
+    assert run.phase("outage").drained_records == 0
+    assert check_instrument(run) == []
+
+
+def test_drain_that_continues_past_the_settling_window_still_voids_the_run() -> None:
+    """The check must keep working. Excluding the tail must not excuse a proxy
+    that is not in the path at all."""
+    run = Run(sources=1, baseline_s=1.0, outage_s=10.0, recovery_s=1.0)
+    run.outage_settle_s = 2.0
+    run.samples = {
+        "baseline": [sample(0.0, 0, 0), sample(1.0, 200, 200)],
+        "outage": [
+            sample(1.0, 200, 200, severed=True),
+            sample(2.0, 400, 400, severed=True),
+            sample(11.0, 2200, 2200, severed=True),
+        ],
+        "recovery": [sample(11.0, 2200, 2200), sample(12.0, 2400, 3600)],
+    }
+
+    run.phases = summarise_run(run)
+    problems = check_instrument(run)
+
+    assert any("drain continued through the outage" in p for p in problems)
+    assert any("gateway_url" in p for p in problems)
+
+
+def test_a_phase_reports_its_depth_range_not_just_the_end() -> None:
+    """Depth falling while intake and drain disagree is the tell that a
+    "baseline" is really a backlog draining. An endpoint alone hid it."""
+    result = summarise("baseline", [sample(0.0, 0, 0), sample(10.0, 1940, 4265)])
+
+    assert result.depth_start == 0
+    assert result.depth_end == 1940 - 4265
