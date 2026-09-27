@@ -42,7 +42,8 @@ nothing else.
 
 ## Phases
 
-    settle     wait for flow, then for the queue to go shallow
+    settle     wait for flow, then for the queue to go shallow; if it never
+               does, carry on and report the baseline as saturation
     baseline   the system keeping up, or not; intake and drain should match
     outage     proxy severed; drain must stop and intake must continue
     recovery   proxy restored; drain is now the maximum the Gateway can do,
@@ -364,6 +365,15 @@ class Run:
     # hidden, because it is how much the Gateway had swallowed but not yet made
     # durable, which is worth knowing on its own.
     in_flight_records: int = 0
+    # Whether the queue went shallow before the baseline began. False means
+    # the baseline is saturation rather than steady state: the relay was
+    # already falling behind with no outage at all, so there is no steady
+    # state for a recovery to return to. None means the settle phase did not
+    # run, which is not the same as having passed it.
+    reached_steady_state: bool | None = None
+    # The depth the settle phase waited for, kept so the report can say what
+    # "did not settle" was measured against.
+    settle_max_depth: int = 0
 
     def phase(self, name: str) -> PhaseResult:
         for result in self.phases:
@@ -506,7 +516,7 @@ async def wait_for_flow(measurement: Measurement, timeout_s: float) -> None:
 
 async def wait_for_steady_state(
     measurement: Measurement, *, max_depth: int, timeout_s: float
-) -> None:
+) -> bool:
     """Wait until the queue is shallow, so the baseline measures steady state.
 
     The relay is started after the proxy and spends its §12 backoff buffering:
@@ -531,14 +541,21 @@ async def wait_for_steady_state(
                 f"  settled after {time.monotonic() - started:.1f}s "
                 f"at depth {sample.depth}\n\n"
             )
-            return
+            return True
         await asyncio.sleep(1.0)
-    raise MeasurementError(
-        f"the queue did not settle below {max_depth} records within "
-        f"{timeout_s:.0f}s. The relay is not keeping up even before an outage, "
-        "which is itself the finding - record it and raise --settle-max-depth "
-        "rather than waiting longer."
+
+    # Not an error. At eleven sources the queue never settled, and refusing to
+    # measure would have been refusing to measure the condition under
+    # investigation: a fleet size at which there is no steady state at all, so
+    # the backlog grows in normal operation and "outage recovery" is already
+    # moot. The run continues, and the report says the baseline is saturation
+    # rather than steady state.
+    sys.stderr.write(
+        f"  NOT SETTLED within {timeout_s:.0f}s: the queue stayed above "
+        f"{max_depth} records with no outage at all.\n"
+        "  Continuing - the baseline below is saturation, not steady state.\n\n"
     )
+    return False
 
 
 async def run_measurement(args: argparse.Namespace, engine: AsyncEngine) -> Run:
@@ -570,7 +587,8 @@ async def run_measurement(args: argparse.Namespace, engine: AsyncEngine) -> Run:
 
     try:
         await wait_for_flow(measurement, args.settle_timeout_s)
-        await wait_for_steady_state(
+        run.settle_max_depth = args.settle_max_depth
+        run.reached_steady_state = await wait_for_steady_state(
             measurement,
             max_depth=args.settle_max_depth,
             timeout_s=args.settle_timeout_s,
@@ -679,6 +697,23 @@ def report(run: Run, problems: list[str]) -> None:
     print("Intake is the relay's next_seq; drain is the Gateway's durable watermark.")
     print()
 
+    # Said before the headline, not after it. At a fleet size with no steady
+    # state the recovery phase is not a recovery at all, and a reader who
+    # stops at the verdict must not come away thinking an outage was the
+    # cause of the lag.
+    if run.reached_steady_state is False:
+        print(
+            f"BASELINE IS SATURATION: the queue never settled below "
+            f"{run.settle_max_depth} records\n"
+            "         before the outage. The relay was already falling behind in\n"
+            "         normal operation, so at this fleet size there is no steady\n"
+            "         state for a recovery to return to."
+        )
+        print()
+    elif run.reached_steady_state is None:
+        print("Steady state was not checked; the baseline may include a backlog.")
+        print()
+
     # The headline. Recovery drain is the most the Gateway can do, because the
     # relay has a backlog ready and is never waiting for data.
     intake_reference = max(baseline.intake_per_s, recovery.intake_per_s)
@@ -781,22 +816,37 @@ async def main_async(args: argparse.Namespace) -> int:
 
     if args.json is not None:
         args.json.parent.mkdir(parents=True, exist_ok=True)
-        payload: dict[str, Any] = {
-            "sources": run.sources,
-            "phases": [
-                {**asdict(phase), "drain_over_intake": phase.drain_over_intake}
-                for phase in run.phases
-            ],
-            "samples": {
-                name: [asdict(sample) for sample in samples]
-                for name, samples in run.samples.items()
-            },
-            "problems": problems,
-        }
-        args.json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        args.json.write_text(
+            json.dumps(to_json(run, problems), indent=2), encoding="utf-8"
+        )
         print(f"\nwrote {args.json}")
 
     return 1 if problems else 0
+
+
+def to_json(run: Run, problems: list[str]) -> dict[str, Any]:
+    """The run as recorded evidence.
+
+    Whether the baseline was steady state travels with the numbers. The JSON
+    is what gets compared across fleet sizes later, and a saturated baseline
+    read as a steady one would make the largest fleet look like the healthiest.
+    """
+    return {
+        "sources": run.sources,
+        "reached_steady_state": run.reached_steady_state,
+        "settle_max_depth": run.settle_max_depth,
+        "outage_settle_s": run.outage_settle_s,
+        "in_flight_records": run.in_flight_records,
+        "phases": [
+            {**asdict(phase), "drain_over_intake": phase.drain_over_intake}
+            for phase in run.phases
+        ],
+        "samples": {
+            name: [asdict(sample) for sample in samples]
+            for name, samples in run.samples.items()
+        },
+        "problems": problems,
+    }
 
 
 def main(argv: list[str] | None = None) -> int:

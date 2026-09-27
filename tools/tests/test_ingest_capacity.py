@@ -15,14 +15,19 @@ than not having it: every future run would carry a silent endorsement.
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
 from agent.queue import DurableQueue
 from tests.ports import free_tcp_port
+from tools import ingest_capacity
 from tools.ingest_capacity import (
+    Measurement,
     MeasurementError,
     PhaseResult,
     Run,
@@ -31,8 +36,11 @@ from tools.ingest_capacity import (
     after_settling,
     check_instrument,
     read_relay_counters,
+    report,
     summarise,
     summarise_run,
+    to_json,
+    wait_for_steady_state,
 )
 
 # --- reading the relay's counters ------------------------------------------
@@ -515,3 +523,127 @@ def test_a_phase_reports_its_depth_range_not_just_the_end() -> None:
 
     assert result.depth_start == 0
     assert result.depth_end == 1940 - 4265
+
+
+# --- a queue that never settles --------------------------------------------
+
+
+class ScriptedClock:
+    """Stands in for `time` and `asyncio` inside the module under test only.
+
+    Patched on the module rather than globally, because the event loop running
+    the test reads the real `time.monotonic` too.
+    """
+
+    def __init__(self) -> None:
+        self.now_s = 0.0
+
+    def monotonic(self) -> float:
+        return self.now_s
+
+    async def sleep(self, seconds: float) -> None:
+        self.now_s += seconds
+
+
+class ScriptedMeasurement:
+    """Returns a fixed queue depth on every sample."""
+
+    def __init__(self, depth: int) -> None:
+        self.depth = depth
+        self.samples_taken = 0
+
+    async def sample(self) -> Sample:
+        self.samples_taken += 1
+        return Sample(
+            at_s=0.0,
+            intake_total=0,
+            drained_total=0,
+            depth=self.depth,
+            queued_bytes=self.depth * 40,
+            dropped_intake=0,
+            dropped_cap=0,
+            severed=False,
+        )
+
+
+def settle(
+    monkeypatch: pytest.MonkeyPatch, *, depth: int, max_depth: int
+) -> tuple[bool, ScriptedMeasurement]:
+    clock = ScriptedClock()
+    monkeypatch.setattr(
+        ingest_capacity, "time", SimpleNamespace(monotonic=clock.monotonic)
+    )
+    monkeypatch.setattr(ingest_capacity, "asyncio", SimpleNamespace(sleep=clock.sleep))
+    measurement = ScriptedMeasurement(depth)
+    settled = asyncio.run(
+        wait_for_steady_state(
+            cast(Measurement, measurement), max_depth=max_depth, timeout_s=30.0
+        )
+    )
+    return settled, measurement
+
+
+def test_a_shallow_queue_settles(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The presence half: settling must be reachable, or every run would be
+    reported as saturation and the flag would carry no information."""
+    settled, measurement = settle(monkeypatch, depth=10, max_depth=500)
+
+    assert settled is True
+    assert measurement.samples_taken == 3
+
+
+def test_a_queue_that_never_settles_is_reported_not_raised(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """At eleven sources the queue never went shallow, and raising there
+    refused to measure the very condition P1-10 is about."""
+    settled, measurement = settle(monkeypatch, depth=50_000, max_depth=500)
+
+    assert settled is False
+    assert measurement.samples_taken >= 3
+
+
+def a_reported_run(reached_steady_state: bool | None) -> Run:
+    run = a_run(baseline=(1000, 900), outage=(1000, 0), recovery=(1000, 950))
+    run.reached_steady_state = reached_steady_state
+    run.settle_max_depth = 2000
+    return run
+
+
+def test_a_saturated_baseline_is_said_before_the_verdict(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    report(a_reported_run(False), [])
+    out = capsys.readouterr().out
+
+    assert "BASELINE IS SATURATION" in out
+    assert "below 2000 records" in out
+    assert out.index("BASELINE IS SATURATION") < out.index("VERDICT")
+
+
+def test_a_steady_baseline_says_nothing_about_saturation(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    report(a_reported_run(True), [])
+    out = capsys.readouterr().out
+
+    assert "SATURATION" not in out
+    assert "not checked" not in out
+
+
+def test_an_unchecked_baseline_is_not_passed_off_as_steady(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    report(a_reported_run(None), [])
+
+    assert "Steady state was not checked" in capsys.readouterr().out
+
+
+def test_the_steady_state_flag_is_recorded_with_the_numbers() -> None:
+    """The JSON is what gets compared across fleet sizes. Without the flag, a
+    saturated baseline reads as a steady one."""
+    payload = to_json(a_reported_run(False), [])
+
+    assert payload["reached_steady_state"] is False
+    assert payload["settle_max_depth"] == 2000
+    assert json.loads(json.dumps(payload))["reached_steady_state"] is False
