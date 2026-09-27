@@ -161,8 +161,8 @@ drones(id, serial, model, sysid, status, max_payload_g, max_range_m,
 
 pilots(id, name, license_ref, status, max_concurrent_drones)
 
-drone_state(drone_id, ts, geom POINT, alt_agl_m, alt_amsl_m, heading_deg,
-            vx_ms, vy_ms, vz_ms, batt_pct, batt_voltage, mode,
+drone_state(drone_id, ts, geom POINT, alt_amsl_m, alt_above_home_m,
+            heading_deg, vx_ms, vy_ms, vz_ms, batt_pct, batt_voltage, mode,
             gps_fix_type, sat_count, link_quality)      -- hypertable
 
 orders(id, customer_id, pickup_geom, dropoff_geom, weight_g,
@@ -182,6 +182,18 @@ events(id, ts, actor_type, actor_id, entity_type, entity_id,
 
 Indexes that matter: GiST on every geometry column, `drone_state(drone_id, ts
 DESC)`, and a partial index on `drones(status) WHERE status = 'IDLE'`.
+
+**There is deliberately no `alt_agl_m`.** Nothing in the telemetry carries
+height above ground. `GLOBAL_POSITION_INT.relative_alt` is documented by
+MAVLink as *"Altitude above home"*, which equals AGL only while the terrain
+under the aircraft is at home's elevation; `GPS_RAW_INT.alt` and `VFR_HUD.alt`
+are both MSL, and `GPS_RAW_INT.alt_ellipsoid` is a third datum again.
+
+The column is absent rather than nullable. A nullable `alt_agl_m` that is
+always null is an invitation to fill it from `relative_alt`, and the resulting
+error is smooth, plausible and silent — an aircraft over rising ground reads as
+higher above it than it is. AGL returns when P5-00 provides a terrain source,
+and not before.
 
 ## 5. Order state machine
 
@@ -265,12 +277,43 @@ WHERE status IN ('PLANNED','ACTIVE')
 
 Resolution order: different altitude layer → delay departure 60-120 s → reroute.
 
-**Semicircular altitude rule** — prevents head-on encounters structurally:
+**Semicircular altitude rule** — prevents head-on encounters structurally.
+
+**The layers are AMSL, not AGL.** The rule works by guaranteeing that two
+aircraft on opposing tracks are at different heights, and that guarantee only
+holds if both measure height from the *same datum*. AGL does not provide one:
+two aircraft 15 m apart in AGL over terrain that differs by 15 m are at the
+same height, and two aircraft in the same AGL layer over sloping ground are
+not. Either way the error is smooth, plausible and unsignalled — and it lands
+in §7.2's `d_alt < 20 m` test, which is the last check before an alert.
+
+A layer set is derived from a **reference elevation** for the operating area,
+normally the base's elevation AMSL:
 
 ```
-track 000°-179°  →  60, 90, 120 m AGL
-track 180°-359°  →  75, 105, 135 m AGL
+track 000°-179°  →  reference + 60, +90, +120 m AMSL
+track 180°-359°  →  reference + 75, +105, +135 m AMSL
 ```
+
+Every aircraft sharing an operating area must use the same reference. Two
+stations with different base elevations do not share a layer set, and missions
+that cross between them are deconflicted in AMSL directly rather than by layer.
+
+**Layers are valid only over terrain within a bounded range of the
+reference.** Fixed-AMSL layers mean ground clearance varies with the terrain
+underneath: at `reference + 60 m` over ground that rises 40 m above the
+reference, clearance is 20 m. So the usable terrain range follows from the
+lowest layer and whatever minimum clearance applies:
+
+```
+max_terrain_rise_m = lowest_layer_offset_m - minimum_clearance_m
+```
+
+Both inputs are configuration, not constants in code — minimum clearance is a
+regulatory figure and is not encoded here. Checking an operating area against
+this bound needs terrain elevation, which is **P5-00**; until that exists, the
+bound is stated and unenforced, and that is a known gap rather than an
+oversight.
 
 ### 7.2 Tactical — in flight, server side
 

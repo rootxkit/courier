@@ -60,6 +60,13 @@ PROBE_OPTS := $(if $(PROBE_HOST),--host $(PROBE_HOST)) $(if $(PROBE_PORT),--port
 # Raise them when coverage rises; lowering one needs a reason in the commit.
 COVERAGE_MIN_AGENT ?= 95
 COVERAGE_MIN_PROBE ?= 35
+COVERAGE_MIN_GATEWAY ?= 92
+# The database-only modules are excluded from the figure above and gated
+# separately by `make test-db`: their tests need a database, so counting them
+# in a run that skips those tests would ratchet against coverage that was
+# never measured.
+COVERAGE_DB_ONLY := gateway/ingest_store_pg.py,gateway/retention.py,gateway/binding.py,gateway/state_writer.py
+COVERAGE_MIN_DB_MODULES ?= 85
 
 .PHONY: help hooks up down stop ps logs reset psql psql-telemetry sim sim-stop \
         venv lint fmt typecheck test test-cov test-slow test-sitl cover clean probe probe-roundtrip
@@ -132,19 +139,46 @@ typecheck: venv ## mypy, strict on the safety-relevant modules
 	$(VENV_BIN)/mypy
 
 test: venv ## Run unit tests (slow and SITL tests excluded)
-	$(VENV_BIN)/pytest -m 'not sitl and not slow'
+	$(VENV_BIN)/pytest -m 'not sitl and not slow and not postgres and not nats'
 
 test-cov: venv ## Run unit tests with a coverage report
-	$(VENV_BIN)/pytest -m 'not sitl and not slow' --cov --cov-branch --cov-report=term-missing
+	$(VENV_BIN)/pytest -m 'not sitl and not slow and not postgres and not nats' --cov --cov-branch --cov-report=term-missing
 
 cover: venv ## Branch coverage with the thresholds enforced (what CI runs)
-	$(VENV_BIN)/pytest -m 'not sitl and not slow' --cov --cov-branch --cov-report=term-missing:skip-covered --cov-report=xml
+	$(VENV_BIN)/pytest -m 'not sitl and not slow and not postgres and not nats' --cov --cov-branch --cov-report=term-missing:skip-covered --cov-report=xml
 	@echo
 	@echo "=== agent/ - uncovered lines and branch arcs ==="
 	$(VENV_BIN)/coverage report --include='agent/*' --show-missing --fail-under=$(COVERAGE_MIN_AGENT)
 	@echo
+	@echo "=== gateway/ - uncovered lines and branch arcs ==="
+	$(VENV_BIN)/coverage report --include='gateway/*' --omit='$(COVERAGE_DB_ONLY)' --show-missing --fail-under=$(COVERAGE_MIN_GATEWAY)
+	@echo
 	@echo "=== tools/mavlink_probe.py - uncovered ==="
 	$(VENV_BIN)/coverage report --include='tools/mavlink_probe.py' --show-missing --fail-under=$(COVERAGE_MIN_PROBE)
+
+# Two migration trees, two databases, never merged. See CLAUDE.md.
+TELEMETRY_ALEMBIC := $(VENV_BIN)/alembic -c infra/migrations/telemetry/alembic.ini
+
+migrate: venv ## Apply telemetry database migrations
+	$(TELEMETRY_ALEMBIC) upgrade head
+
+migrate-down: venv ## Roll the telemetry database back one revision
+	$(TELEMETRY_ALEMBIC) downgrade -1
+
+console: venv ## Serve the P1-08 map on :8000 (needs .env and `make up`)
+	$(VENV_BIN)/python -m api.console
+
+test-bus: venv ## Run tests that need NATS (make up first)
+	$(VENV_BIN)/pytest -m nats -v
+
+# Database tests create and drop their OWN database. The name must end in
+# _test; the fixture refuses anything else, because pointing them at the
+# development database once marked 14,288 archive rows deleted.
+TELEMETRY_TEST_DATABASE_URL ?= postgresql+asyncpg://courier:courier_dev@127.0.0.1:5433/courier_telemetry_test
+
+test-db: venv ## Run tests that need the telemetry database (make up first)
+	TELEMETRY_TEST_DATABASE_URL="$(TELEMETRY_TEST_DATABASE_URL)" $(VENV_BIN)/pytest -m postgres -v --cov=gateway.ingest_store_pg --cov=gateway.retention --cov=gateway.binding --cov=gateway.state_writer --cov-branch --cov-report=term-missing
+	$(VENV_BIN)/coverage report --include='$(COVERAGE_DB_ONLY)' --show-missing --fail-under=$(COVERAGE_MIN_DB_MODULES)
 
 test-slow: venv ## Run the slow tests excluded from `make test`
 	$(VENV_BIN)/pytest -m slow -v

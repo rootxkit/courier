@@ -1,0 +1,346 @@
+{
+  "_pymavlink_version": "2.4.49",
+  "_source": "pymavlink message_definitions/v1.0, via tools/refresh_mavlink_units.py",
+  "messages": {
+    "BATTERY_STATUS": {
+      "battery_function": {
+        "description": "Function of the battery",
+        "units": ""
+      },
+      "battery_remaining": {
+        "description": "Remaining battery energy. Values: [0-100], -1: autopilot does not estimate the remaining battery.",
+        "units": "%"
+      },
+      "charge_state": {
+        "description": "State for extent of discharge, provided by autopilot for warning or external reactions",
+        "units": ""
+      },
+      "current_battery": {
+        "description": "Battery current, -1: autopilot does not measure the current",
+        "units": "cA"
+      },
+      "current_consumed": {
+        "description": "Consumed charge, -1: autopilot does not provide consumption estimate",
+        "units": "mAh"
+      },
+      "energy_consumed": {
+        "description": "Consumed energy, -1: autopilot does not provide energy consumption estimate",
+        "units": "hJ"
+      },
+      "fault_bitmask": {
+        "description": "Fault/health indications. These should be set when charge_state is MAV_BATTERY_CHARGE_STATE_FAILED or MAV_BATTERY_CHARGE_STATE_UNHEALTHY (if not, fault reporting is not supported).",
+        "units": ""
+      },
+      "id": {
+        "description": "Battery ID",
+        "units": ""
+      },
+      "mode": {
+        "description": "Battery mode. Default (0) is that battery mode reporting is not supported or battery is in normal-use mode.",
+        "units": ""
+      },
+      "temperature": {
+        "description": "Temperature of the battery. INT16_MAX for unknown temperature.",
+        "units": "cdegC"
+      },
+      "time_remaining": {
+        "description": "Remaining battery time, 0: autopilot does not provide remaining battery time estimate",
+        "units": "s"
+      },
+      "type": {
+        "description": "Type (chemistry) of the battery",
+        "units": ""
+      },
+      "voltages": {
+        "description": "Battery voltage of cells 1 to 10 (see voltages_ext for cells 11-14). Cells in this field above the valid cell count for this battery should have the UINT16_MAX value. If individual cell voltages are unknown or not measured for this battery, then the overall battery voltage should be filled in cell 0, with all others set to UINT16_MAX. If the voltage of the battery is greater than (UINT16_MAX - 1), then cell 0 should be set to (UINT16_MAX - 1), and cell 1 to the remaining voltage. This can be extended to multiple cells if the total voltage is greater than 2 * (UINT16_MAX - 1).",
+        "units": "mV"
+      },
+      "voltages_ext": {
+        "description": "Battery voltages for cells 11 to 14. Cells above the valid cell count for this battery should have a value of 0, where zero indicates not supported (note, this is different than for the voltages field and allows empty byte truncation). If the measured value is 0 then 1 should be sent instead.",
+        "units": "mV"
+      }
+    },
+    "EKF_STATUS_REPORT": {
+      "airspeed_variance": {
+        "description": "Airspeed variance.",
+        "units": ""
+      },
+      "compass_variance": {
+        "description": "Compass variance.",
+        "units": ""
+      },
+      "flags": {
+        "description": "Flags.",
+        "units": ""
+      },
+      "pos_horiz_variance": {
+        "description": "Horizontal Position variance.",
+        "units": ""
+      },
+      "pos_vert_variance": {
+        "description": "Vertical Position variance.",
+        "units": ""
+      },
+      "terrain_alt_variance": {
+        "description": "Terrain Altitude variance.",
+        "units": ""
+      },
+      "velocity_variance": {
+        "description": "Velocity variance.",
+        "units": ""
+      }
+    },
+    "GLOBAL_POSITION_INT": {
+      "alt": {
+        "description": "Altitude (MSL). Note that virtually all GPS modules provide both WGS84 and MSL.",
+        "units": "mm"
+      },
+      "hdg": {
+        "description": "Vehicle heading (yaw angle), 0.0..359.99 degrees. If unknown, set to: UINT16_MAX",
+        "units": "cdeg"
+      },
+      "lat": {
+        "description": "Latitude, expressed",
+        "units": "degE7"
+      },
+      "lon": {
+        "description": "Longitude, expressed",
+        "units": "degE7"
+      },
+      "relative_alt": {
+        "description": "Altitude above home",
+        "units": "mm"
+      },
+      "time_boot_ms": {
+        "description": "Timestamp (time since system boot).",
+        "units": "ms"
+      },
+      "vx": {
+        "description": "Ground X Speed (Latitude, positive north)",
+        "units": "cm/s"
+      },
+      "vy": {
+        "description": "Ground Y Speed (Longitude, positive east)",
+        "units": "cm/s"
+      },
+      "vz": {
+        "description": "Ground Z Speed (Altitude, positive down)",
+        "units": "cm/s"
+      }
+    },
+    "GPS_RAW_INT": {
+      "alt": {
+        "description": "Altitude (MSL). Positive for up. Note that virtually all GPS modules provide the MSL altitude in addition to the WGS84 altitude.",
+        "units": "mm"
+      },
+      "alt_ellipsoid": {
+        "description": "Altitude (above WGS84, EGM96 ellipsoid). Positive for up.",
+        "units": "mm"
+      },
+      "cog": {
+        "description": "Course over ground (NOT heading, but direction of movement) in degrees * 100, 0.0..359.99 degrees. If unknown, set to: UINT16_MAX",
+        "units": "cdeg"
+      },
+      "eph": {
+        "description": "GPS HDOP horizontal dilution of position (unitless * 100). If unknown, set to: UINT16_MAX",
+        "units": ""
+      },
+      "epv": {
+        "description": "GPS VDOP vertical dilution of position (unitless * 100). If unknown, set to: UINT16_MAX",
+        "units": ""
+      },
+      "fix_type": {
+        "description": "GPS fix type.",
+        "units": ""
+      },
+      "h_acc": {
+        "description": "Position uncertainty.",
+        "units": "mm"
+      },
+      "hdg_acc": {
+        "description": "Heading / track uncertainty",
+        "units": "degE5"
+      },
+      "lat": {
+        "description": "Latitude (WGS84, EGM96 ellipsoid)",
+        "units": "degE7"
+      },
+      "lon": {
+        "description": "Longitude (WGS84, EGM96 ellipsoid)",
+        "units": "degE7"
+      },
+      "satellites_visible": {
+        "description": "Number of satellites visible. If unknown, set to UINT8_MAX",
+        "units": ""
+      },
+      "time_usec": {
+        "description": "Timestamp (UNIX Epoch time or time since system boot). The receiving end can infer timestamp format (since 1.1.1970 or since system boot) by checking for the magnitude of the number.",
+        "units": "us"
+      },
+      "v_acc": {
+        "description": "Altitude uncertainty.",
+        "units": "mm"
+      },
+      "vel": {
+        "description": "GPS ground speed. If unknown, set to: UINT16_MAX",
+        "units": "cm/s"
+      },
+      "vel_acc": {
+        "description": "Speed uncertainty.",
+        "units": "mm/s"
+      },
+      "yaw": {
+        "description": "Yaw in earth frame from north. Use 0 if this GPS does not provide yaw. Use UINT16_MAX if this GPS is configured to provide yaw and is currently unable to provide it. Use 36000 for north.",
+        "units": "cdeg"
+      }
+    },
+    "HEARTBEAT": {
+      "autopilot": {
+        "description": "Autopilot type / class. Use MAV_AUTOPILOT_INVALID for components that are not flight controllers.",
+        "units": ""
+      },
+      "base_mode": {
+        "description": "System mode bitmap.",
+        "units": ""
+      },
+      "custom_mode": {
+        "description": "A bitfield for use for autopilot-specific flags",
+        "units": ""
+      },
+      "mavlink_version": {
+        "description": "MAVLink version, not writable by user, gets added by protocol because of magic data type: uint8_t_mavlink_version",
+        "units": ""
+      },
+      "system_status": {
+        "description": "System status flag.",
+        "units": ""
+      },
+      "type": {
+        "description": "Vehicle or component type. For a flight controller component the vehicle type (quadrotor, helicopter, etc.). For other components the component type (e.g. camera, gimbal, etc.). This should be used in preference to component id for identifying the component type.",
+        "units": ""
+      }
+    },
+    "MISSION_CURRENT": {
+      "mission_mode": {
+        "description": "Vehicle is in a mode that can execute mission items or suspended. 0: Unknown, 1: In mission mode, 2: Suspended (not in mission mode).",
+        "units": ""
+      },
+      "mission_state": {
+        "description": "Mission state machine state. MISSION_STATE_UNKNOWN if state reporting not supported.",
+        "units": ""
+      },
+      "seq": {
+        "description": "Sequence",
+        "units": ""
+      },
+      "total": {
+        "description": "Total number of mission items on vehicle (on last item, sequence == total). If the autopilot stores its home location as part of the mission this will be excluded from the total. 0: Not supported, UINT16_MAX if no mission is present on the vehicle.",
+        "units": ""
+      }
+    },
+    "MISSION_ITEM_REACHED": {
+      "seq": {
+        "description": "Sequence",
+        "units": ""
+      }
+    },
+    "STATUSTEXT": {
+      "chunk_seq": {
+        "description": "This chunk's sequence number; indexing is from zero. Any null character in the text field is taken to mean this was the last chunk.",
+        "units": ""
+      },
+      "id": {
+        "description": "Unique (opaque) identifier for this statustext message. May be used to reassemble a logical long-statustext message from a sequence of chunks. A value of zero indicates this is the only chunk in the sequence and the message can be emitted immediately.",
+        "units": ""
+      },
+      "severity": {
+        "description": "Severity of status. Relies on the definitions within RFC-5424.",
+        "units": ""
+      },
+      "text": {
+        "description": "Status text message, without null termination character",
+        "units": ""
+      }
+    },
+    "SYS_STATUS": {
+      "battery_remaining": {
+        "description": "Battery energy remaining, -1: Battery remaining energy not sent by autopilot",
+        "units": "%"
+      },
+      "current_battery": {
+        "description": "Battery current, -1: Current not sent by autopilot",
+        "units": "cA"
+      },
+      "drop_rate_comm": {
+        "description": "Communication drop rate, (UART, I2C, SPI, CAN), dropped packets on all links (packets that were corrupted on reception on the MAV)",
+        "units": "c%"
+      },
+      "errors_comm": {
+        "description": "Communication errors (UART, I2C, SPI, CAN), dropped packets on all links (packets that were corrupted on reception on the MAV)",
+        "units": ""
+      },
+      "errors_count1": {
+        "description": "Autopilot-specific errors",
+        "units": ""
+      },
+      "errors_count2": {
+        "description": "Autopilot-specific errors",
+        "units": ""
+      },
+      "errors_count3": {
+        "description": "Autopilot-specific errors",
+        "units": ""
+      },
+      "errors_count4": {
+        "description": "Autopilot-specific errors",
+        "units": ""
+      },
+      "load": {
+        "description": "Maximum usage in percent of the mainloop time. Values: [0-1000] - should always be below 1000",
+        "units": "d%"
+      },
+      "onboard_control_sensors_enabled": {
+        "description": "Bitmap showing which onboard controllers and sensors are enabled: Value of 0: not enabled. Value of 1: enabled.",
+        "units": ""
+      },
+      "onboard_control_sensors_health": {
+        "description": "Bitmap showing which onboard controllers and sensors have an error (or are operational). Value of 0: error. Value of 1: healthy.",
+        "units": ""
+      },
+      "onboard_control_sensors_present": {
+        "description": "Bitmap showing which onboard controllers and sensors are present. Value of 0: not present. Value of 1: present.",
+        "units": ""
+      },
+      "voltage_battery": {
+        "description": "Battery voltage, UINT16_MAX: Voltage not sent by autopilot",
+        "units": "mV"
+      }
+    },
+    "VFR_HUD": {
+      "airspeed": {
+        "description": "Vehicle speed in form appropriate for vehicle type. For standard aircraft this is typically calibrated airspeed (CAS) or indicated airspeed (IAS) - either of which can be used by a pilot to estimate stall speed.",
+        "units": "m/s"
+      },
+      "alt": {
+        "description": "Current altitude (MSL).",
+        "units": "m"
+      },
+      "climb": {
+        "description": "Current climb rate.",
+        "units": "m/s"
+      },
+      "groundspeed": {
+        "description": "Current ground speed.",
+        "units": "m/s"
+      },
+      "heading": {
+        "description": "Current heading in compass units (0-360, 0=north).",
+        "units": "deg"
+      },
+      "throttle": {
+        "description": "Current throttle setting (0 to 100).",
+        "units": "%"
+      }
+    }
+  }
+}

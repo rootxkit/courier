@@ -127,6 +127,28 @@ Do not add a dependency without a one-line justification in the commit body.
 - All schema changes via Alembic migrations. Never edit a table by hand.
 - All geometry columns `SRID 4326`. Distance math on `geography`, not `geometry`.
 - Timestamps `TIMESTAMPTZ`, always UTC. Convert at the display layer only.
+- **There are two migration trees and they must never be merged.**
+
+  | Tree | Database | Owns |
+  |---|---|---|
+  | `infra/migrations/telemetry/` | TimescaleDB | ingest index, archive index, `ingest_events`, `drone_state` (P1-04) |
+  | `infra/migrations/relational/` | PostgreSQL + PostGIS | the schema in `ARCHITECTURE.md` §4 (P2-01, not yet created) |
+
+  They are separate databases with separate version tables
+  (`alembic_version_telemetry`, `alembic_version_relational`) and separate
+  heads. The Gateway reaches only the telemetry one, which is what keeps
+  ingest isolated from the business schema: a slow migration on `orders`
+  cannot stall telemetry, and a Gateway fault cannot reach `drones`.
+
+  Merging them looks like tidying and is not. One tree means one head, so a
+  migration written for one database runs against the other, and the version
+  table that would have caught it has already been unified away. If a future
+  task needs a table visible to both, it gets a row in one and a read path in
+  the other, not a merged tree.
+- The Gateway never connects to the relational database. Ingest events go to
+  `ingest_events` in the telemetry database; `ARCHITECTURE.md` §4's `events`
+  table is the business audit log and is written by services that own business
+  entities. The console reads both.
 
 ## Coordinate and unit conventions
 

@@ -134,6 +134,23 @@ class TelemetryDatabaseSettings(Settings):
         validation_alias="TELEMETRY_DATABASE_URL"
     )
 
+    # ONE setting, TWO consumers: P1-04's drone_state retention policy and the
+    # Gateway's raw archive. They must not be set independently.
+    #
+    # The archive must not outlive the telemetry it explains, and the telemetry
+    # must not outlive the archive either. A drone_state row whose datagrams
+    # have been deleted cannot be checked against what the aircraft actually
+    # sent; an archive whose drone_state is gone is bytes nobody can locate by
+    # drone or by flight. Either way half a record is worse than none, because
+    # it reads as complete.
+    #
+    # 90 days is what an occurrence investigation needs: a report is filed in
+    # days but worked for weeks, and the questions are "what did this aircraft
+    # do on this flight" and "had this been happening before".
+    telemetry_retention_days: int = Field(
+        default=90, ge=1, validation_alias="TELEMETRY_RETENTION_DAYS"
+    )
+
 
 class RedisSettings(Settings):
     """Live drone state. Key expiry is the definition of a lost link."""

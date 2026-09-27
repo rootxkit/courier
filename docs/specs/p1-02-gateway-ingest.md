@@ -252,6 +252,44 @@ Rules:
 An unclaimed source is a normal condition during setup and a serious one in
 flight, so it is an event and a console state, not a log line.
 
+### `known_drones` is a projection, never an authority
+
+`source_bindings.drone_id` points at `known_drones` in the **telemetry**
+database, not at `drones` in the relational one. A foreign key cannot cross
+databases, and the Gateway does not connect to the relational database, so this
+is what makes "a binding to a drone that does not exist" a constraint violation
+rather than an application check that two concurrent writers can both pass.
+
+`known_drones` holds identities and nothing else: `drone_id`, a label for a
+human reading an event, and registration/retirement timestamps. **The
+relational `drones` registry is the authority.** P2-05 owns projecting into it
+when a drone is registered or retired.
+
+**If the two ever diverge, the repair is to rebuild `known_drones` from
+`drones`, never the reverse.** A projection that has been edited to match a
+mistake becomes a second source of truth, and then nobody can say which
+airframe a flight belonged to.
+
+### The registration race is normal, and recoverable
+
+An aircraft can transmit before its projection lands — powered up while the
+paperwork is still being done, or a station reconnecting with a backlog that
+predates the registration. The Gateway then has no binding and marks those
+records **unclaimed**.
+
+**This is not data loss and it is not an error.** The archive holds every
+datagram regardless of whether it resolved, and resolution happens at the
+record's timestamp, so once the drone is registered and the binding is created
+with the correct `bound_from`, the affected records resolve correctly on
+replay. The state is recoverable after the fact precisely because nothing was
+discarded and nothing was resolved early.
+
+It must be presented that way. The failure mode to guard against is somebody
+seeing a screen full of unclaimed sources and "fixing" it with
+auto-registration — which is what §7 forbids, because a misconfigured aircraft
+would then walk itself into the fleet, and the resulting `drone_id` would be
+one nobody chose.
+
 ## 8. Two stations relaying one vehicle
 
 **Accepted, not rejected.** Two ground stations in radio range of one aircraft
@@ -318,16 +356,64 @@ one that does not.
 
 - **Hot path → TimescaleDB** `drone_state` hypertable (P1-04 owns batching,
   chunking and retention).
-- **Raw archive → every received datagram**, addressable by
-  `(station_id, epoch, seq)` with its `recv_utc_ns`, sufficient for P10-03 to
-  replay a flight and for `tools/analyze_capture.py` to run over it.
-- **Events → the append-only `events` table**: gaps, intake-drop deltas,
-  station state transitions, rejected SYSIDs, relay restarts.
+- **Raw archive → files, not the database.** Hourly segments partitioned by
+  station and epoch, zstd compressed, each segment a sequence of relay-v1 §6
+  record frames so the archive format *is* the wire format and
+  `tools/analyze_capture.py` reads it unchanged. Addressable by
+  `(station_id, epoch, seq)` and by time range, sufficient for P10-03 replay.
+
+  At ~240 MB per aircraft per day before compression, five aircraft is ~36 GB
+  a month of opaque bytes nobody queries by content — after an incident you
+  read a time range. Rows would buy nothing and cost an index. The **index** of
+  which segment covers which interval lives in the telemetry database; the
+  contents do not. Object storage is a later implementation behind the same
+  interface, not a migration.
+- **Events → `ingest_events` in the telemetry database**: gaps, intake-drop
+  deltas, station state transitions, rejected SYSIDs, relay restarts.
+
+  Deliberately *not* `ARCHITECTURE.md` §4's `events` table, which lives in the
+  relational database. The Gateway does not connect to the relational database
+  and keeping it that way is worth more than one shared table: ingest stays
+  isolated from the business schema in both directions. §4's `events` is
+  unchanged and remains the business audit log; the console reads both.
 
 Units and conventions are not negotiable here: SI at the parser boundary
-(1e7 lat/lon, mm→m, cm/s→m/s), AGL and AMSL stored separately and named, all
+(1e7 lat/lon, mm→m, cm/s→m/s), altitudes stored separately and named, all
 timestamps `TIMESTAMPTZ` in UTC, all geometry SRID 4326. P1-03 owns the
 conversion and its property tests.
+
+### Why there is no `alt_agl_m`, and why it must not be added back
+
+`drone_state` carries `alt_amsl_m` and `alt_above_home_m`. It does **not**
+carry `alt_agl_m`, and the field was removed from `ARCHITECTURE.md` §4 rather
+than left nullable.
+
+Nothing in the telemetry carries height above ground. From pymavlink's own
+field descriptions:
+
+| Field | Description | Datum |
+|---|---|---|
+| `GLOBAL_POSITION_INT.alt` | "Altitude (MSL)" | AMSL |
+| `GLOBAL_POSITION_INT.relative_alt` | **"Altitude above home"** | above home |
+| `GPS_RAW_INT.alt` | "Altitude (MSL)" | AMSL |
+| `GPS_RAW_INT.alt_ellipsoid` | "Altitude (above WGS84, EGM96 ellipsoid)" | ellipsoid |
+| `VFR_HUD.alt` | "Current altitude (MSL)" | AMSL |
+
+`relative_alt` equals AGL only while the ground under the aircraft is at the
+home point's elevation. Over rising terrain it overstates clearance.
+
+**The tempting change is to rename `alt_above_home_m` to `alt_agl_m`, or to
+fill a nullable `alt_agl_m` from it. Do neither.** The resulting error is
+smooth, plausible and produces no signal anywhere: the track looks normal, the
+numbers look normal, and the aircraft is lower over the ground than the data
+says. It lands in deconfliction, where §7.2 alerts on `d_alt < 20 m` and §7.1's
+layers are 15 m apart — so a terrain difference of one layer's spacing is
+enough to judge two aircraft as separated when they are co-altitude, or the
+reverse.
+
+That is why `ARCHITECTURE.md` §7's altitude layers are now expressed in AMSL
+against a reference elevation. AGL returns when **P5-00** provides a terrain
+source, and the column returns with it.
 
 ## 11. Direct UDP ingest
 
@@ -351,12 +437,24 @@ Listed, not resolved. Each needs an answer before the code that depends on it.
 1. **Token storage and rotation.** Where do station tokens live, how are they
    issued, how is one revoked mid-flight? Hashed at rest is the obvious
    starting point, but rotation while a station is connected is not obvious.
-2. **Raw archive medium.** TimescaleDB alongside `drone_state`, object storage,
-   or files on disk? Volume is ~2.8 KiB/s per aircraft before compression —
-   about 240 MB per aircraft per day. Retention policy is unanswered.
-3. **Dedupe index cost.** `(station_id, epoch, seq)` over months of records is
-   a large index. Is dedupe bounded to a recent window, and if so what happens
-   to a relay replaying a very old backlog?
+2. ~~**Raw archive medium.**~~ **ANSWERED (2026-09-23):** files, hourly
+   segments partitioned by station and epoch, zstd compressed, with the segment
+   index in the telemetry database. See §10. *Retention of the segments
+   themselves is still unanswered* — only the epoch metadata has a retention
+   rule so far.
+3. ~~**Dedupe index cost.**~~ **ANSWERED (2026-09-23):** bounded per *epoch*,
+   never by time. A time window would reject a relay replaying a two-hour
+   backlog, which is the design working as intended. Per `(station_id, epoch)`
+   the state is one `highest_contiguous_seq` plus a short list of permanent
+   gaps — constant-size however old the replay is, and the same number
+   `resume_from_seq` needs, so the two cannot drift apart.
+
+   An epoch is closed when its station declares a different one, and closed
+   epochs are dropped after a retention period. **Failure mode, deliberately
+   chosen:** a relay reconnecting under a dropped epoch is treated as new, so
+   it resends — duplicating data rather than losing it. The opposite, keeping
+   the watermark and discarding the resend, looks identical in every log and
+   silently loses a flight.
 4. **Clock correction.** `relay-v1.md` §9 provides the monotonic/UTC pairs to
    estimate a station's clock offset, and notes `SYSTEM_TIME` carries GPS time
    at 3 Hz. Which timestamp is authoritative for `drone_state.ts`, and is the

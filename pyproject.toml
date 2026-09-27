@@ -16,6 +16,26 @@ dependencies = [
     # relay must run on a pilot's bare Windows laptop where a C toolchain is
     # not available, so a pure-Python client matters.
     "websockets>=13",
+    # The Gateway's index of what it has stored. Async because the ingest path
+    # is asyncio end to end and a blocking driver would stall every station on
+    # one slow query.
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.29",
+    # Schema is owned by migrations, never by hand (CLAUDE.md). Two trees: this
+    # dependency serves both.
+    "alembic>=1.13",
+    # Raw archive compression. The archive is opaque bytes nobody queries, so
+    # it is compressed on the way to disk; zstd is the ratio/speed point that
+    # keeps fsync-per-batch affordable.
+    "zstandard>=0.22",
+    # The internal bus. The console subscribes to it rather than polling the
+    # hypertable, so a browser refresh never becomes a database query.
+    "nats-py>=2.6",
+    # The REST/WS API, per the stack table in CLAUDE.md. P1-08 needs only the
+    # WebSocket half; the OpenAPI schema it generates becomes the source of
+    # truth for the TypeScript clients in Phase 6.
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
 ]
 
 [project.optional-dependencies]
@@ -25,6 +45,9 @@ dev = [
     "pytest>=8.2",
     "pytest-asyncio>=0.23",
     "pytest-cov>=5.0",
+    # Drives the FastAPI app in-process for the console feed tests, so they
+    # need no free port and no running server.
+    "httpx>=0.27",
     # The probe's roundtrip mode packs a PARAM_REQUEST_READ with it, and the
     # probe's unit tests build synthetic frames with it rather than opening a
     # socket. Listen mode stays standard-library only so it runs on a bare
@@ -166,6 +189,8 @@ addopts = [
 markers = [
     "sitl: requires running SITL vehicles; needs an external dependency the default run does not have",
     "slow: takes tens of seconds but has no external dependency; excluded to keep the default run quick",
+    "postgres: needs the telemetry database from `make up` and TELEMETRY_DATABASE_URL; excluded from the default run for the same reason as sitl",
+    "nats: needs the NATS broker from `make up` and NATS_URL; excluded from the default run for the same reason as postgres",
 ]
 filterwarnings = ["error"]
 
@@ -181,7 +206,28 @@ branch = true
 source = ["common", "gateway", "dispatch", "airspace", "tools", "agent"]
 # Measuring the tests themselves inflates the total towards 100% and hides the
 # code that matters: a test file is, by construction, almost fully executed.
-omit = ["*/tests/*", "*/conftest.py"]
+#
+# The other entries are process entry points and operator scripts: argument
+# parsing, settings loading and wiring, with every decision they make living in
+# a module that is covered. Counting them measures how much composition there
+# is, not how much of the system is tested, and the pressure it creates is to
+# put logic somewhere else rather than to test it.
+#
+# agent/__main__.py is deliberately NOT here: it has tests in
+# agent/tests/test_cli.py, because the refusal messages a pilot reads at a
+# flying site are behaviour, not wiring.
+#
+# The line to hold: anything here must be composition only. gateway/pipeline.py
+# was pulled OUT of this list and given tests when it turned out to carry real
+# decisions - which unclaimed sources are announced, and what happens when a
+# conversion fails.
+omit = [
+    "*/tests/*",
+    "*/conftest.py",
+    "gateway/__main__.py",
+    "tools/register_aircraft.py",
+    "tools/refresh_mavlink_units.py",
+]
 
 [tool.coverage.report]
 exclude_also = [

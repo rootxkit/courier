@@ -14,13 +14,27 @@ import pytest
 
 from agent.__main__ import main
 from agent.udp import ReceiveOnlyUDPSocket
+from tests.ports import free_udp_port
 
-VALID = """
+_VALID_TEMPLATE = """
 station_id = "cli-test"
 gateway_url = "wss://gateway.example.org/relay/v1"
 token_path = "relay.token"
 queue_path = "relay-queue.sqlite3"
+bind_port = {port}
 """
+
+
+def valid_config(port: int | None = None) -> str:
+    """A config that binds a port nothing else is using.
+
+    The port is reserved rather than left to default. The default is 14445,
+    which is the port a *real* relay binds - exclusively - so these tests
+    failed with `WinError 10048` whenever one was running during the local
+    end-to-end check. A test that cannot run while the system runs is a test
+    people learn to ignore.
+    """
+    return _VALID_TEMPLATE.format(port=port if port is not None else free_udp_port())
 
 
 def capture(capsys: pytest.CaptureFixture[str]) -> list[dict[str, object]]:
@@ -60,7 +74,7 @@ def test_missing_token_file_exits_two(
 ) -> None:
     """Configuration is fine; the credential it points at is not."""
     config = tmp_path / "relay.toml"
-    config.write_text(VALID, encoding="utf-8")
+    config.write_text(valid_config(), encoding="utf-8")
 
     assert main(["--config", str(config)]) == 2
     assert "Gateway operator" in str(capture(capsys)[-1]["reason"])
@@ -77,7 +91,7 @@ def test_plaintext_to_a_remote_host_is_refused_at_startup(
     """
     config = tmp_path / "relay.toml"
     config.write_text(
-        VALID.replace("wss://gateway.example.org", "ws://192.168.1.50:8443"),
+        valid_config().replace("wss://gateway.example.org", "ws://192.168.1.50:8443"),
         encoding="utf-8",
     )
 
@@ -119,7 +133,7 @@ def test_a_config_elsewhere_finds_its_token_beside_itself(
     """
     station = tmp_path / "station"
     station.mkdir()
-    (station / "relay.toml").write_text(VALID, encoding="utf-8")
+    (station / "relay.toml").write_text(valid_config(), encoding="utf-8")
     (station / "relay.token").write_text("a-real-token", encoding="utf-8")
 
     elsewhere = tmp_path / "elsewhere"
@@ -158,9 +172,7 @@ def test_a_second_relay_refuses_to_start_on_a_held_port(
         port = holder.bound_endpoint[1]
         station = tmp_path / "station"
         station.mkdir()
-        (station / "relay.toml").write_text(
-            VALID + f"\nbind_port = {port}\n", encoding="utf-8"
-        )
+        (station / "relay.toml").write_text(valid_config(port), encoding="utf-8")
         (station / "relay.token").write_text("a-real-token", encoding="utf-8")
 
         code = main(["--config", str(station / "relay.toml")])

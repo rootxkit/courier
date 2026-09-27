@@ -155,11 +155,40 @@ for (( i = 0; i < instance_count; i++ )); do
   inst_home="${home_lat},${inst_lon},${home_alt_amsl_m},${home_heading_deg}"
 
   # SYSID is set through a parameter file rather than relying on SITL's
-  # instance-derived default, so the value is explicit and version-independent.
+  # instance-derived default, so the value is explicit.
+  #
+  # BOTH names are written, because ArduPilot renamed the parameter:
+  # SYSID_THISMAV through 4.5, MAV_SYSID from 4.6. Writing only the old name
+  # against a 4.6 build is silently ignored and every vehicle keeps the
+  # default SYSID 1 - not an error anywhere, it simply produces a fleet that
+  # looks like one aircraft. Measured on 4.6.0-beta1: two instances both
+  # reported SYSID 1 on the shared QGC link.
+  #
+  # An unknown parameter in an --add-param-file is ignored, so writing both is
+  # safe in either direction. CI pins Copter-4.5 while this machine builds
+  # 4.6, so both are live.
   param_file="${inst_dir}/sysid.parm"
-  printf 'SYSID_THISMAV %d\n' "${sysid}" > "${param_file}"
+  {
+    printf 'SYSID_THISMAV %d\n' "${sysid}"
+    printf 'MAV_SYSID %d\n' "${sysid}"
+  } > "${param_file}"
 
-  "${SIM_VEHICLE}" \
+  # `setsid` puts this instance in its own process group, so stop_sitl.sh can
+  # signal the WHOLE tree by group id.
+  #
+  # sim_vehicle.py is a launcher: it starts arducopter inside an xterm and
+  # returns. Killing only the recorded pid leaves the simulator running, which
+  # is exactly what happened - 5 arducopter processes survived for 2
+  # instances, across runs, and `stop_sitl: signalled 0 process(es)` reported
+  # success while the fleet was still flying.
+  #
+  # --wipe-eeprom because SITL PERSISTS parameters in an eeprom file, and a
+  # defaults file is only consulted when that storage is empty. Without it the
+  # second run of an instance keeps whatever the first stored: two vehicles
+  # both answered as SYSID 1 while sysid.parm said 201 and 202, and nothing
+  # reported an error. Wiping makes each launch reproducible, which is the
+  # point of a simulator.
+  setsid "${SIM_VEHICLE}" \
     --vehicle ArduCopter \
     --frame "${SITL_FRAME}" \
     --instance "${i}" \
@@ -168,6 +197,7 @@ for (( i = 0; i < instance_count; i++ )); do
     --add-param-file "${param_file}" \
     --no-rebuild \
     --no-mavproxy \
+    --wipe-eeprom \
     > "${inst_dir}/sitl.log" 2>&1 &
   sitl_pid=$!
   echo "${sitl_pid}" >> "${PID_FILE}"
@@ -183,7 +213,9 @@ for (( i = 0; i < instance_count; i++ )); do
     out_args+=(--out "udp:127.0.0.1:${SITL_QGC_PORT}")
   fi
 
-  "${MAVPROXY}" \
+  # Its own group too: --daemon forks, so the pid recorded here exits almost
+  # immediately and signalling it alone reaches nothing.
+  setsid "${MAVPROXY}" \
     --master "tcp:127.0.0.1:${tcp_port}" \
     "${out_args[@]}" \
     --streamrate "${SITL_STREAMRATE}" \

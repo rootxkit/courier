@@ -27,6 +27,7 @@ from agent.config import RelayConfig
 from agent.queue import DurableQueue
 from agent.relay import Relay
 from agent.tests.blackhole import BlackholeProxy
+from tests.ports import free_udp_port
 from tools.relay_sink import RelaySink, SinkStore
 
 TOKEN = "halfopen-test-token"
@@ -47,12 +48,6 @@ FAST_WORST_CASE_S = 12.0
 # themselves, and a gate that fails at random is worse than no gate.
 FAST_LIMIT_S = 40.0
 DEFAULT_LIMIT_S = 70.0
-
-
-def free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
 
 
 class SinkServer:
@@ -103,12 +98,33 @@ async def _source(port: int, stop: asyncio.Event) -> None:
         sender.close()
 
 
-async def _wait_for(predicate: Any, limit_s: float, interval_s: float = 0.2) -> bool:
-    deadline = time.monotonic() + limit_s
+async def _wait_for(
+    predicate: Any,
+    limit_s: float,
+    interval_s: float = 0.2,
+    *,
+    what: str = "",
+    describe: Any = None,
+) -> bool:
+    """Poll until true, or give up.
+
+    `what` and `describe` exist so a timeout explains itself. A bare False
+    reaches the caller as "assert False" with no elapsed time, nothing about
+    what was being awaited and no state - which is how a timing failure ends up
+    being called flaky and left alone.
+    """
+    started = time.monotonic()
+    deadline = started + limit_s
     while time.monotonic() < deadline:
         if predicate():
             return True
         await asyncio.sleep(interval_s)
+    if what:
+        state = f"; state: {describe()}" if describe is not None else ""
+        print(
+            f"TIMEOUT after {time.monotonic() - started:.1f}s of {limit_s:.1f}s "
+            f"waiting for {what}{state}"
+        )
     return False
 
 
@@ -125,7 +141,7 @@ async def _run_half_open_case(
     sink = SinkServer(tmp_path / "sink")
     sink_port = await sink.start()
 
-    udp_port = free_port()
+    udp_port = free_udp_port()
     stop_source = asyncio.Event()
     source = asyncio.create_task(_source(udp_port, stop_source))
 
@@ -147,7 +163,12 @@ async def _run_half_open_case(
 
         try:
             # Let a first session establish and deliver something.
-            assert await _wait_for(lambda: proxy.connections >= 1, 15.0)
+            assert await _wait_for(
+                lambda: proxy.connections >= 1,
+                15.0,
+                what="the relay to open its first uplink session",
+                describe=lambda: f"proxy.connections={proxy.connections}",
+            )
             await asyncio.sleep(2.0)
 
             store = sink.store
@@ -155,6 +176,12 @@ async def _run_half_open_case(
             assert await _wait_for(
                 lambda: bool(store.all_states()) and store.all_states()[0].stored,
                 15.0,
+                what="the first record to reach the sink",
+                describe=lambda: (
+                    f"sink epochs={len(store.all_states())}, "
+                    f"stored={len(store.all_states()[0].stored) if store.all_states() else 0}, "
+                    f"proxy.connections={proxy.connections}"
+                ),
             ), "nothing was delivered before the stall"
             delivered_before = len(store.all_states()[0].stored)
 
@@ -179,6 +206,10 @@ async def _run_half_open_case(
                 ),
                 limit_s,
                 interval_s=0.25,
+                what="the relay to notice the stalled uplink",
+                describe=lambda: (
+                    f"warnings seen={[r.getMessage() for r in caplog.records]}"
+                ),
             )
             detection_s = time.monotonic() - stalled_at
 

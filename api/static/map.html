@@ -1,0 +1,399 @@
+<!doctype html>
+<!--
+  P1-08's minimal map. One marker per drone, heading, battery, link age.
+
+  Deliberately NOT the console. `web-pilot/` is scaffolded in P6-01 with React,
+  TypeScript and generated API types; this page exists to prove the chain
+  QGC -> relay -> Gateway -> NATS -> browser works end to end, and it should
+  not grow mission rendering, corridors or alerting. Those are P5 and P6.
+
+  There is no mission or corridor rendering here on purpose.
+
+  Every user-facing string goes through `t()` with `en` and `ka`, per
+  CLAUDE.md. Doing that from the first version is much cheaper than retrofitting
+  it, and this page is where the habit starts.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>courier — live map</title>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
+    />
+    <style>
+      :root {
+        color-scheme: light dark;
+        --healthy: #2e7d32;
+        --radio-silent: #ed6c02;
+        --unreachable: #0288d1;
+        --data-lost: #c62828;
+        --unclaimed: #6a1b9a;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      #map { position: absolute; inset: 0; }
+      .panel {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        z-index: 2;
+        width: min(340px, calc(100vw - 24px));
+        max-height: calc(100vh - 24px);
+        overflow: auto;
+        padding: 12px 14px;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.94);
+        box-shadow: 0 2px 14px rgba(0, 0, 0, 0.2);
+      }
+      @media (prefers-color-scheme: dark) {
+        .panel { background: rgba(28, 28, 30, 0.94); color: #eee; }
+      }
+      h1 { font-size: 15px; margin: 0 0 8px; }
+      .row {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 5px 0;
+        border-top: 1px solid rgba(128, 128, 128, 0.25);
+      }
+      .muted { opacity: 0.7; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+      .pill {
+        display: inline-block;
+        padding: 1px 7px;
+        border-radius: 999px;
+        color: #fff;
+        font-size: 12px;
+        white-space: nowrap;
+      }
+      .healthy { background: var(--healthy); }
+      .radio_silent { background: var(--radio-silent); }
+      .unreachable { background: var(--unreachable); }
+      .data_lost { background: var(--data-lost); }
+      .unclaimed { background: var(--unclaimed); }
+      .unplaced { background: #616161; }
+      select { font: inherit; }
+      .marker {
+        width: 26px;
+        height: 26px;
+        display: grid;
+        place-items: center;
+      }
+      .marker svg { filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.5)); }
+      .label {
+        position: absolute;
+        top: 26px;
+        left: 50%;
+        transform: translateX(-50%);
+        white-space: nowrap;
+        font-size: 11px;
+        background: rgba(0, 0, 0, 0.65);
+        color: #fff;
+        padding: 1px 5px;
+        border-radius: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="map"></div>
+
+    <div class="panel">
+      <h1>courier — <span data-i18n="live"></span></h1>
+      <label>
+        <span data-i18n="language"></span>
+        <select id="lang">
+          <option value="en">English</option>
+          <option value="ka">ქართული</option>
+        </select>
+      </label>
+      <div id="link" class="muted" style="padding-top: 6px"></div>
+      <div id="drones"></div>
+      <div id="stations"></div>
+      <div id="unclaimed"></div>
+    </div>
+
+    <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+    <script>
+      "use strict";
+
+      // --- i18n ------------------------------------------------------------
+      // en and ka from the first version, per CLAUDE.md. Retrofitting i18n
+      // costs far more than starting with it, even on a page this small.
+      const STRINGS = {
+        en: {
+          live: "live map",
+          language: "Language",
+          drones: "Drones",
+          stations: "Stations",
+          unclaimed: "Unclaimed sources",
+          none: "none",
+          connecting: "connecting to the feed…",
+          connected: "feed connected",
+          disconnected: "feed disconnected — retrying",
+          battery: "battery",
+          heading: "heading",
+          age: "last seen",
+          seconds: "s ago",
+          healthy: "healthy",
+          radio_silent: "radio silent — station has lost the aircraft",
+          // Deliberately says what is NOT happening. Spec §9: the relay is
+          // alive and buffering, and nothing has been lost.
+          unreachable: "unreachable — data buffered at the station",
+          data_lost: "data lost",
+          no_binding: "transmitting, no binding — register to track",
+          // Present, but the aircraft has not told us where it is. Not an
+          // error: indoors, before the EKF has an origin, this is normal.
+          unplaced: "no position yet",
+          // Telemetry is arriving and the drone is bound, but the Gateway
+          // could not read a label for it from known_drones.
+          unnamed: "unnamed",
+        },
+        ka: {
+          live: "ცოცხალი რუკა",
+          language: "ენა",
+          drones: "დრონები",
+          stations: "სადგურები",
+          unclaimed: "დაუკავშირებელი წყაროები",
+          none: "არცერთი",
+          connecting: "მიმდინარეობს დაკავშირება…",
+          connected: "კავშირი დამყარებულია",
+          disconnected: "კავშირი გაწყდა — ხელახლა ცდა",
+          battery: "ბატარეა",
+          heading: "კურსი",
+          age: "ბოლო სიგნალი",
+          seconds: "წმ წინ",
+          healthy: "მუშაობს",
+          radio_silent: "რადიო დუმს — სადგურმა დაკარგა აპარატი",
+          unreachable: "მიუწვდომელია — მონაცემები ინახება სადგურზე",
+          data_lost: "მონაცემები დაკარგულია",
+          no_binding: "გადასცემს, მაგრამ არ არის მიბმული",
+          unnamed: "უსახელო",
+          unplaced: "პოზიცია ჯერ არ არის",
+        },
+      };
+
+      let lang = "en";
+      const t = (key) => (STRINGS[lang] && STRINGS[lang][key]) || STRINGS.en[key] || key;
+
+      // Labels come from the database, so they reach this page as data and are
+      // never trusted as markup. A drone registered as `<img onerror=...>`
+      // must render as that text, not run as it.
+      const escapeHtml = (value) =>
+        String(value).replace(
+          /[&<>"']/g,
+          (c) =>
+            ({
+              "&": "&amp;",
+              "<": "&lt;",
+              ">": "&gt;",
+              '"': "&quot;",
+              "'": "&#39;",
+            })[c],
+        );
+
+      function applyStaticStrings() {
+        document.documentElement.lang = lang;
+        for (const node of document.querySelectorAll("[data-i18n]")) {
+          node.textContent = t(node.dataset.i18n);
+        }
+        render();
+      }
+
+      document.getElementById("lang").addEventListener("change", (event) => {
+        lang = event.target.value;
+        applyStaticStrings();
+      });
+
+      // --- map -------------------------------------------------------------
+      const map = new maplibregl.Map({
+        container: "map",
+        // MapLibre's own demo tiles: no API key, no account, no vendor
+        // lock-in on a page whose job is to prove a data path.
+        style: "https://demotiles.maplibre.org/style.json",
+        center: [44.8271, 41.7151],
+        zoom: 11,
+      });
+
+      const drones = new Map();
+      const stations = new Map();
+      const unclaimed = new Map();
+      let fitted = false;
+
+      function markerElement() {
+        const element = document.createElement("div");
+        element.className = "marker";
+        element.innerHTML =
+          '<svg width="26" height="26" viewBox="0 0 26 26">' +
+          '<polygon points="13,2 21,23 13,18 5,23" fill="#1565c0" stroke="#fff" stroke-width="1.5"/>' +
+          "</svg><div class=\"label\"></div>";
+        return element;
+      }
+
+      function upsertDrone(data) {
+        // A drone with no position is PRESENT but UNPLACED. It is listed in
+        // the panel with its heading and battery - which are real - and no
+        // marker is drawn, because there is nowhere to draw it. Returning
+        // early here would make the aircraft vanish from the console entirely
+        // while it is transmitting perfectly well.
+        const placed = data.lat_deg !== null && data.lon_deg !== null;
+
+        let entry = drones.get(data.drone_id);
+        if (!entry && !placed) {
+          drones.set(data.drone_id, {
+            marker: null,
+            element: null,
+            data,
+            seenAt: Date.now(),
+          });
+          return;
+        }
+        if (entry && !placed) {
+          // It had a position and lost it: remove the marker rather than
+          // leaving it at the last place we knew. A stale marker presented as
+          // current is the same failure as plotting 0,0.
+          if (entry.marker) {
+            entry.marker.remove();
+            entry.marker = null;
+            entry.element = null;
+          }
+          entry.data = data;
+          entry.seenAt = Date.now();
+          return;
+        }
+        if (!entry) {
+          const element = markerElement();
+          entry = {
+            marker: new maplibregl.Marker({ element }).setLngLat([
+              data.lon_deg,
+              data.lat_deg,
+            ]).addTo(map),
+            element,
+          };
+          drones.set(data.drone_id, entry);
+        }
+        entry.data = data;
+        entry.seenAt = Date.now();
+        entry.marker.setLngLat([data.lon_deg, data.lat_deg]);
+
+        // Heading arrow. null means the aircraft did not report one, so the
+        // marker is left pointing where it last did rather than snapping north
+        // — a heading of 0 and a heading of "unknown" are different things.
+        const svg = entry.element.querySelector("svg");
+        if (data.heading_deg !== null && data.heading_deg !== undefined) {
+          svg.style.transform = `rotate(${data.heading_deg}deg)`;
+        }
+        const battery =
+          data.batt_pct === null || data.batt_pct === undefined
+            ? "—"
+            : `${Math.round(data.batt_pct)}%`;
+        entry.element.querySelector(".label").textContent = battery;
+
+        if (!fitted) {
+          map.easeTo({ center: [data.lon_deg, data.lat_deg], zoom: 14 });
+          fitted = true;
+        }
+      }
+
+      function render() {
+        const dronesPanel = document.getElementById("drones");
+        const rows = [...drones.entries()].map(([id, entry]) => {
+          const age = Math.round((Date.now() - entry.seenAt) / 1000);
+          const battery =
+            entry.data.batt_pct === null || entry.data.batt_pct === undefined
+              ? "—"
+              : `${Math.round(entry.data.batt_pct)}%`;
+          const heading =
+            entry.data.heading_deg === null || entry.data.heading_deg === undefined
+              ? "—"
+              : `${Math.round(entry.data.heading_deg)}°`;
+          const placed =
+            entry.data.lat_deg !== null && entry.data.lon_deg !== null;
+          const unplaced = placed
+            ? ""
+            : ` · <span class="pill unplaced">${t("unplaced")}</span>`;
+          // The registry label leads and the id follows. A pilot knows
+          // "SITL-01"; nobody recognises an aircraft by the first eight
+          // characters of a UUID, and during the SITL run that made it
+          // impossible to tell which row was which airframe. The id stays
+          // visible because it is the identity everything else is keyed on.
+          const label = entry.data.label
+            ? escapeHtml(entry.data.label)
+            : `<span class="muted">${t("unnamed")}</span>`;
+          return (
+            `<div class="row"><span>${label} ` +
+            `<span class="muted mono">${id.slice(0, 8)}</span></span>` +
+            `<span class="muted">${t("battery")} ${battery} · ` +
+            `${t("heading")} ${heading} · ${age}${t("seconds")}${unplaced}</span></div>`
+          );
+        });
+        dronesPanel.innerHTML =
+          `<div class="row"><strong>${t("drones")}</strong>` +
+          `<span class="muted">${drones.size}</span></div>` +
+          (rows.join("") ||
+            `<div class="row muted">${t("none")}</div>`);
+
+        const stationRows = [...stations.values()].map((s) => {
+          // The server sends the state; this page does not derive link health
+          // from telemetry having stopped. That inference is exactly what
+          // would render a buffering station as data loss.
+          const label = t(s.state);
+          return (
+            `<div class="row"><span>${s.station_id}</span>` +
+            `<span class="pill ${s.state}">${label}</span></div>`
+          );
+        });
+        document.getElementById("stations").innerHTML =
+          `<div class="row"><strong>${t("stations")}</strong></div>` +
+          (stationRows.join("") || `<div class="row muted">${t("none")}</div>`);
+
+        const unclaimedRows = [...unclaimed.values()].map(
+          (u) =>
+            `<div class="row"><span>${u.station_id} · ${u.sysid}/${u.compid}</span>` +
+            `<span class="pill unclaimed">${t("no_binding")}</span></div>`
+        );
+        document.getElementById("unclaimed").innerHTML =
+          `<div class="row"><strong>${t("unclaimed")}</strong></div>` +
+          (unclaimedRows.join("") || `<div class="row muted">${t("none")}</div>`);
+      }
+
+      // --- feed ------------------------------------------------------------
+      const link = document.getElementById("link");
+
+      function connect() {
+        link.textContent = t("connecting");
+        const socket = new WebSocket(
+          `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/telemetry`
+        );
+
+        socket.onopen = () => (link.textContent = t("connected"));
+        socket.onclose = () => {
+          link.textContent = t("disconnected");
+          setTimeout(connect, 2000);
+        };
+        socket.onmessage = (event) => {
+          const message = JSON.parse(event.data);
+          if (message.kind === "telemetry") {
+            upsertDrone(message.data);
+          } else if (message.kind === "station") {
+            stations.set(message.data.station_id, message.data);
+          } else if (message.kind === "events" && message.name === "unclaimed_source") {
+            const key = `${message.data.station_id}/${message.data.sysid}/${message.data.compid}`;
+            unclaimed.set(key, message.data);
+          }
+          render();
+        };
+      }
+
+      applyStaticStrings();
+      connect();
+      // Link age has to tick even when nothing arrives: an aircraft that has
+      // stopped transmitting is the case where the number matters most.
+      setInterval(render, 1000);
+    </script>
+  </body>
+</html>

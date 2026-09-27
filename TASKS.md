@@ -26,26 +26,38 @@ be launched and observed. No real hardware.
       TimescaleDB, Redis 7, NATS. Healthchecks on all four. Named volumes.
       *Done when:* `make up` reaches healthy on all services from a cold start.
 
-- [~] **P0-04** SITL launcher `sim/run_sitl.sh` — N instances, unique SYSID per
+- [x] **P0-04** SITL launcher `sim/run_sitl.sh` — N instances, unique SYSID per
       instance, configurable home location, distinct UDP out ports.
       *Done when:* `make sim N=10` gives 10 vehicles with distinct SYSIDs.
-      *Partial:* CI smoke test proves the launcher works. Visual confirmation in
-      QGC still outstanding — close that once local SITL exists (P0-08), because
-      a SYSID collision would pass CI and fail in the console.
+      *Closed* on the first green `sitl` job (PR #5): three vehicles launched
+      with distinct SYSIDs and the integration tests passed against them.
+      *Fully closed* 2026-09-25: ten vehicles launched from WSL appeared in
+      QGC on the Windows side as SYSIDs 201-210, in a row near Kukia Cemetery,
+      Tbilisi. That is the visual confirmation CI could not give.
 
-- [ ] **P0-08** WSL2 development environment per `docs/DEV_SETUP_WSL.md`:
-      mirrored networking, Docker integration, repo on the WSL filesystem,
-      ArduPilot SITL built locally.
+- [x] **P0-08** WSL2 environment for SITL per `docs/DEV_SETUP_WSL.md`:
+      mirrored networking and ArduPilot SITL built locally.
       *Done when:* `make sim N=3` runs locally and all three vehicles appear in
       QGC on the Windows side.
+      *Closed* 2026-09-25 with ten, not three.
+      *Scope corrected while doing it:* the task said "repo on the WSL
+      filesystem" and "Docker integration", and both were wrong. Only SITL
+      lives in WSL. The repository, Gateway, relay agent, console, tests and
+      Docker stack stay on Windows, because the relay ships to a pilot's bare
+      Windows laptop and developing it anywhere else tests something we do not
+      fly. `docs/DEV_SETUP_WSL.md` is rewritten around that.
 
 - [x] **P0-05** Python tooling: `ruff`, `mypy` config, `pytest` with async
       support, shared `pyproject.toml` conventions.
       *Done when:* `make lint` and `make test` pass on an empty repo.
 
-- [~] **P0-06** CI pipeline (GitHub Actions): lint, typecheck, unit tests on
+- [x] **P0-06** CI pipeline (GitHub Actions): lint, typecheck, unit tests on
       every push; SITL integration job on PR to `main`.
       *Done when:* CI is green on the P0 branch.
+      *Closed* on PR #5, the first run where the `sitl` job built ArduPilot and
+      ran the integration tests rather than failing in setup. The job is also
+      dispatchable manually (`workflow_dispatch`), so the next branch can prove
+      it green before opening a PR.
 
 - [x] **P0-07** Structured logging and config loading shared library
       (`common/`): JSON logs, env-based config with validation, no bare prints.
@@ -169,10 +181,16 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
       *Done when:* a spoofed SYSID is rejected, and a valid station presenting
       a vehicle it is not assigned is rejected and logged.
 
-- [ ] **P1-08** WebSocket endpoint + minimal map page: MapLibre, one marker per
+- [x] **P1-08** WebSocket endpoint + minimal map page: MapLibre, one marker per
       drone, heading arrow, battery label.
       *Done when:* 10 markers move in the browser with under 500 ms end-to-end
       latency.
+      *Closed* 2026-09-25: 11 drones listed, 10 markers placed from SITL, and
+      `hexa-01` correctly listed as present but unplaced.
+      *Known gap, not blocking:* the map has no base layer. The style is
+      MapLibre's demo style, whose tiles stop at zoom 6 and contain only
+      country outlines, so at city zoom there is nothing to draw. Choosing a
+      tile provider is its own decision, with licensing attached; see P6-01.
 
 - [ ] **P1-09** Link-quality tracking: packet loss, round-trip latency,
       heartbeat gaps per vehicle.
@@ -203,7 +221,19 @@ Goal: orders exist, move through states, and are fully auditable.
 
 - [ ] **P2-05** Drone and pilot registry API, including status transitions
       (`IDLE`, `ASSIGNED`, `IN_FLIGHT`, `CHARGING`, `MAINTENANCE`, `OFFLINE`).
-      *Done when:* status is derived from telemetry freshness, not set by hand.
+      **Registering or retiring a drone must project into the telemetry
+      database's `known_drones`.** The Gateway never connects to the relational
+      database, so `source_bindings.drone_id` points at that projection rather
+      than at `drones`, and a binding to a drone the projection has not heard
+      of is refused by a foreign key. Without this step someone inserts into
+      `drones`, the binding is refused or the telemetry is marked unclaimed,
+      and the cause is invisible from either side: the relational registry
+      looks correct and the Gateway looks broken.
+      `known_drones` is a projection, never an authority — see
+      `docs/specs/p1-02-gateway-ingest.md` §7.
+      *Done when:* status is derived from telemetry freshness, not set by hand,
+      and registering a drone makes it bindable in the telemetry database
+      without anyone touching that database by hand.
 
 - [ ] **P2-06** Append-only audit log with a query API filtered by entity and
       time range.
@@ -346,6 +376,34 @@ the bottleneck — not before.
 
 This is the phase where a bug means physical damage. Budget the most time here.
 
+- [ ] **P5-00** Terrain elevation source: ground elevation AMSL for a given
+      position, so that AGL becomes derivable at all.
+      **A prerequisite for P5-01 and P5-03, not an optional extra.** There is
+      currently no source for height above ground anywhere in the system:
+      `GLOBAL_POSITION_INT.relative_alt` is "Altitude above home", and
+      `GPS_RAW_INT.alt` and `VFR_HUD.alt` are MSL. `ARCHITECTURE.md` §7's
+      altitude layers are therefore written in AMSL against a reference
+      elevation, and the terrain bound that makes them safe
+      (`max_terrain_rise_m = lowest_layer_offset_m - minimum_clearance_m`)
+      cannot be checked without this.
+      Candidate sources, to be evaluated rather than assumed:
+      - **A DEM** — SRTM (~30 m postings, void-filled variants vary) or
+        Copernicus DEM (~30 m, generally better in mountainous terrain, which
+        Georgia is). Queried by position, served locally; licence and
+        coverage both need checking.
+      - **ArduPilot's `TERRAIN_REPORT`** (message 180), observed at 3.00 Hz in
+        ADR-001's capture. It carries terrain height from the flight
+        controller's own onboard terrain database, which makes it the
+        aircraft's own view rather than an independent one. **Investigate, do
+        not assume:** that database has its own coverage, resolution and
+        loading behaviour, it can be absent or stale, and a value that is
+        missing in flight is worse than one that was never offered. Whether it
+        agrees with a DEM is itself worth measuring.
+      *Done when:* ground elevation can be queried for any point in the
+      operating area, the two sources have been compared over that area, and
+      the disagreement between them is a recorded number rather than an
+      assumption.
+
 - [ ] **P5-01** Corridor generation: route → buffered polygon + altitude band +
       time window, stored as a reservation.
       *Done when:* corridors are visible as polygons on the pilot map.
@@ -355,6 +413,10 @@ This is the phase where a bug means physical damage. Budget the most time here.
       rejected; the same routes 10 minutes apart are accepted.
 
 - [ ] **P5-03** Semicircular altitude rule assignment by track angle.
+      Bands are **AMSL**, offset from an operating area's reference elevation
+      (`ARCHITECTURE.md` §7.1). AGL bands would not guarantee separation: two
+      aircraft 15 m apart in AGL over terrain differing by 15 m are at the same
+      height. Needs P5-00 to check the terrain bound.
       *Done when:* reciprocal routes are automatically assigned different bands.
 
 - [ ] **P5-04** Conflict resolution ladder: altitude change → departure delay →

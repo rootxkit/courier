@@ -1,0 +1,227 @@
+"""The console's live feed: one WebSocket, fed by NATS.
+
+P1-08. The browser opens one connection and receives everything it needs to
+draw a map: drone positions, station link state, and unclaimed sources.
+
+**This never reads the database.** It subscribes to `telemetry.*`, `station.*`
+and `events.*` and forwards what arrives. A map open on ten drones at 4 Hz is
+forty messages a second; served from a hypertable that would be forty queries a
+second, and a browser refresh would become a query storm. The database holds
+the flight record. The bus carries the present.
+
+## What the console is told, and what it is not left to infer
+
+Every station message carries `data_is_lost` and `buffering` as explicit
+fields. The console does not decide what an `unreachable` station means, and it
+certainly does not infer link health from telemetry having stopped - which is
+what would render the 3-to-25 second window where the Gateway and the relay
+disagree as data loss. Spec §9, and P6-03's warning that a pilot who learns the
+alerts overstate things will discount the one that does not.
+
+## Scope
+
+`web-pilot/` is the real console and is scaffolded in P6-01. The page served
+here is the minimal one P1-08 asks for - one marker per drone, heading,
+battery, link age - and exists to prove the chain end to end. It is not the
+console and should not grow into one.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import nats
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse
+from nats.aio.client import Client as NatsClient
+from nats.aio.msg import Msg
+
+from common import get_logger
+
+_log = get_logger(__name__)
+
+# Everything the console needs, and nothing it does not. `>` would also carry
+# subjects added later for services that are not a browser.
+SUBSCRIBED_SUBJECTS = ("telemetry.*", "station.*", "events.*")
+
+# Subjects that carry *state* - the latest message on one of these replaces the
+# previous one, so the latest is a complete picture and is worth replaying to a
+# console that attaches later.
+#
+# `events` is deliberately not in here. An event is not superseded by the next
+# one: two unclaimed sources are two facts, and keeping only the newest per
+# subject would quietly turn them into one. A console that attaches after an
+# event was published does not see it, and that is a real gap - P6-01 fixes it
+# with a queried event history, not by pretending the bus remembers.
+SNAPSHOT_KINDS = frozenset({"telemetry", "station"})
+
+# A bound on the snapshot, which is otherwise one entry per distinct drone and
+# station the process has ever seen. In a fleet that is small; over a long
+# uptime with retired airframes it is not, and an unbounded cache in the
+# console feed is exactly the kind of slow leak nobody attributes correctly.
+SNAPSHOT_MAX_ENTRIES = 512
+
+# How long startup may spend trying to reach the bus before giving up and
+# serving anyway.
+#
+# This exists because `nats.connect` does not fail fast: with library defaults
+# it retries the initial connection about sixty times, several seconds apart,
+# so a console started while the broker is down hangs for minutes instead of
+# loading. The `except` below, and the promise in its comment, had never run.
+# Bounding startup here leaves the client's own reconnect policy untouched for
+# the case that matters - a broker that goes away *after* a good connection.
+CONNECT_TIMEOUT_S = 5.0
+
+STATIC = Path(__file__).parent / "static"
+
+
+@dataclass
+class ConsoleHub:
+    """Fans NATS messages out to every connected browser.
+
+    One NATS subscription set for the whole process, not one per browser: ten
+    consoles open on the same fleet must not multiply the load on the bus.
+    """
+
+    clients: set[asyncio.Queue[str]] = field(default_factory=set)
+    # The latest state message per `(kind, name)`, replayed to each new
+    # console. Insertion-ordered, so the oldest entry is the one evicted.
+    snapshot: dict[tuple[str, str], str] = field(default_factory=dict)
+
+    def attach(self) -> asyncio.Queue[str]:
+        # Bounded. A browser on a slow link must not grow an unbounded backlog
+        # in the server's memory; it is dropped from instead, because stale
+        # positions have no value once newer ones exist.
+        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=256)
+        # Current state first, before any live message. Without this a console
+        # sees only what changes after it connects: a station that went healthy
+        # a minute ago is invisible, and so is a drone that is holding station
+        # and not moving. The bus carries the present, but it does not
+        # remember it, so the hub does.
+        for message in list(self.snapshot.values()):
+            with contextlib.suppress(asyncio.QueueFull):
+                queue.put_nowait(message)
+        self.clients.add(queue)
+        return queue
+
+    def detach(self, queue: asyncio.Queue[str]) -> None:
+        self.clients.discard(queue)
+
+    def broadcast(self, subject: str, payload: bytes) -> None:
+        kind, _, name = subject.partition(".")
+        try:
+            body = json.loads(payload)
+        except json.JSONDecodeError:
+            _log.warning("undecodable bus payload", extra={"subject": subject})
+            return
+
+        message = json.dumps({"kind": kind, "name": name, "data": body})
+        if kind in SNAPSHOT_KINDS:
+            self._remember(kind, name, message)
+        for queue in list(self.clients):
+            try:
+                queue.put_nowait(message)
+            except asyncio.QueueFull:
+                # Drop the oldest and keep the newest: on a map, the current
+                # position matters and the one from two seconds ago does not.
+                with contextlib.suppress(asyncio.QueueEmpty):
+                    queue.get_nowait()
+                with contextlib.suppress(asyncio.QueueFull):
+                    queue.put_nowait(message)
+
+    def _remember(self, kind: str, name: str, message: str) -> None:
+        key = (kind, name)
+        # Re-inserting moves the key to the end, so a drone still reporting is
+        # never the one evicted; the entry that goes is the one that has been
+        # silent longest.
+        self.snapshot.pop(key, None)
+        self.snapshot[key] = message
+        while len(self.snapshot) > SNAPSHOT_MAX_ENTRIES:
+            evicted = next(iter(self.snapshot))
+            del self.snapshot[evicted]
+            _log.warning(
+                "console snapshot full; dropped the least recently seen source",
+                extra={"dropped": evicted, "limit": SNAPSHOT_MAX_ENTRIES},
+            )
+
+
+def create_app(
+    nats_url: str, *, connect_timeout_s: float = CONNECT_TIMEOUT_S
+) -> FastAPI:
+    """Build the app. The NATS URL is injected so tests can point elsewhere.
+
+    `connect_timeout_s` is injected for the same reason: a test that only needs
+    to prove the app serves without a bus should not pay the production
+    timeout to do it.
+    """
+    hub = ConsoleHub()
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        client: NatsClient | None = None
+        try:
+            client = await asyncio.wait_for(
+                nats.connect(nats_url), timeout=connect_timeout_s
+            )
+        except Exception as error:
+            # A console that will not load because the bus is down is worse
+            # than one that loads and says nothing is arriving: the second at
+            # least shows the operator that the link is the problem.
+            _log.error(
+                "could not reach NATS; the console will serve but stay empty",
+                extra={"nats_url": nats_url, "error": str(error)},
+            )
+
+        if client is not None:
+
+            async def on_message(message: Msg) -> None:
+                hub.broadcast(message.subject, message.data)
+
+            for subject in SUBSCRIBED_SUBJECTS:
+                await client.subscribe(subject, cb=on_message)
+            # `subscribe` returns before the server has registered the
+            # interest, so without this a console attaching just before a
+            # publish silently misses it. Flushing waits for the round trip.
+            await client.flush()
+
+        app.state.hub = hub
+        app.state.nats = client
+        try:
+            yield
+        finally:
+            if client is not None:
+                await client.drain()
+
+    app = FastAPI(title="courier console feed", lifespan=lifespan)
+
+    @app.get("/", response_class=HTMLResponse)
+    async def map_page() -> str:
+        """The minimal P1-08 map. `web-pilot/` replaces this in P6-01."""
+        return (STATIC / "map.html").read_text(encoding="utf-8")
+
+    @app.get("/healthz")
+    async def health() -> dict[str, Any]:
+        return {
+            "bus_connected": app.state.nats is not None and app.state.nats.is_connected,
+            "consoles": len(hub.clients),
+        }
+
+    @app.websocket("/ws/telemetry")
+    async def telemetry(websocket: WebSocket) -> None:
+        await websocket.accept()
+        queue = hub.attach()
+        try:
+            while True:
+                await websocket.send_text(await queue.get())
+        except WebSocketDisconnect:
+            pass
+        finally:
+            hub.detach(queue)
+
+    return app

@@ -71,12 +71,18 @@ jobs:
       # executing the path it claims to cover has happened three times in this
       # repository; an unexecuted branch arc is what makes that visible.
       - name: pytest with branch coverage
-        run: pytest -m 'not sitl and not slow' --cov --cov-branch --cov-report=term-missing:skip-covered --cov-report=xml
+        run: pytest -m 'not sitl and not slow and not postgres and not nats' --cov --cov-branch --cov-report=term-missing:skip-covered --cov-report=xml
 
       # Ratchets, set just under the measured figures. They catch a regression;
       # they are not a target. Raise them as coverage rises.
       - name: Coverage gate - agent/
         run: coverage report --include='agent/*' --show-missing --fail-under=95
+
+      # The database-only modules are omitted here and gated in the `database`
+      # job instead: their tests need a database this job does not have, so
+      # counting them would ratchet against coverage never measured.
+      - name: Coverage gate - gateway/
+        run: coverage report --include='gateway/*' --omit='gateway/ingest_store_pg.py,gateway/retention.py,gateway/binding.py,gateway/state_writer.py' --show-missing --fail-under=92
 
       - name: Coverage gate - tools/mavlink_probe.py
         run: coverage report --include='tools/mavlink_probe.py' --show-missing --fail-under=35
@@ -110,6 +116,81 @@ jobs:
           for f in sim/run_sitl.sh sim/stop_sitl.sh .githooks/commit-msg; do
             test -x "$f" || { echo "$f is not executable"; exit 1; }
           done
+
+  database:
+    name: Telemetry database and bus
+    runs-on: ubuntu-latest
+    services:
+      nats:
+        # Same image as infra/docker-compose.dev.yml.
+        image: nats:2.10-alpine
+        ports:
+          - 4222:4222
+      timescale:
+        # Same image as infra/docker-compose.dev.yml. A different one would
+        # test a database nobody runs.
+        image: timescale/timescaledb-ha:pg16
+        env:
+          POSTGRES_USER: courier
+          POSTGRES_PASSWORD: courier_dev
+          POSTGRES_DB: courier_telemetry
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U courier -d courier_telemetry"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 36
+          --health-start-period 40s
+    env:
+      TELEMETRY_DATABASE_URL: postgresql+asyncpg://courier:courier_dev@localhost:5433/courier_telemetry
+      # Tests create and drop this one themselves; the fixture refuses any
+      # name that does not end in _test.
+      TELEMETRY_TEST_DATABASE_URL: postgresql+asyncpg://courier:courier_dev@localhost:5433/courier_telemetry_test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install workspace
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+
+      # The service container runs no initdb scripts, so the extensions the
+      # compose stack installs are created here instead. psql is already on the
+      # runner image, so this needs no extra dependency.
+      - name: Create extensions
+        env:
+          PGPASSWORD: courier_dev
+        run: |
+          for extension in timescaledb postgis btree_gist; do
+            psql -h localhost -p 5433 -U courier -d courier_telemetry -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS $extension"
+          done
+
+      # Up, down and up again. A migration that cannot be reversed is found
+      # here rather than during an incident.
+      - name: Migrations run clean up and down
+        run: |
+          alembic -c infra/migrations/telemetry/alembic.ini upgrade head
+          alembic -c infra/migrations/telemetry/alembic.ini downgrade base
+          alembic -c infra/migrations/telemetry/alembic.ini upgrade head
+
+      - name: Bus tests
+        env:
+          NATS_URL: nats://localhost:4222
+        run: pytest -m nats -v
+
+      - name: Database tests
+        run: pytest -m postgres -v --cov=gateway.ingest_store_pg --cov=gateway.retention --cov=gateway.binding --cov=gateway.state_writer --cov-branch --cov-report=term-missing
+
+      - name: Coverage gate - database-backed modules
+        run: coverage report --include='gateway/ingest_store_pg.py,gateway/retention.py,gateway/binding.py,gateway/state_writer.py' --show-missing --fail-under=85
+
 
   compose:
     name: Dev stack reaches healthy

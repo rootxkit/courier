@@ -28,6 +28,7 @@ from agent.config import RelayConfig
 from agent.framing import decode_records
 from agent.queue import DurableQueue
 from agent.relay import Relay
+from tests.ports import free_tcp_port, free_udp_port
 
 # Seconds. The outage length is the figure the task specified; the rest are
 # sized to be comfortably longer than the relay's 100 ms batch interval.
@@ -279,30 +280,9 @@ async def _wait_for(predicate: Any, limit_s: float, interval_s: float = 0.2) -> 
     return False
 
 
-def _free_port() -> int:
-    import socket
-
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
-
-
-def _free_udp_port() -> int:
-    """Pick a free UDP port.
-
-    The config deliberately refuses port 0 — "let the OS choose" is never what
-    a pilot means — so the test asks for a concrete one instead.
-    """
-    import socket
-
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
-        probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
-
-
 async def test_no_records_are_lost_across_an_outage(tmp_path: Path) -> None:
     """Kill the Gateway for 10 s mid-flight. Lose nothing."""
-    gateway_port = _free_port()
+    gateway_port = free_tcp_port()
     gateway = StubGateway(gateway_port)
     await gateway.start()
 
@@ -311,7 +291,7 @@ async def test_no_records_are_lost_across_an_outage(tmp_path: Path) -> None:
         gateway_url=f"ws://127.0.0.1:{gateway_port}/relay/v1",  # type: ignore[arg-type]
         token_path=tmp_path / "relay.token",
         queue_path=tmp_path / "relay-queue.sqlite3",
-        bind_port=_free_udp_port(),
+        bind_port=free_udp_port(),
     )
     durable_queue = DurableQueue(config.queue_path, max_bytes=64 * 1024 * 1024)
     relay = Relay(config, durable_queue, TOKEN)
@@ -405,7 +385,7 @@ async def test_duplicates_across_a_reconnect_dedupe_to_exactly_once(
     The stub deliberately acknowledges nothing, so the relay resends its whole
     backlog on every reconnect. Keying on seq must collapse that to one copy.
     """
-    gateway_port = _free_port()
+    gateway_port = free_tcp_port()
     gateway = StubGateway(gateway_port)
     await gateway.start()
 
@@ -414,7 +394,7 @@ async def test_duplicates_across_a_reconnect_dedupe_to_exactly_once(
         gateway_url=f"ws://127.0.0.1:{gateway_port}/relay/v1",  # type: ignore[arg-type]
         token_path=tmp_path / "relay.token",
         queue_path=tmp_path / "relay-queue.sqlite3",
-        bind_port=_free_udp_port(),
+        bind_port=free_udp_port(),
     )
     durable_queue = DurableQueue(config.queue_path)
     relay = Relay(config, durable_queue, TOKEN)
@@ -455,7 +435,7 @@ async def test_duplicates_across_a_reconnect_dedupe_to_exactly_once(
 
 async def test_a_bad_token_is_refused(tmp_path: Path) -> None:
     """The relay must not retry a rejected credential into a log flood."""
-    gateway_port = _free_port()
+    gateway_port = free_tcp_port()
     gateway = StubGateway(gateway_port)
     await gateway.start()
 
@@ -464,7 +444,7 @@ async def test_a_bad_token_is_refused(tmp_path: Path) -> None:
         gateway_url=f"ws://127.0.0.1:{gateway_port}/relay/v1",  # type: ignore[arg-type]
         token_path=tmp_path / "relay.token",
         queue_path=tmp_path / "relay-queue.sqlite3",
-        bind_port=_free_udp_port(),
+        bind_port=free_udp_port(),
     )
     durable_queue = DurableQueue(config.queue_path)
     relay = Relay(config, durable_queue, "wrong-token")

@@ -28,22 +28,11 @@ from agent.config import RelayConfig
 from agent.framing import RECORD_HEADER_BYTES, decode_records
 from agent.queue import DurableQueue
 from agent.relay import BACKOFF_MAX_S, ProtocolError, Relay
+from tests.ports import free_tcp_port, free_udp_port
 
 TOKEN = "handshake-test-token"
 DATAGRAM_BYTES = 32
 RECORD_BYTES = RECORD_HEADER_BYTES + DATAGRAM_BYTES
-
-
-def free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
-
-
-def free_udp_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
-        probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
 
 
 class ScriptedGateway:
@@ -144,7 +133,7 @@ async def test_cap_eviction_produces_a_gap_with_the_documented_range(
     misstate which telemetry is missing from a flight record, which is the
     question an accident investigation asks.
     """
-    port = free_port()
+    port = free_tcp_port()
     # Room for five records; the sixth onwards evicts the oldest.
     relay, durable_queue, _ = make_relay(
         tmp_path, port, queue_max_bytes=RECORD_BYTES * 5
@@ -188,7 +177,7 @@ async def test_after_a_gap_the_relay_resumes_from_what_it_still_holds(
     tmp_path: Path,
 ) -> None:
     """Having reported the hole, it sends everything it does have."""
-    port = free_port()
+    port = free_tcp_port()
     relay, durable_queue, _ = make_relay(
         tmp_path, port, queue_max_bytes=RECORD_BYTES * 5
     )
@@ -211,7 +200,7 @@ async def test_no_gap_when_the_server_asks_for_records_still_held(
     tmp_path: Path,
 ) -> None:
     """The absence half of the pair, now that presence is covered."""
-    port = free_port()
+    port = free_tcp_port()
     relay, durable_queue, _ = make_relay(tmp_path, port)
     fill(durable_queue, 10)
 
@@ -233,7 +222,7 @@ async def test_no_gap_when_the_server_asks_for_records_still_held(
 async def test_a_reply_that_is_not_welcome_is_a_protocol_error(
     tmp_path: Path,
 ) -> None:
-    port = free_port()
+    port = free_tcp_port()
     relay, durable_queue, _ = make_relay(tmp_path, port)
     fill(durable_queue, 3)
 
@@ -258,7 +247,7 @@ async def test_a_server_claiming_unsent_records_is_a_protocol_error(
     would write records whose sequence means something different at each end,
     so the relay stops instead.
     """
-    port = free_port()
+    port = free_tcp_port()
     relay, durable_queue, _ = make_relay(tmp_path, port)
     fill(durable_queue, 5)  # highest seq is 4
 
@@ -279,7 +268,7 @@ async def test_resuming_exactly_one_past_the_end_is_legitimate(
     tmp_path: Path,
 ) -> None:
     """Everything acknowledged: resume_from_seq == newest + 1 is normal."""
-    port = free_port()
+    port = free_tcp_port()
     relay, durable_queue, _ = make_relay(tmp_path, port)
     fill(durable_queue, 5)
 
@@ -305,7 +294,7 @@ async def test_an_ack_from_another_epoch_deletes_nothing(tmp_path: Path) -> None
     records vanish from the relay's queue having never reached the server, and
     nothing anywhere records that it happened.
     """
-    port = free_port()
+    port = free_tcp_port()
     relay, durable_queue, _ = make_relay(tmp_path, port)
     fill(durable_queue, 10)
 
@@ -331,7 +320,7 @@ async def test_an_ack_from_another_epoch_deletes_nothing(tmp_path: Path) -> None
 
 async def test_an_ack_for_the_current_epoch_does_delete(tmp_path: Path) -> None:
     """The presence half: the same message with the right epoch works."""
-    port = free_port()
+    port = free_tcp_port()
     relay, durable_queue, _ = make_relay(tmp_path, port)
     fill(durable_queue, 10)
 
@@ -362,7 +351,7 @@ async def test_a_full_intake_queue_counts_drops_and_keeps_receiving(
     datagrams while dropping: blocking intake would lose telemetry it could not
     even count.
     """
-    port = free_port()
+    port = free_tcp_port()
     # One slot, so a burst overruns the hand-off almost immediately.
     relay, durable_queue, config = make_relay(tmp_path, port, intake_queue_size=1)
 
@@ -390,7 +379,7 @@ async def test_a_full_intake_queue_counts_drops_and_keeps_receiving(
 
 async def test_a_quiet_link_reports_no_intake_drops(tmp_path: Path) -> None:
     """The absence half of the pair."""
-    port = free_port()
+    port = free_tcp_port()
     relay, durable_queue, config = make_relay(tmp_path, port)
 
     udp = relay.start_intake()
@@ -415,7 +404,7 @@ async def test_a_quiet_link_reports_no_intake_drops(tmp_path: Path) -> None:
 
 async def test_intake_drops_do_not_break_the_sequence(tmp_path: Path) -> None:
     """Contiguous seq across a drop is why gap cannot describe this loss."""
-    port = free_port()
+    port = free_tcp_port()
     relay, durable_queue, config = make_relay(tmp_path, port, intake_queue_size=1)
 
     udp = relay.start_intake()
@@ -454,7 +443,7 @@ async def test_the_jittered_backoff_never_exceeds_the_documented_cap(
     clamp *fires*. A run where the delay merely happened to land under 10 s
     would prove nothing about the arithmetic that keeps it there.
     """
-    relay, durable_queue, _ = make_relay(tmp_path, free_port())
+    relay, durable_queue, _ = make_relay(tmp_path, free_tcp_port())
 
     # The session is stubbed to fail instantly. Pointing the relay at a closed
     # port would exercise more, but a refused connect costs ~2 s on Windows,

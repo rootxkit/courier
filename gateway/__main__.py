@@ -1,0 +1,170 @@
+"""Run the Gateway: terminate relay-v1, store, convert, publish.
+
+    python -m gateway
+
+Composition only. Every decision this process makes lives in a module with its
+own tests; this file exists to wire them together in the one order that is
+correct, and to fail at startup rather than in flight when something is
+missing.
+
+The order matters and is the same order the data takes:
+
+    RelayServer          terminates relay-v1, stores and acknowledges
+      -> TimescaleIngestStore   archive + index, durable before the ack
+      -> StationPipelines       parse, classify, resolve, assemble
+           -> DroneStateWriter  the hypertable
+           -> TelemetryPublisher  the bus, for the console
+
+Tokens are read from a file, one `station_id: token` per line, because spec
+§12 question 1 - where station tokens live, how they are issued and revoked -
+is still open. This is deliberately the simplest thing that is not a hardcoded
+secret, and it is not the answer.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import contextlib
+import signal
+import sys
+from pathlib import Path
+
+import nats
+from sqlalchemy.ext.asyncio import create_async_engine
+
+from common import configure_logging, get_logger, load_settings
+from gateway.archive import RawArchive
+from gateway.binding import BindingResolver
+from gateway.config import GatewaySettings
+from gateway.ingest_store_pg import TimescaleIngestStore
+from gateway.pipeline import StationPipelines
+from gateway.publisher import TelemetryPublisher
+from gateway.relay_server import RelayServer
+from gateway.state_writer import DroneStateWriter
+
+_log = get_logger(__name__)
+
+DEFAULT_RELAY_PORT = 8081
+
+
+class FileAuthenticator:
+    """Resolves bearer tokens from a file of `station_id: token` lines.
+
+    A placeholder with a known expiry: spec §12 question 1 owns token storage,
+    rotation and revocation. It is a file rather than a constant so that a
+    token is never committed, and it is read once at startup so a rotation
+    means a restart - which is honest about what this is.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._by_token: dict[str, str] = {}
+        for number, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), start=1
+        ):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            station_id, separator, token = stripped.partition(":")
+            if not separator:
+                raise ValueError(
+                    f"{path}:{number}: expected 'station_id: token', got {line!r}"
+                )
+            self._by_token[token.strip()] = station_id.strip()
+        if not self._by_token:
+            raise ValueError(f"{path} defines no tokens")
+
+    async def station_for_token(self, token: str) -> str | None:
+        return self._by_token.get(token)
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="gateway", description=__doc__)
+    parser.add_argument(
+        "--tokens",
+        type=Path,
+        default=Path("gateway.tokens"),
+        help="file of 'station_id: token' lines (default: gateway.tokens)",
+    )
+    parser.add_argument("--host", default="0.0.0.0", help="relay-v1 bind host")
+    parser.add_argument(
+        "--port", type=int, default=DEFAULT_RELAY_PORT, help="relay-v1 bind port"
+    )
+    return parser.parse_args(argv)
+
+
+async def run(args: argparse.Namespace) -> int:
+    settings = load_settings(GatewaySettings)
+    configure_logging(service=settings.service_name, level=settings.log_level.value)
+
+    try:
+        authenticator = FileAuthenticator(args.tokens)
+    except (OSError, ValueError) as error:
+        _log.error("cannot read station tokens", extra={"error": str(error)})
+        return 2
+
+    engine = create_async_engine(str(settings.telemetry_database_url))
+    archive = RawArchive(root=settings.archive_root)
+    store = TimescaleIngestStore(engine=engine, archive=archive)
+
+    bus = await nats.connect(str(settings.nats_url))
+    # One publisher, two producers. The pipeline publishes what it parsed out
+    # of the datagrams; the relay server publishes the health of the link that
+    # carried them. The console needs both, and a station with no aircraft on
+    # it produces only the second.
+    publisher = TelemetryPublisher(bus=bus)
+    pipelines = StationPipelines(
+        resolver=BindingResolver(engine=engine),
+        writer=DroneStateWriter(engine=engine),
+        publisher=publisher,
+    )
+
+    server = RelayServer(
+        store=store,
+        authenticator=authenticator,
+        processor=pipelines,
+        station_reporter=publisher,
+        host=args.host,
+        port=args.port,
+    )
+    await server.start()
+    _log.info(
+        "gateway listening",
+        extra={
+            "relay_url": f"ws://{args.host}:{server.port_in_use}/relay/v1",
+            "archive_root": str(settings.archive_root),
+        },
+    )
+
+    stopping = asyncio.Event()
+
+    def stop() -> None:
+        stopping.set()
+
+    loop = asyncio.get_running_loop()
+    for name in ("SIGINT", "SIGTERM"):
+        with contextlib.suppress(NotImplementedError, AttributeError):
+            # Windows has no add_signal_handler for SIGTERM; KeyboardInterrupt
+            # covers the interactive case there, which is how it is run
+            # locally until P0-08 moves development to WSL2.
+            loop.add_signal_handler(getattr(signal, name), stop)
+
+    try:
+        await stopping.wait()
+    finally:
+        _log.info("gateway stopping")
+        await server.stop()
+        await bus.drain()
+        await engine.dispose()
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    try:
+        return asyncio.run(run(parse_args(argv)))
+    except KeyboardInterrupt:
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
