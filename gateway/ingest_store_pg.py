@@ -45,7 +45,7 @@ than the retention period, which is itself worth an event.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Final
 
@@ -60,6 +60,7 @@ from gateway.archive import ArchiveError, RawArchive, SegmentWrite
 from gateway.ingest_store import StoreError
 from gateway.relay_messages import Gap
 from gateway.relay_records import Record
+from gateway.stage_timing import StageTimings, shared_timings
 from gateway.station_state import LinkState, LossEvent
 
 _log = get_logger(__name__)
@@ -118,6 +119,7 @@ class TimescaleIngestStore:
     engine: AsyncEngine
     archive: RawArchive
     epoch_retention_days: int = 30
+    timings: StageTimings = field(default_factory=shared_timings)
 
     async def resume_from_seq(self, station_id: str, epoch: str) -> int:
         """protocol §5. From durable state, so a restart answers the same."""
@@ -296,7 +298,10 @@ class TimescaleIngestStore:
         # leaves an unindexed segment, which is recoverable by rescanning the
         # tree. The opposite order leaves an index entry for bytes that do not
         # exist, which is not.
-        writes = self.archive.append(station_id, epoch, records)
+        # Synchronous: compression and fsync run on the event loop, so this
+        # stage is also time in which no other connection is served.
+        with self.timings.measure("store.archive"):
+            writes = self.archive.append(station_id, epoch, records)
         try:
             async with self.engine.begin() as connection:
                 await connection.execute(
