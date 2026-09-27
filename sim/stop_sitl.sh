@@ -90,7 +90,15 @@ fi
 # Verify rather than assume. A stop that reports success while a simulator is
 # still running is worse than one that fails loudly, because the next run
 # blames the wrong thing.
-leftover=$(pgrep -f 'bin/arducopter|mavproxy\.py' | wc -l)
+# `|| true` is load-bearing. `pgrep` exits 1 when nothing matches, which here
+# is the success case, and `set -euo pipefail` turned that into a silent exit
+# 1 before anything was printed. So a teardown that had worked perfectly
+# reported failure with no message, and CI read it as a failed stop.
+#
+# The failure path was exercised often and worked; the success path had never
+# run to completion. Same shape as the relay `gap` and the PARAM_VALUE offset:
+# the branch that says "nothing is wrong" was the one nobody had watched.
+leftover=$(pgrep -f 'bin/arducopter|mavproxy\.py' | wc -l) || true
 if (( leftover > 0 )); then
   echo "stop_sitl: WARNING - ${leftover} SITL process(es) still running:" >&2
   pgrep -af 'bin/arducopter|mavproxy\.py' >&2 || true
