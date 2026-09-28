@@ -116,7 +116,7 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
       *Done when:* a second person sets up a ground station from the doc alone,
       and the documented budget is backed by a measurement of the radio port.
 
-- [ ] **P1-02** Gateway ingest: async UDP listener plus the relay-v1 WebSocket
+- [x] **P1-02** Gateway ingest: async UDP listener plus the relay-v1 WebSocket
       endpoint, MAVLink parse, vehicle identification. Handle `HEARTBEAT`,
       `GLOBAL_POSITION_INT`, `SYS_STATUS`, `BATTERY_STATUS`, `GPS_RAW_INT`,
       `VFR_HUD`, `STATUSTEXT`, `EKF_STATUS_REPORT`.
@@ -148,23 +148,55 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
       no non-vehicle endpoint is ever registered as a drone, and a station
       that goes unreachable is never reported as losing data unless a gap or
       a drop counter says so.
+      *Closed* 2026-09-28 on three pieces of evidence:
+      - **11 SITL vehicles at once.** On 2026-09-28 (the P1-13 run),
+        254,315 records were stored with zero intake or cap drops and no
+        conversion or write errors. Drain exceeded intake with a steady
+        baseline.
+      - **No non-vehicle registered.** `test_classify.py` covers this, and
+        `test_binding.py` shows that a ground station never resolves to a
+        drone even when bound.
+      - **Unreachable is not data loss.** `test_station_state.py` and
+        `test_publisher.py` keep the two states separate.
 
-- [ ] **P1-03** Unit conversion at the parser boundary: 1e7 lat/lon scaling,
+      One transient is expected, not a fault: each aircraft is logged once as
+      unclaimed at startup, before its first HEARTBEAT.
+
+- [x] **P1-03** Unit conversion at the parser boundary: 1e7 lat/lon scaling,
       mm→m altitude, cm/s→m/s velocity. Both AGL and AMSL preserved separately.
       *Done when:* property tests confirm round-trip accuracy and no field is
       stored in raw MAVLink units.
+      *Closed* 2026-09-28. `test_conversion_roundtrip.py` sends every
+      `GLOBAL_POSITION_INT` field across its whole wire range (the extremes
+      plus 400 seeded draws each) through a real pymavlink frame and the
+      ingest pipeline into a row. It then recovers the exact wire integer
+      using factors defined independently of `gateway/units.py`. A paired test
+      shows no row field equals its raw value.
+      Battery, GPS and VFR fields are covered by the example tests in
+      `test_conversion.py`, not by property tests.
 
 - [ ] **P1-04** TimescaleDB writer: batched inserts (flush on 100 rows or 500 ms),
       hypertable with 7-day chunks, 90-day retention policy.
       *Done when:* 10 drones at 4 Hz sustain writes with insert latency p99
       under 50 ms.
+      *Status 2026-09-28:* the hypertable, the 7-day chunks and the retention
+      policy exist (migration 0004). Missing:
+      - The flush policy (100 rows or 500 ms). Rows are written once per
+        relay batch instead.
+      - A p99 measurement. The stage timings give totals, not percentiles.
+        At 11 SITL sources the *average* `process.write` was ~8 ms per batch.
 
 - [ ] **P1-05** Redis live state: `drone:{id}:state` with 15 s TTL. Expiry is
       the definition of "link lost".
       *Done when:* killing a SITL instance flips its status within 20 s.
+      *Status 2026-09-28:* not started. Only `REDIS_URL` exists in config.
 
-- [ ] **P1-06** NATS publication: `telemetry.{drone_id}`, `events.{type}`.
+- [x] **P1-06** NATS publication: `telemetry.{drone_id}`, `events.{type}`.
       *Done when:* a test subscriber receives every position update.
+      *Closed* 2026-09-28. `test_publisher_nats.py` drives 1,000 position
+      updates through the pipeline into a real NATS broker. A separate
+      subscriber receives exactly 1,000, in order, with none duplicated. A
+      paired test shows a HEARTBEAT alone publishes nothing.
 
 - [x] **P1-07** Gateway authentication: **per-station bearer token** on the
       relay-v1 upgrade request, plus a server-side policy check binding
