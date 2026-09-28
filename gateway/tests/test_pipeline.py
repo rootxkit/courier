@@ -115,13 +115,18 @@ class FakePublisher:
     def __init__(self) -> None:
         self.rows: list[DroneStateRow] = []
         self.labels: dict[UUID, str] = {}
+        self.links: dict[UUID, dict[str, Any]] = {}
         self.unclaimed: list[SourceId] = []
 
     async def publish_rows(
-        self, rows: list[DroneStateRow], labels: dict[UUID, str] | None = None
+        self,
+        rows: list[DroneStateRow],
+        labels: dict[UUID, str] | None = None,
+        links: dict[UUID, dict[str, Any]] | None = None,
     ) -> None:
         self.rows.extend(rows)
         self.labels = labels or {}
+        self.links = links or {}
 
     async def publish_unclaimed(
         self, station_id: str, resolution: Resolution, source_id: SourceId
