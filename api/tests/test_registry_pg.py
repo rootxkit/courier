@@ -160,7 +160,7 @@ async def test_the_projection_carries_the_label(
 ) -> None:
     drone = await a_drone(client)
     async with engine.connect() as connection:
-        label = (
+        label: str = (
             await connection.execute(
                 sa.text("SELECT label FROM known_drones WHERE drone_id = :d"),
                 {"d": drone["id"]},
@@ -197,7 +197,7 @@ async def test_retiring_closes_bindings_and_marks_the_projection(
     assert response.status_code == 200
     assert response.json()["retired_at"] is not None
     async with engine.connect() as connection:
-        open_bindings = (
+        open_bindings: int = (
             await connection.execute(
                 sa.text(
                     "SELECT count(*) FROM source_bindings "
@@ -206,7 +206,7 @@ async def test_retiring_closes_bindings_and_marks_the_projection(
                 {"d": drone["id"]},
             )
         ).scalar_one()
-        retired = (
+        retired: datetime | None = (
             await connection.execute(
                 sa.text("SELECT retired_at FROM known_drones WHERE drone_id = :d"),
                 {"d": drone["id"]},
@@ -393,7 +393,7 @@ async def test_the_audit_log_refuses_to_be_edited(
                 await connection.execute(sa.text(statement))
 
     async with relational_engine.connect() as connection:
-        forged = (
+        forged: int = (
             await connection.execute(
                 sa.text("SELECT count(*) FROM events WHERE event_type = 'forged'")
             )
