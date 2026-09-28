@@ -138,6 +138,9 @@
           battery: "battery",
           heading: "heading",
           age: "last seen",
+          loss: "loss",
+          hb_gap: "heartbeat gap",
+          s: "s",
           seconds: "s ago",
           healthy: "healthy",
           radio_silent: "radio silent — station has lost the aircraft",
@@ -169,6 +172,9 @@
           battery: "ბატარეა",
           heading: "კურსი",
           age: "ბოლო სიგნალი",
+          loss: "დანაკარგი",
+          hb_gap: "heartbeat-ის შეფერხება",
+          s: "წმ",
           seconds: "წმ წინ",
           healthy: "მუშაობს",
           radio_silent: "რადიო დუმს — სადგურმა დაკარგა აპარატი",
@@ -328,11 +334,25 @@
           const label = entry.data.label
             ? escapeHtml(entry.data.label)
             : `<span class="muted">${t("unnamed")}</span>`;
+          // P1-09. Loss over the last window, and the longest heartbeat gap.
+          // A dash when not measured: an absent number must not read as a
+          // perfect link.
+          const link = entry.data.link;
+          const loss =
+            !link || link.loss_pct === null || link.loss_pct === undefined
+              ? "—"
+              : `${link.loss_pct.toFixed(1)}%`;
+          const gap =
+            !link || link.heartbeat_gap_max_s === null ||
+            link.heartbeat_gap_max_s === undefined
+              ? "—"
+              : `${link.heartbeat_gap_max_s.toFixed(1)}${t("s")}`;
           return (
             `<div class="row"><span>${label} ` +
             `<span class="muted mono">${id.slice(0, 8)}</span></span>` +
             `<span class="muted">${t("battery")} ${battery} · ` +
-            `${t("heading")} ${heading} · ${age}${t("seconds")}${unplaced}</span></div>`
+            `${t("heading")} ${heading} · ${t("loss")} ${loss} · ` +
+            `${t("hb_gap")} ${gap} · ${age}${t("seconds")}${unplaced}</span></div>`
           );
         });
         dronesPanel.innerHTML =

@@ -35,6 +35,7 @@ from gateway.drone_state import (
     StateAssembler,
     timestamp_from_recv_utc_ns,
 )
+from gateway.link_quality import LinkQualityTracker
 from gateway.live_state import LiveState
 from gateway.parsing import ParsedMessage, SourceId, parse_datagram
 from gateway.publisher import TelemetryPublisher
@@ -86,6 +87,8 @@ class IngestPipeline:
     # becomes something operators filter out.
     _announced_unclaimed: set[SourceId] = field(default_factory=set, init=False)
     _bad_frames: int = field(default=0, init=False)
+    # P1-09, per source like the accumulator: this station's view of the link.
+    _links: dict[SourceId, LinkQualityTracker] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
         self.registry = SourceRegistry(station_id=self.station_id)
@@ -132,7 +135,11 @@ class IngestPipeline:
             return []
 
         rows: list[DroneStateRow] = []
+        # Which address each drone was seen on in this batch, for its link.
+        sources_by_drone: dict[UUID, SourceId] = {}
         for item, resolution in zip(observed, resolutions, strict=True):
+            if resolution.drone_id is not None:
+                sources_by_drone[resolution.drone_id] = item.source.source_id
             try:
                 row = await self._assemble(epoch, item, resolution)
             except Exception as error:
@@ -157,7 +164,11 @@ class IngestPipeline:
                 with self.timings.measure("process.labels"):
                     labels = await self._labels(rows)
                 with self.timings.measure("process.publish"):
-                    await self.publisher.publish_rows(rows, labels)
+                    links = {
+                        drone_id: self._links[source_id].snapshot().as_dict()
+                        for drone_id, source_id in sources_by_drone.items()
+                    }
+                    await self.publisher.publish_rows(rows, labels, links)
             except Exception as error:
                 _log.error(
                     "could not write drone_state",
@@ -196,6 +207,12 @@ class IngestPipeline:
             )
             return {}
 
+    def _link(self, source_id: SourceId) -> LinkQualityTracker:
+        tracker = self._links.get(source_id)
+        if tracker is None:
+            tracker = self._links[source_id] = LinkQualityTracker()
+        return tracker
+
     def _observe(self, epoch: str, records: list[Record]) -> list[_Observed]:
         """Parse and classify every message, in order, with its capture time."""
         observed: list[_Observed] = []
@@ -211,6 +228,7 @@ class IngestPipeline:
                 ts = timestamp_from_recv_utc_ns(record.recv_utc_ns)
                 for message in parsed.messages:
                     source = self.registry.observe(message)
+                    self._link(source.source_id).observe(message, ts)
                     observed.append(_Observed(record.seq, ts, message, source))
             except Exception as error:
                 _log.error(

@@ -74,7 +74,11 @@ def event_subject(event_type: str) -> str:
     return f"{EVENTS_SUBJECT}.{event_type}"
 
 
-def encode_row(row: DroneStateRow, label: str | None = None) -> dict[str, Any]:
+def encode_row(
+    row: DroneStateRow,
+    label: str | None = None,
+    link: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """A drone_state row as the console reads it.
 
     Field names match the database columns exactly, including
@@ -91,6 +95,10 @@ def encode_row(row: DroneStateRow, label: str | None = None) -> dict[str, Any]:
         # so that the console stays a pure subscriber and a browser attaching
         # late is served entirely from the snapshot.
         "label": label,
+        # P1-09: loss and heartbeat gaps over the last window, for the station
+        # that delivered this row. None when not tracked, never zero: zero loss
+        # is a measurement, and an absent one must not look like a good link.
+        "link": link,
         "ts": row.ts.isoformat(),
         "station_id": row.station_id,
         "lat_deg": row.lat_deg,
@@ -167,15 +175,26 @@ class TelemetryPublisher:
 
     bus: Bus
 
-    async def publish_row(self, row: DroneStateRow, label: str | None = None) -> None:
-        await self._send(telemetry_subject(row.drone_id), encode_row(row, label))
+    async def publish_row(
+        self,
+        row: DroneStateRow,
+        label: str | None = None,
+        link: dict[str, Any] | None = None,
+    ) -> None:
+        await self._send(telemetry_subject(row.drone_id), encode_row(row, label, link))
 
     async def publish_rows(
-        self, rows: list[DroneStateRow], labels: dict[UUID, str] | None = None
+        self,
+        rows: list[DroneStateRow],
+        labels: dict[UUID, str] | None = None,
+        links: dict[UUID, dict[str, Any]] | None = None,
     ) -> None:
         labels = labels or {}
+        links = links or {}
         for row in rows:
-            await self.publish_row(row, labels.get(row.drone_id))
+            await self.publish_row(
+                row, labels.get(row.drone_id), links.get(row.drone_id)
+            )
 
     async def publish_station(
         self,
