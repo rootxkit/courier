@@ -148,6 +148,12 @@ class Sample:
     alt_amsl_m: float | None = None
     alt_above_home_m: float | None = None
     heading_deg: float | None = None
+    # Ground velocity north, east, down (down positive, as MAVLink sends it).
+    # What the airspace monitor's CPA is computed from, so a replay can show
+    # why an alert was raised or cleared.
+    vx_ms: float | None = None
+    vy_ms: float | None = None
+    vz_ms: float | None = None
     groundspeed_ms: float | None = None
     climb_ms: float | None = None
     batt_pct: float | None = None
@@ -167,6 +173,9 @@ class Sample:
             "alt_amsl_m": self.alt_amsl_m,
             "alt_above_home_m": self.alt_above_home_m,
             "heading_deg": self.heading_deg,
+            "vx_ms": self.vx_ms,
+            "vy_ms": self.vy_ms,
+            "vz_ms": self.vz_ms,
             "groundspeed_ms": self.groundspeed_ms,
             "climb_ms": self.climb_ms,
             "batt_pct": self.batt_pct,
@@ -467,7 +476,8 @@ def _from_ns(value: int | None) -> datetime | None:
 _SAMPLES = sa.text(
     """
     SELECT ts, station_id, ST_Y(geom) AS lat_deg, ST_X(geom) AS lon_deg,
-           alt_amsl_m, alt_above_home_m, heading_deg, groundspeed_ms, climb_ms,
+           alt_amsl_m, alt_above_home_m, heading_deg, vx_ms, vy_ms, vz_ms,
+           groundspeed_ms, climb_ms,
            batt_pct, mode, armed
     FROM drone_state
     WHERE drone_id = :drone_id AND ts >= :start AND ts <= :end
@@ -691,6 +701,9 @@ class ReplayStore:
                 alt_amsl_m=row.alt_amsl_m,
                 alt_above_home_m=row.alt_above_home_m,
                 heading_deg=row.heading_deg,
+                vx_ms=row.vx_ms,
+                vy_ms=row.vy_ms,
+                vz_ms=row.vz_ms,
                 groundspeed_ms=row.groundspeed_ms,
                 climb_ms=row.climb_ms,
                 batt_pct=row.batt_pct,

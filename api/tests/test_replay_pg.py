@@ -108,9 +108,10 @@ async def add_samples(
             await connection.execute(
                 sa.text(
                     "INSERT INTO drone_state (drone_id, ts, station_id, geom, "
-                    " alt_amsl_m, alt_above_home_m, armed, mode) VALUES "
+                    " alt_amsl_m, alt_above_home_m, vx_ms, vy_ms, vz_ms, armed, "
+                    " mode) VALUES "
                     "(:d, :ts, :station, ST_SetSRID(ST_MakePoint(:lon, :lat), 4326), "
-                    " 520.0, 30.0, :armed, 'AUTO')"
+                    " 520.0, 30.0, 1.5, -0.5, -2.0, :armed, 'AUTO')"
                 ),
                 {
                     "d": drone_id,
@@ -275,6 +276,11 @@ async def test_a_flight_is_replayed_with_its_holes_and_their_causes(
     body = await get_replay(client, drone_id, -5, 35)
 
     assert body["label"] == "R-1"
+    # Velocity comes through with its sign: down is positive, so this climbs.
+    first = body["samples"][0]
+    assert (first["vx_ms"], first["vy_ms"], first["vz_ms"]) == (1.5, -0.5, -2.0)
+    assert first["alt_amsl_m"] == 520.0
+    assert first["alt_above_home_m"] == 30.0
     assert body["stations"] == [station]
     assert len(body["samples"]) == 21 + 21
     holes = body["holes"]
