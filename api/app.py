@@ -270,6 +270,11 @@ def _add_replay_routes(app: FastAPI, replay: ReplayStore) -> None:
     async def replay_page() -> str:
         return (STATIC / "replay.html").read_text(encoding="utf-8")
 
+    @app.get("/replay/drones")
+    async def replay_drones() -> list[dict[str, Any]]:
+        """Every aircraft with telemetry that can be replayed, retired or not."""
+        return await replay.drones()
+
     @app.get("/replay/drones/{drone_id}/flights")
     async def flights(
         drone_id: UUID,

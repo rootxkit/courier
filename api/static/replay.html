@@ -229,6 +229,7 @@
           unknown: "unknown",
           no_basemap: "no base map installed — run infra/basemap/fetch_basemap.sh",
           unnamed: "unnamed",
+          retired: "retired",
         },
         ka: {
           replay: "ფრენის ჩანაწერი",
@@ -293,6 +294,7 @@
           unknown: "უცნობია",
           no_basemap: "საბაზისო რუკა არ არის დაყენებული — გაუშვით infra/basemap/fetch_basemap.sh",
           unnamed: "უსახელო",
+          retired: "ამოღებულია",
         },
       };
 
@@ -504,13 +506,19 @@
       const droneSelect = document.getElementById("drone");
 
       async function loadDrones() {
-        const response = await fetch("/drones?include_retired=true");
+        // The telemetry registry: every aircraft with a record to replay,
+        // including ones never registered in the business registry.
+        const response = await fetch("/replay/drones");
         drones = response.ok ? await response.json() : [];
         droneSelect.innerHTML = drones
-          .map((d) => `<option value="${escapeHtml(d.id)}">${escapeHtml(d.label || t("unnamed"))}</option>`)
+          .map(
+            (d) =>
+              `<option value="${escapeHtml(d.drone_id)}">${escapeHtml(d.label || t("unnamed"))}` +
+              `${d.retired ? ` (${escapeHtml(t("retired"))})` : ""}</option>`,
+          )
           .join("");
         const wanted = new URLSearchParams(location.search).get("drone");
-        if (wanted && drones.some((d) => d.id === wanted)) droneSelect.value = wanted;
+        if (wanted && drones.some((d) => d.drone_id === wanted)) droneSelect.value = wanted;
         await loadFlights();
       }
       droneSelect.addEventListener("change", loadFlights);

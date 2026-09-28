@@ -407,6 +407,23 @@ async def test_alerts_are_unavailable_not_empty_without_the_audit_log(
     assert body["alerts_error"]
 
 
+async def test_every_aircraft_in_the_telemetry_registry_is_listed(
+    client: AsyncClient, engine: AsyncEngine
+) -> None:
+    """Including one the business registry never heard of: it still flew."""
+    drone_id = await add_drone(engine, "R-11")
+
+    response = await client.get("/replay/drones")
+
+    assert response.status_code == 200
+    listed = {d["drone_id"]: d for d in response.json()}
+    assert listed[str(drone_id)] == {
+        "drone_id": str(drone_id),
+        "label": "R-11",
+        "retired": False,
+    }
+
+
 # --- flights ---------------------------------------------------------------------
 
 

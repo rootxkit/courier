@@ -478,6 +478,15 @@ _SAMPLES = sa.text(
 
 _LABEL = sa.text("SELECT label FROM known_drones WHERE drone_id = :drone_id")
 
+# Every aircraft whose telemetry can be resolved, retired or not. The
+# telemetry registry, not the business one: an aircraft registered only
+# there (SITL fleets, P1-13) still flew, and still has a record to replay.
+_DRONES = sa.text(
+    """
+    SELECT drone_id, label, retired_at FROM known_drones ORDER BY label, drone_id
+    """
+)
+
 # Gaps are filtered by when they were recorded, from the window's start: a gap
 # cannot be recorded before it happened, but a backlog can report one long
 # after, so there is no upper bound here and the window is applied to the
@@ -568,6 +577,18 @@ class ReplayStore:
     evidence_slack_s: float
     flight_split_s: float
     max_samples: int
+
+    async def drones(self) -> list[dict[str, Any]]:
+        async with self.telemetry.connect() as connection:
+            rows = (await connection.execute(_DRONES)).all()
+        return [
+            {
+                "drone_id": str(row.drone_id),
+                "label": row.label,
+                "retired": row.retired_at is not None,
+            }
+            for row in rows
+        ]
 
     async def label(self, drone_id: UUID) -> str:
         async with self.telemetry.connect() as connection:
