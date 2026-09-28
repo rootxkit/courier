@@ -362,7 +362,7 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
       runs 1,353 times for 254,315 records. Batch time is now spread across
       stages: store 41%, resolve 36%, write 11%. See ADR-002, "After P1-13".
 
-- [ ] **P1-14** A `lagging` station state: the backlog is not clearing.
+- [x] **P1-14** A `lagging` station state: the backlog is not clearing.
       Proposed in ADR-002. Today a station whose backlog grows looks healthy -
       buffering is correct, nothing is lost, the Gateway is up - and the
       console shows an ever-older fleet. Enter `lagging` when the age of the
@@ -374,6 +374,15 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
       *Done when:* a test drives a station into `lagging` and back out, and the
       state reaches the console. Blocked on the ADR-002 ruling for the
       threshold.
+      *Closed* 2026-09-28. Threshold ruled as the Gateway's link timeout
+      (15 s by default): past that age a record can no longer make a drone
+      live, so it is when every aircraft on the station starts to read as
+      link lost. "Rising" is depth above its value five `status` messages
+      earlier. A relay-v1 session over a real socket goes `healthy` ->
+      `lagging` -> `healthy` and each is published with `lag_s`; the same old
+      record with a steady queue never lags. The console shows the state and
+      how far behind. Not yet produced by a live overloaded Gateway.
+      ADR-002's N >= 5 is still unruled and is not needed by this state.
 
 ---
 

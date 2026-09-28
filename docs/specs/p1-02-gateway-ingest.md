@@ -352,10 +352,16 @@ So the Gateway must publish at least these distinct states:
 | `radio_silent` | status arriving, `last_datagram_age_ms` rising | **yes, upstream** — the station has lost the aircraft |
 | `unreachable` | no status for >3 s | **no** — almost certainly buffering; the record completes on reconnect |
 | `data_lost` | a `gap`, an intake-drop delta, or a `uptime_s` reset | **yes** — and the extent is known |
+| `lagging` (P1-14) | status arriving, newest stored record older than the link timeout, and `queue_depth` higher than five `status` messages ago | **no** — the backlog is safe at the station; the map is behind by `lag_s` |
 
 **`unreachable` is not `data_lost`.** Only a reported `gap`, a
 `dropped_intake_total` delta, or a `uptime_s` going backwards means telemetry
 is actually gone. Everything else is a tracking outage that resolves itself.
+
+`lagging` needs both conditions. An old record alone may be a station clock
+that is wrong (relay-v1 §9); a growing queue alone is the normal moment after
+a reconnect. Precedence: `data_lost`, `unreachable`, `radio_silent`, `lagging`,
+`healthy`.
 
 `radio_silent` and `unreachable` are different failure domains
 (`ARCHITECTURE.md` §3) and must never be presented identically: the first means

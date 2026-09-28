@@ -132,6 +132,7 @@ def encode_station(
     last_datagram_age_ms: int | None,
     queue_depth: int | None,
     losses: list[LossEvent],
+    lag_s: float | None = None,
 ) -> dict[str, Any]:
     """Station link state, with the §9 distinction made explicit.
 
@@ -145,9 +146,14 @@ def encode_station(
         "state": state.value,
         # The console renders this sentence; it does not compose its own.
         "data_is_lost": state is LinkState.DATA_LOST,
-        "buffering": state is LinkState.UNREACHABLE,
+        # P1-14: a lagging station is buffering too. Its backlog is safe at
+        # the station; it is arriving more slowly than it is produced.
+        "buffering": state in (LinkState.UNREACHABLE, LinkState.LAGGING),
         "last_datagram_age_ms": last_datagram_age_ms,
         "queue_depth": queue_depth,
+        # How old the newest stored record is, in seconds. None before
+        # anything is stored. Rounded: it is read by a person.
+        "lag_s": None if lag_s is None else round(lag_s, 1),
         "losses": [
             {
                 "kind": loss.kind.value,
@@ -216,6 +222,7 @@ class TelemetryPublisher:
         last_datagram_age_ms: int | None = None,
         queue_depth: int | None = None,
         losses: list[LossEvent] | None = None,
+        lag_s: float | None = None,
     ) -> None:
         await self._send(
             station_subject(station_id),
@@ -225,6 +232,7 @@ class TelemetryPublisher:
                 last_datagram_age_ms=last_datagram_age_ms,
                 queue_depth=queue_depth,
                 losses=losses or [],
+                lag_s=lag_s,
             ),
         )
 

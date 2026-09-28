@@ -16,6 +16,12 @@ The separation this module exists to preserve:
                     everything this system controls.
     data_lost    -> a `gap`, a `dropped_intake_total` delta, or `uptime_s`
                     going backwards. Only these mean telemetry is gone.
+    lagging      -> P1-14. The Gateway is storing this station's records
+                    more slowly than they arrive: the newest stored record is
+                    older than a threshold AND the relay's queue is growing.
+                    NOT data loss - the backlog is safe at the station - but
+                    the map is showing the past, and without this state it
+                    would look healthy while doing so.
 
 There is a window where the Gateway and the relay disagree. The Gateway calls a
 station unreachable after about 3 s; the relay does not give up on a half-open
@@ -35,6 +41,7 @@ declare itself healthy.
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Final
@@ -49,6 +56,7 @@ class LinkState(StrEnum):
     RADIO_SILENT = "radio_silent"
     UNREACHABLE = "unreachable"
     DATA_LOST = "data_lost"
+    LAGGING = "lagging"
 
 
 class LossKind(StrEnum):
@@ -100,12 +108,27 @@ class StationLinkTracker:
     # permanent; this only governs how long it dominates the state field,
     # after which the link state resumes and the loss remains in `losses`.
     loss_holds_state_for_s: float = 60.0
+    # P1-14. How old the newest stored record may be before the station
+    # counts as lagging. The Gateway passes its link timeout: past that age a
+    # record can no longer make a drone live (P1-05), so that is exactly when
+    # every aircraft on the station starts to read as link lost, and the
+    # console needs to say why.
+    lagging_after_s: float = 15.0
+    # P1-14. The queue counts as growing when its depth now exceeds its depth
+    # this many `status` messages ago. Over several seconds rather than one,
+    # because depth moves in steps of a batch and a single comparison would
+    # call every other second a trend.
+    depth_trend_statuses: int = 5
 
     last_status_at_s: float | None = field(default=None, init=False)
     last_status: Status | None = field(default=None, init=False)
     losses: list[LossEvent] = field(default_factory=list, init=False)
     last_loss_at_s: float | None = field(default=None, init=False)
     ignored_message_count: int = field(default=0, init=False)
+    # P1-14. `recv_utc_ns` of the newest record stored for this station, on
+    # the station's clock.
+    newest_stored_utc_ns: int | None = field(default=None, init=False)
+    _depths: deque[int] = field(default_factory=deque, init=False)
 
     def observe_status(self, status: Status, *, now_s: float) -> list[LossEvent]:
         """Record a `status` and return any loss it reveals.
@@ -125,6 +148,9 @@ class StationLinkTracker:
 
         self.last_status = status
         self.last_status_at_s = now_s
+        self._depths.append(status.queue_depth)
+        while len(self._depths) > self.depth_trend_statuses + 1:
+            self._depths.popleft()
         for loss in found:
             self._record(loss, now_s=now_s)
         return found
@@ -141,6 +167,40 @@ class StationLinkTracker:
         self._record(loss, now_s=now_s)
         return loss
 
+    def observe_stored(self, newest_recv_utc_ns: int) -> None:
+        """Record that records up to this capture time are durably stored."""
+        if (
+            self.newest_stored_utc_ns is None
+            or newest_recv_utc_ns > self.newest_stored_utc_ns
+        ):
+            self.newest_stored_utc_ns = newest_recv_utc_ns
+
+    def start_session(self) -> None:
+        """Forget the depth trend of a previous connection.
+
+        Depth on either side of a reconnect is not a trend: the queue grew
+        because nothing was being sent, which `unreachable` already said.
+        """
+        self._depths.clear()
+
+    def lag_s(self, *, now_utc_ns: int) -> float | None:
+        """How far behind this station the stored record is, in seconds.
+
+        `now_utc_ns` is the Gateway's clock and `recv_utc_ns` the station's,
+        so a station clock that is wrong shifts this by its error (relay-v1
+        §9). That is why lag alone never makes a station `lagging`: the queue
+        must be growing too, which is measured entirely on the station's side
+        and needs no clock agreement.
+        """
+        if self.newest_stored_utc_ns is None:
+            return None
+        return (now_utc_ns - self.newest_stored_utc_ns) / 1e9
+
+    @property
+    def queue_growing(self) -> bool:
+        depths = self._depths
+        return len(depths) > self.depth_trend_statuses and depths[-1] > depths[0]
+
     def observe_ignored_message(self) -> None:
         """Count a control message this Gateway does not understand.
 
@@ -149,12 +209,13 @@ class StationLinkTracker:
         """
         self.ignored_message_count += 1
 
-    def state(self, *, now_s: float) -> LinkState:
+    def state(self, *, now_s: float, now_utc_ns: int | None = None) -> LinkState:
         """The state to publish, given the time now.
 
         Takes the time rather than reading a clock so that "no status for 3 s"
         is a decision about elapsed time, not about when this happens to be
-        called.
+        called. `now_utc_ns` is needed only to judge `lagging`; without it
+        that state is not considered.
         """
         if (
             self.last_loss_at_s is not None
@@ -180,6 +241,13 @@ class StationLinkTracker:
             and status.last_datagram_age_ms >= self.radio_silent_after_ms
         ):
             return LinkState.RADIO_SILENT
+
+        # After `radio_silent`, which is a flight-safety event on the station's
+        # side; this one is a capacity problem on ours.
+        if now_utc_ns is not None and self.queue_growing:
+            lag = self.lag_s(now_utc_ns=now_utc_ns)
+            if lag is not None and lag > self.lagging_after_s:
+                return LinkState.LAGGING
 
         # `last_datagram_age_ms` is None when no datagram has ever arrived.
         # That is a station whose radio has told it nothing yet, which is the

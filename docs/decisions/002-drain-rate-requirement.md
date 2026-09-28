@@ -205,3 +205,12 @@ python -m agent --config local/capacity/relay.toml    # gateway_url -> the proxy
 
 Start the harness before the relay, because the relay must connect to the
 harness's proxy.
+
+## Ruling on the `lagging` threshold (2026-09-28)
+
+The threshold is the Gateway's link timeout (`LINK_TIMEOUT_S`, 15 s by
+default), not a separate number. Past that age a stored record can no longer
+make a drone live (P1-05), so that is the moment the whole station's fleet
+starts to read as link lost; `lagging` is what tells the pilot why. Implemented
+in P1-14. The requirement N >= 5 above remains a proposal awaiting a ruling.
+

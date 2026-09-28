@@ -28,6 +28,7 @@
         --healthy: #2e7d32;
         --radio-silent: #ed6c02;
         --unreachable: #0288d1;
+        --lagging: #ef6c00;
         --data-lost: #c62828;
         --unclaimed: #6a1b9a;
       }
@@ -74,6 +75,7 @@
       .healthy { background: var(--healthy); }
       .radio_silent { background: var(--radio-silent); }
       .unreachable { background: var(--unreachable); }
+      .lagging { background: var(--lagging); }
       .data_lost { background: var(--data-lost); }
       .unclaimed { background: var(--unclaimed); }
       .unplaced { background: #616161; }
@@ -150,6 +152,10 @@
           // Deliberately says what is NOT happening. Spec §9: the relay is
           // alive and buffering, and nothing has been lost.
           unreachable: "unreachable — data buffered at the station",
+          // P1-14. Says what is NOT happening, like `unreachable`: the backlog
+          // is safe at the station, the map is behind.
+          lagging: "lagging — map is behind, nothing lost",
+          behind: "behind",
           data_lost: "data lost",
           no_binding: "transmitting, no binding — register to track",
           // P1-07. Deliberately not "register to track": the address is bound
@@ -184,6 +190,8 @@
           healthy: "მუშაობს",
           radio_silent: "რადიო დუმს — სადგურმა დაკარგა აპარატი",
           unreachable: "მიუწვდომელია — მონაცემები ინახება სადგურზე",
+          lagging: "ჩამორჩება — რუკა ძველია, არაფერი იკარგება",
+          behind: "ჩამორჩენა",
           data_lost: "მონაცემები დაკარგულია",
           no_binding: "გადასცემს, მაგრამ არ არის მიბმული",
           not_assigned: "მიბმულია სხვა სადგურზე — აქ უარყოფილია",
@@ -380,8 +388,14 @@
           // from telemetry having stopped. That inference is exactly what
           // would render a buffering station as data loss.
           const label = t(s.state);
+          // P1-14. How far behind, only while lagging: in any other state a
+          // number here would read as a problem nobody needs to act on.
+          const behind =
+            s.state === "lagging" && typeof s.lag_s === "number"
+              ? ` <span class="muted">${t("behind")} ${Math.round(s.lag_s)}${t("s")}</span>`
+              : "";
           return (
-            `<div class="row"><span>${s.station_id}</span>` +
+            `<div class="row"><span>${s.station_id}${behind}</span>` +
             `<span class="pill ${s.state}">${label}</span></div>`
           );
         });
