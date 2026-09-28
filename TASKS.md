@@ -249,9 +249,20 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
       country outlines, so at city zoom there is nothing to draw. Choosing a
       tile provider is its own decision, with licensing attached; see P6-01.
 
-- [ ] **P1-09** Link-quality tracking: packet loss, round-trip latency,
+- [x] **P1-09** Link-quality tracking: packet loss, round-trip latency,
       heartbeat gaps per vehicle.
       *Done when:* the metric degrades measurably under simulated packet loss.
+      *Closed* 2026-09-28, for packet loss and heartbeat gaps. Both are
+      measured per vehicle, over a 10 s window, published with every
+      telemetry message and shown on the map.
+      11 SITL aircraft were run through a forwarder that first dropped
+      nothing, then 20.07% of datagrams. Measured loss (median of 11):
+      - clean phase: 0.0%;
+      - lossy phase: 20.16%.
+      The longest heartbeat gap rose from 1.05 s to 3.98 s. See
+      `docs/runbooks/p1-09-link-quality.md`.
+      *Round-trip latency is moved to P3B-02.* It needs something sent and
+      answered, and Stage 0 sends nothing.
 
 - [x] **P1-10** Ingest capacity: measure intake and drain separately, find the
       bottleneck, and turn relay-v1 §10 into measured numbers.
@@ -474,6 +485,8 @@ the bottleneck — not before.
 - [ ] **P3B-02** Bidirectional Gateway: per-vehicle command queue, send + await
       ACK, 3 retries with backoff, terminal failure as an alert. Never a silent
       success.
+      Also measures round-trip latency per vehicle, moved here from P1-09:
+      the first point at which the Gateway sends anything to time.
 - [ ] **P3B-03** Idempotency keys on every command; duplicate submission is a
       no-op.
 - [ ] **P3B-04** Mission upload via the MAVLink mission protocol with read-back
