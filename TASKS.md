@@ -175,16 +175,21 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
       Battery, GPS and VFR fields are covered by the example tests in
       `test_conversion.py`, not by property tests.
 
-- [ ] **P1-04** TimescaleDB writer: batched inserts (flush on 100 rows or 500 ms),
+- [x] **P1-04** TimescaleDB writer: batched inserts (flush on 100 rows or 500 ms),
       hypertable with 7-day chunks, 90-day retention policy.
       *Done when:* 10 drones at 4 Hz sustain writes with insert latency p99
       under 50 ms.
-      *Status 2026-09-28:* the hypertable, the 7-day chunks and the retention
-      policy exist (migration 0004). Missing:
-      - The flush policy (100 rows or 500 ms). Rows are written once per
-        relay batch instead.
-      - A p99 measurement. The stage timings give totals, not percentiles.
-        At 11 SITL sources the *average* `process.write` was ~8 ms per batch.
+      *Closed* 2026-09-28. `BufferedStateWriter` inserts on 100 rows or
+      500 ms, whichever comes first (`STATE_FLUSH_ROWS`,
+      `STATE_FLUSH_INTERVAL_S`). The hypertable, 7-day chunks and retention
+      were already in migration 0004.
+      Measured with 11 bound SITL aircraft at 4 Hz for 180 s (the criterion is
+      10):
+      - 331 inserts of ~24 rows each, 44 rows/s;
+      - insert latency **p99 19.1 ms**, p50 11.1 ms, one outlier at 100.7 ms;
+      - no errors.
+      Every insert is timed and logged, so the p99 is computed over the whole
+      run, not per window.
 
 - [x] **P1-05** Redis live state: `drone:{id}:state` with 15 s TTL. Expiry is
       the definition of "link lost".

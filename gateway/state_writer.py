@@ -1,9 +1,9 @@
 """Writing `drone_state` rows into the TimescaleDB hypertable.
 
-P1-04 owns the batching policy - flush on 100 rows or 500 ms, to sustain ten
-drones at 4 Hz under a p99 insert latency of 50 ms. This module owns the write
-itself and takes the batch it is given, so the policy can be tuned without
-touching the SQL.
+P1-04's batching policy - flush on 100 rows or 500 ms, to sustain ten drones
+at 4 Hz under a p99 insert latency of 50 ms - is `gateway/state_buffer.py`,
+kept apart so the policy can be tuned without touching the SQL, and so this
+module stays what the database-backed coverage gate measures.
 
 **This is not on the acknowledgement path.** relay-v1 §7's ack promises the
 *datagram* is durable, and that promise is kept by the archive and the ingest

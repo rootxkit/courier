@@ -43,6 +43,7 @@ from gateway.live_state import LiveState
 from gateway.pipeline import StationPipelines
 from gateway.publisher import TelemetryPublisher
 from gateway.relay_server import RelayServer
+from gateway.state_buffer import BufferedStateWriter
 from gateway.state_writer import DroneStateWriter
 
 _log = get_logger(__name__)
@@ -118,9 +119,14 @@ async def run(args: argparse.Namespace) -> int:
     # P1-05. Expiry is the definition of link lost, so the TTL is the same
     # setting that defines link loss everywhere else.
     redis_client = redis.asyncio.from_url(str(settings.redis_url))
+    state_writer = BufferedStateWriter(
+        inner=DroneStateWriter(engine=engine),
+        flush_rows=settings.state_flush_rows,
+        flush_interval_s=settings.state_flush_interval_s,
+    )
     pipelines = StationPipelines(
         resolver=BindingResolver(engine=engine),
-        writer=DroneStateWriter(engine=engine),
+        writer=state_writer,
         publisher=publisher,
         live_state=LiveState(
             redis=redis_client, link_timeout_s=settings.link_timeout_s
@@ -162,6 +168,8 @@ async def run(args: argparse.Namespace) -> int:
     finally:
         _log.info("gateway stopping")
         await server.stop()
+        # After the server, so no batch can arrive once the last flush ran.
+        await state_writer.close()
         await bus.drain()
         await redis_client.aclose()
         await engine.dispose()

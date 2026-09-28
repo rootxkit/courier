@@ -41,7 +41,7 @@ from gateway.publisher import TelemetryPublisher
 from gateway.rate_limit import RateLimiter
 from gateway.relay_records import Record
 from gateway.stage_timing import StageTimings, shared_timings
-from gateway.state_writer import DroneStateWriter
+from gateway.state_buffer import RowWriter
 
 _log = get_logger(__name__)
 
@@ -68,7 +68,7 @@ class IngestPipeline:
 
     station_id: str
     resolver: BindingResolver
-    writer: DroneStateWriter
+    writer: RowWriter
     publisher: TelemetryPublisher
     timings: StageTimings = field(default_factory=shared_timings)
     # P1-07: sources refused by station policy are reported at most once per
@@ -320,7 +320,7 @@ class StationPipelines:
     """
 
     resolver: BindingResolver
-    writer: DroneStateWriter
+    writer: RowWriter
     publisher: TelemetryPublisher
     live_state: LiveState | None = None
 
