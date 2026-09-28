@@ -78,6 +78,7 @@ def encode_row(
     row: DroneStateRow,
     label: str | None = None,
     link: dict[str, Any] | None = None,
+    firmware: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """A drone_state row as the console reads it.
 
@@ -99,6 +100,9 @@ def encode_row(
         # that delivered this row. None when not tracked, never zero: zero loss
         # is a measurement, and an absent one must not look like a good link.
         "link": link,
+        # P1-11: the drone's latest recorded flight software. None when it has
+        # never reported one, which the console shows as unknown.
+        "firmware": firmware,
         "ts": row.ts.isoformat(),
         "station_id": row.station_id,
         "lat_deg": row.lat_deg,
@@ -180,20 +184,28 @@ class TelemetryPublisher:
         row: DroneStateRow,
         label: str | None = None,
         link: dict[str, Any] | None = None,
+        firmware: dict[str, Any] | None = None,
     ) -> None:
-        await self._send(telemetry_subject(row.drone_id), encode_row(row, label, link))
+        await self._send(
+            telemetry_subject(row.drone_id), encode_row(row, label, link, firmware)
+        )
 
     async def publish_rows(
         self,
         rows: list[DroneStateRow],
         labels: dict[UUID, str] | None = None,
         links: dict[UUID, dict[str, Any]] | None = None,
+        firmware: dict[UUID, dict[str, Any]] | None = None,
     ) -> None:
         labels = labels or {}
         links = links or {}
+        firmware = firmware or {}
         for row in rows:
             await self.publish_row(
-                row, labels.get(row.drone_id), links.get(row.drone_id)
+                row,
+                labels.get(row.drone_id),
+                links.get(row.drone_id),
+                firmware.get(row.drone_id),
             )
 
     async def publish_station(

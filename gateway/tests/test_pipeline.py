@@ -20,7 +20,7 @@ import pytest
 from pymavlink.dialects.v20 import ardupilotmega as mavlink
 
 from gateway.binding import NOT_ASSIGNED, UNBOUND, UNCLASSIFIED, Resolution
-from gateway.drone_state import DroneStateRow
+from gateway.drone_state import DroneStateRow, timestamp_from_recv_utc_ns
 from gateway.parsing import SourceId
 from gateway.pipeline import IngestPipeline, StationPipelines
 from gateway.rate_limit import RateLimiter
@@ -116,6 +116,7 @@ class FakePublisher:
         self.rows: list[DroneStateRow] = []
         self.labels: dict[UUID, str] = {}
         self.links: dict[UUID, dict[str, Any]] = {}
+        self.firmware: dict[UUID, dict[str, Any]] = {}
         self.unclaimed: list[SourceId] = []
 
     async def publish_rows(
@@ -123,10 +124,12 @@ class FakePublisher:
         rows: list[DroneStateRow],
         labels: dict[UUID, str] | None = None,
         links: dict[UUID, dict[str, Any]] | None = None,
+        firmware: dict[UUID, dict[str, Any]] | None = None,
     ) -> None:
         self.rows.extend(rows)
         self.labels = labels or {}
         self.links = links or {}
+        self.firmware = firmware or {}
 
     async def publish_unclaimed(
         self, station_id: str, resolution: Resolution, source_id: SourceId
@@ -683,3 +686,125 @@ async def test_a_batch_with_no_rows_touches_no_live_state() -> None:
     await pipeline.process(EPOCH, [record(0, heartbeat())])
 
     assert live.updates == []
+
+
+# --- firmware (P1-11) --------------------------------------------------------
+
+
+class FakeFirmware:
+    """Records what it is shown, and answers `latest` from that."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.observed: list[tuple[UUID, str, datetime, Any]] = []
+        self.fail = fail
+
+    async def observe(
+        self, drone_id: UUID, station_id: str, observed_at: datetime, firmware: Any
+    ) -> bool:
+        if self.fail:
+            raise RuntimeError("drone_firmware is unreachable")
+        self.observed.append((drone_id, station_id, observed_at, firmware))
+        return True
+
+    async def latest(self, drone_id: UUID) -> Any:
+        if self.fail:
+            raise RuntimeError("drone_firmware is unreachable")
+        for seen, _, _, firmware in reversed(self.observed):
+            if seen == drone_id:
+                return firmware
+        return None
+
+
+def with_firmware(
+    registry: FakeFirmware, resolver: FakeResolver | None = None
+) -> tuple[IngestPipeline, FakeWriter, FakePublisher]:
+    pipeline, _, writer, publisher = build(resolver=resolver)
+    pipeline.firmware = cast(Any, registry)
+    return pipeline, writer, publisher
+
+
+def autopilot_version(sysid: int = 1, compid: int = 1) -> bytes:
+    sender = link(sysid, compid)
+    return bytes(
+        sender.autopilot_version_encode(
+            capabilities=0,
+            flight_sw_version=(4 << 24) | (8 << 16) | mavlink.FIRMWARE_VERSION_TYPE_DEV,
+            middleware_sw_version=0,
+            os_sw_version=0,
+            board_version=0,
+            flight_custom_version=list(b"66c89850"),
+            middleware_custom_version=[0] * 8,
+            os_custom_version=[0] * 8,
+            vendor_id=0,
+            product_id=0,
+            uid=0,
+        ).pack(sender)
+    )
+
+
+async def test_a_bound_drones_version_is_recorded_and_published() -> None:
+    registry = FakeFirmware()
+    pipeline, _, publisher = with_firmware(registry)
+
+    await pipeline.process(
+        EPOCH,
+        [
+            record(0, heartbeat()),
+            record(1, autopilot_version(), offset_ns=100_000_000),
+            record(2, position(), offset_ns=200_000_000),
+        ],
+    )
+
+    assert len(registry.observed) == 1
+    drone_id, station_id, observed_at, firmware = registry.observed[0]
+    assert (drone_id, station_id) == (DRONE, STATION)
+    # Capture time, not ingest time, like every other record.
+    assert observed_at == timestamp_from_recv_utc_ns(NOON_NS + 100_000_000)
+    assert firmware.version == "4.8.0-dev"
+    assert publisher.firmware == {
+        DRONE: {"version": "4.8.0-dev", "git_hash": "66c89850"}
+    }
+
+
+async def test_a_drone_with_no_recorded_version_is_published_without_one() -> None:
+    """Absent, so the console shows unknown - not a blank that reads as fine."""
+    pipeline, _, publisher = with_firmware(FakeFirmware())
+
+    rows = await pipeline.process(
+        EPOCH, [record(0, heartbeat()), record(1, position())]
+    )
+
+    assert publisher.rows == rows
+    assert publisher.firmware == {}
+
+
+async def test_an_unbound_sources_version_is_not_recorded() -> None:
+    """A version is attributed to an airframe or not at all."""
+    registry = FakeFirmware()
+    pipeline, _, _ = with_firmware(registry, resolver=FakeResolver(drone_id=None))
+
+    await pipeline.process(
+        EPOCH, [record(0, heartbeat()), record(1, autopilot_version())]
+    )
+
+    assert registry.observed == []
+
+
+async def test_a_firmware_store_failure_costs_neither_the_insert_nor_the_publish() -> (
+    None
+):
+    pipeline, writer, publisher = with_firmware(FakeFirmware(fail=True))
+
+    rows = await pipeline.process(
+        EPOCH,
+        [
+            record(0, heartbeat()),
+            record(1, autopilot_version()),
+            record(2, position()),
+        ],
+    )
+
+    assert len(rows) == 1
+    assert writer.written == rows
+    assert publisher.rows == rows
+    assert publisher.firmware == {}

@@ -131,7 +131,7 @@ Do not add a dependency without a one-line justification in the commit body.
 
   | Tree | Database | Owns |
   |---|---|---|
-  | `infra/migrations/telemetry/` | TimescaleDB | ingest index, archive index, `ingest_events`, `drone_state` (P1-04) |
+  | `infra/migrations/telemetry/` | TimescaleDB | ingest index, archive index, `ingest_events`, `drone_state` (P1-04), `drone_firmware` (P1-11) |
   | `infra/migrations/relational/` | PostgreSQL + PostGIS | the schema in `ARCHITECTURE.md` §4 (P2-01, not yet created) |
 
   They are separate databases with separate version tables

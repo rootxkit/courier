@@ -38,6 +38,7 @@ from common import configure_logging, get_logger, load_settings
 from gateway.archive import RawArchive
 from gateway.binding import BindingResolver
 from gateway.config import GatewaySettings
+from gateway.firmware_store import FirmwareRegistry
 from gateway.ingest_store_pg import TimescaleIngestStore
 from gateway.live_state import LiveState
 from gateway.pipeline import StationPipelines
@@ -128,6 +129,7 @@ async def run(args: argparse.Namespace) -> int:
         resolver=BindingResolver(engine=engine),
         writer=state_writer,
         publisher=publisher,
+        firmware=FirmwareRegistry(engine=engine),
         live_state=LiveState(
             redis=redis_client, link_timeout_s=settings.link_timeout_s
         ),
