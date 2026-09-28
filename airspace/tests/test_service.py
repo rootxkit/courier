@@ -141,3 +141,18 @@ async def test_a_garbled_message_is_skipped_and_the_next_one_counts() -> None:
     await svc.on_telemetry(payload(B, 500, -10))
 
     assert len(bus.sent) == 1
+
+
+async def test_an_active_alert_is_refreshed_on_each_tick_but_not_audited() -> None:
+    """The numbers move as the pair closes; the console must see them move,
+    and the audit log must not fill with them."""
+    bus, audit = RecordingBus(), RecordingAudit()
+    svc, clock = service(bus, audit)
+    await svc.on_telemetry(payload(A, 0, 10))
+    await svc.on_telemetry(payload(B, 500, -10))
+
+    clock.now_s = 1.0
+    await svc.on_tick()
+
+    assert [body["state"] for _, body in bus.sent] == ["raised", "active"]
+    assert audit.rows == [(bus.sent[0][1]["key"], "raised")]

@@ -4,7 +4,8 @@ Subscribes to the Gateway's `telemetry.*`, feeds `AirspaceMonitor`, and for
 each alert raised or cleared:
 
 - publishes `alert.<key>` with `state` "raised" or "cleared", which the console
-  shows (P6-03);
+  shows (P6-03), and republishes each active alert every tick with `state`
+  "active", so the numbers a console shows are current;
 - appends an `events` row in the relational database, so an incident can be
   reconstructed from the audit log (P2-06) and not only from whoever was
   watching.
@@ -93,6 +94,15 @@ class AirspaceService:
 
     async def on_tick(self) -> None:
         await self._emit(self.monitor.tick(now_s=self.clock()))
+        # Refresh what is still active, on the bus only. An alert's numbers
+        # change as the pair closes; a console showing "closest 2.8 m in
+        # 57 s" from the moment it was raised is wrong a second later. Not
+        # audited: the log records transitions, not a heartbeat.
+        for alert in self.monitor.active:
+            await _guard(
+                "publish",
+                self.bus.publish(alert_subject(alert), encode_alert(alert, "active")),
+            )
 
     async def _emit(self, change: Change) -> None:
         for state, alerts in (("raised", change.raised), ("cleared", change.cleared)):
