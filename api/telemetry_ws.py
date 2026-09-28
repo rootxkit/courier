@@ -38,7 +38,7 @@ from typing import Any
 
 import nats
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from nats.aio.client import Client as NatsClient
 from nats.aio.msg import Msg
@@ -211,15 +211,22 @@ def create_app(
 
     # P1-12. The vendored map libraries, and the base map. Both are served by
     # the console itself so the page works with no internet. The base map is
-    # per machine and may be absent: `check_dir=False` makes that a 404 the
-    # page handles by saying so, not a console that will not start.
+    # per machine and may be absent. That is a 404 the page handles by saying
+    # so - never a console that will not start, and never a 500: Starlette's
+    # StaticFiles raises on every request to a directory that does not exist.
+    # Checked at startup, so a base map fetched later needs a restart.
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
-    if basemap_dir is not None:
-        app.mount(
-            "/basemap",
-            StaticFiles(directory=basemap_dir, check_dir=False),
-            name="basemap",
+    if basemap_dir is not None and basemap_dir.is_dir():
+        app.mount("/basemap", StaticFiles(directory=basemap_dir), name="basemap")
+    else:
+        _log.warning(
+            "no base map installed; the map will draw without one",
+            extra={"basemap_dir": str(basemap_dir)},
         )
+
+        @app.get("/basemap/{path:path}", include_in_schema=False)
+        async def no_basemap(path: str) -> Response:
+            return Response(status_code=404)
 
     @app.get("/healthz")
     async def health() -> dict[str, Any]:
