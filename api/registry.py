@@ -1,0 +1,508 @@
+"""The fleet registry: bases, pilots, drones, and their audit trail. P2-05, P2-06.
+
+## Every change is two writes, or none
+
+Each mutation writes its row and its `events` row in one transaction, so the
+audit log cannot miss a change and cannot record one that did not happen.
+`events` itself refuses UPDATE and DELETE in the database (migration
+0001_fleet).
+
+## Registering a drone reaches the telemetry database too
+
+The Gateway never connects to this database, so it cannot see `drones`. It
+attributes telemetry through `known_drones`, a projection in the telemetry
+database, and `source_bindings` refuses a drone that projection has not heard
+of. So registering or retiring a drone here writes the projection as well
+(TASKS.md P2-05). Without it, a drone looks registered here and its binding
+is refused there, and neither side shows why.
+
+The projection is written *inside* the relational transaction, before it
+commits. If the projection fails, the registration rolls back and says so. If
+the relational commit fails after the projection succeeded, the telemetry
+database knows a drone this one does not: harmless, because the projection is
+never an authority, and registering again rewrites it.
+
+## Status is derived, never stored
+
+P2-05 requires drone status to come from telemetry freshness, not from a
+person setting it. What a person does decide is stored: maintenance, and
+retirement. See `derive_status`.
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from enum import StrEnum
+from typing import Any, Protocol
+from uuid import UUID
+
+import sqlalchemy as sa
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+
+from common import get_logger
+
+_log = get_logger(__name__)
+
+# Until operator authentication exists, every change is attributed to the API
+# itself. The column is there so that attribution is a data change, not a
+# schema change, when it does.
+ACTOR_TYPE = "api"
+
+
+class DroneStatus(StrEnum):
+    """P2-05's statuses. Two of them are not produced yet; see `derive_status`."""
+
+    IDLE = "IDLE"
+    ASSIGNED = "ASSIGNED"
+    IN_FLIGHT = "IN_FLIGHT"
+    CHARGING = "CHARGING"
+    MAINTENANCE = "MAINTENANCE"
+    OFFLINE = "OFFLINE"
+
+
+class PilotStatus(StrEnum):
+    AVAILABLE = "AVAILABLE"
+    ON_DUTY = "ON_DUTY"
+    OFF_DUTY = "OFF_DUTY"
+
+
+class RegistryError(RuntimeError):
+    """A change the registry refused. `kind` says why, for the HTTP layer."""
+
+    def __init__(self, kind: str, message: str) -> None:
+        super().__init__(message)
+        self.kind = kind
+
+
+class NotFoundError(RegistryError):
+    def __init__(self, message: str) -> None:
+        super().__init__("not_found", message)
+
+
+class ConflictError(RegistryError):
+    def __init__(self, message: str) -> None:
+        super().__init__("conflict", message)
+
+
+class TelemetryProjection(Protocol):
+    """What the registry needs from the telemetry database.
+
+    `gateway.binding.BindingResolver` provides it; tests may provide less.
+    """
+
+    async def register_drone(
+        self, drone_id: UUID, label: str, *, retired_at: datetime | None = None
+    ) -> None: ...
+
+    async def close_bindings_for_drone(
+        self, drone_id: UUID, *, at: datetime
+    ) -> int: ...
+
+
+class LiveStateReader(Protocol):
+    """Reads a drone's live state: None when its link is lost (P1-05)."""
+
+    async def get(self, drone_id: UUID) -> dict[str, Any] | None: ...
+
+
+def derive_status(
+    *, in_maintenance: bool, retired: bool, live: Mapping[str, Any] | None
+) -> DroneStatus:
+    """A drone's status, from what a person decided and what telemetry says.
+
+    - MAINTENANCE: set by a person, and it wins. An aircraft on the bench may
+      well be powered and transmitting.
+    - OFFLINE: retired, or no live state - no telemetry within the link
+      timeout (P1-05).
+    - IN_FLIGHT: live and armed. Armed is the nearest thing telemetry has to
+      "flying": an armed aircraft on the ground is treated as in flight,
+      which is the safe side to err on.
+    - IDLE: live and disarmed.
+
+    ASSIGNED needs missions and CHARGING needs a charging signal; neither
+    exists yet, so neither is ever returned rather than guessed.
+    """
+    if in_maintenance:
+        return DroneStatus.MAINTENANCE
+    if retired or live is None:
+        return DroneStatus.OFFLINE
+    if live.get("armed") is True:
+        return DroneStatus.IN_FLIGHT
+    return DroneStatus.IDLE
+
+
+@dataclass(frozen=True, slots=True)
+class AirframeParams:
+    max_payload_g: int | None = None
+    max_range_m: float | None = None
+    battery_capacity_wh: float | None = None
+    cruise_speed_ms: float | None = None
+    avg_power_w: float | None = None
+
+
+_DRONE_COLUMNS = (
+    "id, serial, label, model, max_payload_g, max_range_m, battery_capacity_wh, "
+    "cruise_speed_ms, avg_power_w, home_base_id, current_pilot_id, "
+    "in_maintenance, retired_at, created_at"
+)
+_BASE_COLUMNS = (
+    "id, name, ST_Y(geom) AS lat_deg, ST_X(geom) AS lon_deg, elevation_amsl_m, "
+    "capacity, charging_slots, created_at"
+)
+_PILOT_COLUMNS = "id, name, license_ref, status, max_concurrent_drones, created_at"
+
+
+def _row(row: sa.Row[Any]) -> dict[str, Any]:
+    return dict(row._mapping)
+
+
+@dataclass
+class FleetRegistry:
+    engine: AsyncEngine
+    projection: TelemetryProjection
+    live: LiveStateReader
+    clock: Any = None
+
+    def _now(self) -> datetime:
+        if self.clock is not None:
+            now: datetime = self.clock()
+            return now
+        return datetime.now(tz=UTC)
+
+    # --- audit --------------------------------------------------------------
+
+    async def _audit(
+        self,
+        connection: AsyncConnection,
+        entity_type: str,
+        entity_id: UUID,
+        event_type: str,
+        payload: Mapping[str, Any],
+    ) -> None:
+        await connection.execute(
+            sa.text(
+                "INSERT INTO events "
+                "(actor_type, actor_id, entity_type, entity_id, event_type, payload) "
+                "VALUES (:actor_type, NULL, :entity_type, :entity_id, :event_type, "
+                "        CAST(:payload AS jsonb))"
+            ),
+            {
+                "actor_type": ACTOR_TYPE,
+                "entity_type": entity_type,
+                "entity_id": str(entity_id),
+                "event_type": event_type,
+                "payload": json.dumps(payload, default=str),
+            },
+        )
+
+    async def events(
+        self,
+        *,
+        entity_type: str | None = None,
+        entity_id: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        after_id: int | None = None,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """The audit trail in the order it was written, filtered. P2-06.
+
+        Ordered by `id`, not `ts`: `ts` is the transaction's start, so two
+        changes can share one, while `id` is the order of insertion. A page
+        continues from the last `id` it returned (`after_id`), so a long
+        history is read completely rather than cut at `limit`.
+        """
+        clauses: list[str] = []
+        params: dict[str, Any] = {"limit": limit}
+        if entity_type is not None:
+            clauses.append("entity_type = :entity_type")
+            params["entity_type"] = entity_type
+        if entity_id is not None:
+            clauses.append("entity_id = :entity_id")
+            params["entity_id"] = entity_id
+        if since is not None:
+            clauses.append("ts >= :since")
+            params["since"] = since
+        if until is not None:
+            clauses.append("ts < :until")
+            params["until"] = until
+        if after_id is not None:
+            clauses.append("id > :after_id")
+            params["after_id"] = after_id
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        async with self.engine.connect() as connection:
+            rows = await connection.execute(
+                sa.text(
+                    "SELECT id, ts, actor_type, actor_id, entity_type, entity_id, "
+                    f"event_type, payload FROM events {where} "
+                    "ORDER BY id LIMIT :limit"
+                ),
+                params,
+            )
+            return [_row(row) for row in rows]
+
+    # --- bases ----------------------------------------------------------------
+
+    async def create_base(
+        self,
+        *,
+        name: str,
+        lat_deg: float,
+        lon_deg: float,
+        elevation_amsl_m: float | None,
+        capacity: int,
+        charging_slots: int,
+    ) -> dict[str, Any]:
+        try:
+            async with self.engine.begin() as connection:
+                created = (
+                    await connection.execute(
+                        sa.text(
+                            "INSERT INTO bases "
+                            "(name, geom, elevation_amsl_m, capacity, charging_slots) "
+                            "VALUES (:name, "
+                            "        ST_SetSRID(ST_MakePoint(:lon, :lat), 4326), "
+                            "        :elevation, :capacity, :charging) "
+                            f"RETURNING {_BASE_COLUMNS}"
+                        ),
+                        {
+                            "name": name,
+                            "lat": lat_deg,
+                            "lon": lon_deg,
+                            "elevation": elevation_amsl_m,
+                            "capacity": capacity,
+                            "charging": charging_slots,
+                        },
+                    )
+                ).one()
+                base = _row(created)
+                await self._audit(connection, "base", base["id"], "created", base)
+                return base
+        except IntegrityError as error:
+            raise ConflictError(f"base {name!r} refused: {error.orig}") from error
+
+    async def list_bases(self) -> list[dict[str, Any]]:
+        async with self.engine.connect() as connection:
+            rows = await connection.execute(
+                sa.text(f"SELECT {_BASE_COLUMNS} FROM bases ORDER BY name")
+            )
+            return [_row(row) for row in rows]
+
+    # --- pilots ---------------------------------------------------------------
+
+    async def create_pilot(
+        self, *, name: str, license_ref: str | None, max_concurrent_drones: int
+    ) -> dict[str, Any]:
+        try:
+            async with self.engine.begin() as connection:
+                created = (
+                    await connection.execute(
+                        sa.text(
+                            "INSERT INTO pilots "
+                            "(name, license_ref, max_concurrent_drones) "
+                            "VALUES (:name, :license_ref, :max_concurrent) "
+                            f"RETURNING {_PILOT_COLUMNS}"
+                        ),
+                        {
+                            "name": name,
+                            "license_ref": license_ref,
+                            "max_concurrent": max_concurrent_drones,
+                        },
+                    )
+                ).one()
+                pilot = _row(created)
+                await self._audit(connection, "pilot", pilot["id"], "created", pilot)
+                return pilot
+        except IntegrityError as error:
+            raise ConflictError(f"pilot {name!r} refused: {error.orig}") from error
+
+    async def list_pilots(self) -> list[dict[str, Any]]:
+        async with self.engine.connect() as connection:
+            rows = await connection.execute(
+                sa.text(f"SELECT {_PILOT_COLUMNS} FROM pilots ORDER BY name")
+            )
+            return [_row(row) for row in rows]
+
+    async def set_pilot_status(
+        self, pilot_id: UUID, status: PilotStatus
+    ) -> dict[str, Any]:
+        async with self.engine.begin() as connection:
+            updated = (
+                await connection.execute(
+                    sa.text(
+                        "UPDATE pilots SET status = :status WHERE id = :id "
+                        f"RETURNING {_PILOT_COLUMNS}"
+                    ),
+                    {"id": str(pilot_id), "status": status.value},
+                )
+            ).one_or_none()
+            if updated is None:
+                raise NotFoundError(f"no pilot {pilot_id}")
+            pilot = _row(updated)
+            await self._audit(
+                connection, "pilot", pilot_id, "status_changed", {"status": status}
+            )
+            return pilot
+
+    # --- drones ---------------------------------------------------------------
+
+    async def register_drone(
+        self,
+        *,
+        serial: str,
+        label: str,
+        model: str | None,
+        params: AirframeParams,
+        home_base_id: UUID | None,
+        current_pilot_id: UUID | None,
+    ) -> dict[str, Any]:
+        """Register a drone here and make it bindable in the telemetry database."""
+        try:
+            async with self.engine.begin() as connection:
+                created = (
+                    await connection.execute(
+                        sa.text(
+                            "INSERT INTO drones "
+                            "(serial, label, model, max_payload_g, max_range_m, "
+                            " battery_capacity_wh, cruise_speed_ms, avg_power_w, "
+                            " home_base_id, current_pilot_id) "
+                            "VALUES (:serial, :label, :model, :max_payload_g, "
+                            " :max_range_m, :battery_capacity_wh, :cruise_speed_ms, "
+                            " :avg_power_w, :home_base_id, :current_pilot_id) "
+                            f"RETURNING {_DRONE_COLUMNS}"
+                        ),
+                        {
+                            "serial": serial,
+                            "label": label,
+                            "model": model,
+                            "max_payload_g": params.max_payload_g,
+                            "max_range_m": params.max_range_m,
+                            "battery_capacity_wh": params.battery_capacity_wh,
+                            "cruise_speed_ms": params.cruise_speed_ms,
+                            "avg_power_w": params.avg_power_w,
+                            "home_base_id": _opt(home_base_id),
+                            "current_pilot_id": _opt(current_pilot_id),
+                        },
+                    )
+                ).one()
+                drone = _row(created)
+                await self._audit(connection, "drone", drone["id"], "registered", drone)
+                # Last, and inside the transaction: see the module docstring.
+                await self.projection.register_drone(drone["id"], label)
+        except IntegrityError as error:
+            raise ConflictError(f"drone {label!r} refused: {error.orig}") from error
+        _log.info(
+            "drone registered", extra={"drone_id": str(drone["id"]), "label": label}
+        )
+        return await self._with_status(drone)
+
+    async def get_drone(self, drone_id: UUID) -> dict[str, Any]:
+        async with self.engine.connect() as connection:
+            found = (
+                await connection.execute(
+                    sa.text(f"SELECT {_DRONE_COLUMNS} FROM drones WHERE id = :id"),
+                    {"id": str(drone_id)},
+                )
+            ).one_or_none()
+        if found is None:
+            raise NotFoundError(f"no drone {drone_id}")
+        return await self._with_status(_row(found))
+
+    async def list_drones(
+        self, *, include_retired: bool = False
+    ) -> list[dict[str, Any]]:
+        where = "" if include_retired else "WHERE retired_at IS NULL"
+        async with self.engine.connect() as connection:
+            rows = await connection.execute(
+                sa.text(f"SELECT {_DRONE_COLUMNS} FROM drones {where} ORDER BY label")
+            )
+            drones = [_row(row) for row in rows]
+        return [await self._with_status(drone) for drone in drones]
+
+    async def set_maintenance(
+        self, drone_id: UUID, in_maintenance: bool
+    ) -> dict[str, Any]:
+        async with self.engine.begin() as connection:
+            updated = (
+                await connection.execute(
+                    sa.text(
+                        "UPDATE drones SET in_maintenance = :flag WHERE id = :id "
+                        f"RETURNING {_DRONE_COLUMNS}"
+                    ),
+                    {"id": str(drone_id), "flag": in_maintenance},
+                )
+            ).one_or_none()
+            if updated is None:
+                raise NotFoundError(f"no drone {drone_id}")
+            await self._audit(
+                connection,
+                "drone",
+                drone_id,
+                "maintenance_started" if in_maintenance else "maintenance_ended",
+                {},
+            )
+        return await self._with_status(_row(updated))
+
+    async def retire_drone(self, drone_id: UUID) -> dict[str, Any]:
+        """Retire, never delete: its past telemetry must stay attributable.
+
+        The projection is marked retired and every open binding is closed, so
+        its SYSID stops being attributed to it from now on.
+        """
+        at = self._now()
+        async with self.engine.begin() as connection:
+            updated = (
+                await connection.execute(
+                    sa.text(
+                        "UPDATE drones SET retired_at = :at "
+                        "WHERE id = :id AND retired_at IS NULL "
+                        f"RETURNING {_DRONE_COLUMNS}"
+                    ),
+                    {"id": str(drone_id), "at": at},
+                )
+            ).one_or_none()
+            if updated is None:
+                exists = (
+                    await connection.execute(
+                        sa.text("SELECT 1 FROM drones WHERE id = :id"),
+                        {"id": str(drone_id)},
+                    )
+                ).one_or_none()
+                if exists is None:
+                    raise NotFoundError(f"no drone {drone_id}")
+                raise ConflictError(f"drone {drone_id} is already retired")
+            drone = _row(updated)
+            closed = await self.projection.close_bindings_for_drone(drone_id, at=at)
+            await self.projection.register_drone(
+                drone_id, drone["label"], retired_at=at
+            )
+            await self._audit(
+                connection, "drone", drone_id, "retired", {"bindings_closed": closed}
+            )
+        return await self._with_status(drone)
+
+    async def _with_status(self, drone: dict[str, Any]) -> dict[str, Any]:
+        try:
+            live = await self.live.get(drone["id"])
+        except Exception as error:
+            # Unknown is not the same as offline, but the API has only these
+            # statuses; OFFLINE is the one that sends nobody an aircraft.
+            _log.warning(
+                "could not read live state",
+                extra={"drone_id": str(drone["id"]), "error": repr(error)},
+            )
+            live = None
+        drone["status"] = derive_status(
+            in_maintenance=bool(drone["in_maintenance"]),
+            retired=drone["retired_at"] is not None,
+            live=live,
+        )
+        return drone
+
+
+def _opt(value: UUID | None) -> str | None:
+    return None if value is None else str(value)

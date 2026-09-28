@@ -1,0 +1,401 @@
+"""The fleet registry against real databases. P2-01, P2-05, P2-06.
+
+Both databases are real, because the claims are about both: a drone
+registered here must become bindable there (P2-05), and the audit log must
+refuse to be edited (P2-06). A fake of either would agree with whatever the
+code did.
+
+Status is derived from a fake live-state reader: what is under test is the
+derivation and its wiring, and `gateway/tests/test_live_state.py` covers Redis.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+from typing import Any
+from uuid import UUID, uuid4
+
+import pytest
+import sqlalchemy as sa
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import AsyncEngine
+
+from api.app import create_api_app
+from api.registry import FleetRegistry
+from api.tests.conftest import migrate_relational
+from gateway.binding import BindingConflictError, BindingResolver
+from gateway.parsing import SourceId
+
+pytestmark = pytest.mark.postgres
+
+STATION = "registry-test-station"
+
+
+class FakeLive:
+    def __init__(self) -> None:
+        self.states: dict[UUID, dict[str, Any]] = {}
+
+    async def get(self, drone_id: UUID) -> dict[str, Any] | None:
+        return self.states.get(drone_id)
+
+
+@pytest.fixture
+def live() -> FakeLive:
+    return FakeLive()
+
+
+@pytest.fixture
+async def client(
+    relational_engine: AsyncEngine, engine: AsyncEngine, live: FakeLive
+) -> AsyncIterator[AsyncClient]:
+    """The API over both test databases. `engine` is the telemetry one."""
+    registry = FleetRegistry(
+        engine=relational_engine,
+        projection=BindingResolver(engine=engine),
+        live=live,
+    )
+    app = create_api_app(registry)
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as http:
+        yield http
+    async with engine.begin() as connection:
+        await connection.execute(
+            sa.text("DELETE FROM source_bindings WHERE station_id = :s"),
+            {"s": STATION},
+        )
+
+
+def unique(prefix: str) -> str:
+    return f"{prefix}-{uuid4().hex[:10]}"
+
+
+async def a_drone(client: AsyncClient, **overrides: Any) -> dict[str, Any]:
+    body = {"serial": unique("SN"), "label": unique("TEST"), **overrides}
+    response = await client.post("/drones", json=body)
+    assert response.status_code == 201, response.text
+    created: dict[str, Any] = response.json()
+    return created
+
+
+# --- P2-01: the schema ----------------------------------------------------------
+
+
+async def test_the_migrations_run_down_and_up_again(
+    prepared_relational_database: str,
+) -> None:
+    """P2-01's criterion. Down to nothing, then up to head, on the same database."""
+    await asyncio.to_thread(
+        migrate_relational, prepared_relational_database, "base", down=True
+    )
+    await asyncio.to_thread(migrate_relational, prepared_relational_database, "head")
+
+
+async def test_every_geometry_column_has_a_gist_index(
+    relational_engine: AsyncEngine,
+) -> None:
+    async with relational_engine.connect() as connection:
+        geometry = (
+            await connection.execute(
+                sa.text(
+                    "SELECT f_table_name, f_geometry_column, srid "
+                    "FROM geometry_columns WHERE f_table_schema = 'public'"
+                )
+            )
+        ).all()
+        gist = (
+            await connection.execute(
+                sa.text(
+                    "SELECT tablename, indexdef FROM pg_indexes "
+                    "WHERE indexdef ILIKE '%USING gist%'"
+                )
+            )
+        ).all()
+
+    assert geometry, "no geometry columns found at all"
+    for table, column, srid in geometry:
+        assert srid == 4326, (table, column, srid)
+        assert any(
+            index_table == table and f"({column})" in definition
+            for index_table, definition in gist
+        ), f"{table}.{column} has no GiST index"
+
+
+# --- P2-05: drones, and the projection into telemetry ----------------------------
+
+
+async def test_a_registered_drone_is_bindable_in_the_telemetry_database(
+    client: AsyncClient, engine: AsyncEngine
+) -> None:
+    """P2-05's criterion, second half: nobody touches the telemetry database."""
+    drone = await a_drone(client)
+
+    await BindingResolver(engine=engine).bind(
+        STATION,
+        SourceId(sysid=240, compid=1),
+        UUID(drone["id"]),
+        bound_from=datetime.now(tz=UTC),
+        created_by="registry-test",
+    )
+
+
+async def test_an_unregistered_drone_is_not_bindable(engine: AsyncEngine) -> None:
+    """The paired presence: without the projection the binding is refused,
+    which is the invisible failure P2-05 exists to prevent."""
+    with pytest.raises(BindingConflictError, match="not in known_drones"):
+        await BindingResolver(engine=engine).bind(
+            STATION,
+            SourceId(sysid=241, compid=1),
+            uuid4(),
+            bound_from=datetime.now(tz=UTC),
+            created_by="registry-test",
+        )
+
+
+async def test_the_projection_carries_the_label(
+    client: AsyncClient, engine: AsyncEngine
+) -> None:
+    drone = await a_drone(client)
+    async with engine.connect() as connection:
+        label = (
+            await connection.execute(
+                sa.text("SELECT label FROM known_drones WHERE drone_id = :d"),
+                {"d": drone["id"]},
+            )
+        ).scalar_one()
+    assert label == drone["label"]
+
+
+async def test_a_duplicate_label_is_refused_and_projects_nothing(
+    client: AsyncClient,
+) -> None:
+    first = await a_drone(client)
+    response = await client.post(
+        "/drones", json={"serial": unique("SN"), "label": first["label"]}
+    )
+    assert response.status_code == 409
+
+
+async def test_retiring_closes_bindings_and_marks_the_projection(
+    client: AsyncClient, engine: AsyncEngine
+) -> None:
+    drone = await a_drone(client)
+    resolver = BindingResolver(engine=engine)
+    await resolver.bind(
+        STATION,
+        SourceId(sysid=242, compid=1),
+        UUID(drone["id"]),
+        bound_from=datetime(2026, 1, 1, tzinfo=UTC),
+        created_by="registry-test",
+    )
+
+    response = await client.post(f"/drones/{drone['id']}/retire")
+
+    assert response.status_code == 200
+    assert response.json()["retired_at"] is not None
+    async with engine.connect() as connection:
+        open_bindings = (
+            await connection.execute(
+                sa.text(
+                    "SELECT count(*) FROM source_bindings "
+                    "WHERE drone_id = :d AND upper(valid) IS NULL"
+                ),
+                {"d": drone["id"]},
+            )
+        ).scalar_one()
+        retired = (
+            await connection.execute(
+                sa.text("SELECT retired_at FROM known_drones WHERE drone_id = :d"),
+                {"d": drone["id"]},
+            )
+        ).scalar_one()
+    assert open_bindings == 0
+    assert retired is not None
+
+    again = await client.post(f"/drones/{drone['id']}/retire")
+    assert again.status_code == 409
+
+
+async def test_a_retired_drone_is_hidden_unless_asked_for(client: AsyncClient) -> None:
+    drone = await a_drone(client)
+    await client.post(f"/drones/{drone['id']}/retire")
+
+    listed = [d["id"] for d in (await client.get("/drones")).json()]
+    everything = [
+        d["id"] for d in (await client.get("/drones?include_retired=true")).json()
+    ]
+
+    assert drone["id"] not in listed
+    assert drone["id"] in everything
+
+
+async def test_an_unknown_drone_is_404(client: AsyncClient) -> None:
+    assert (await client.get(f"/drones/{uuid4()}")).status_code == 404
+    assert (await client.post(f"/drones/{uuid4()}/retire")).status_code == 404
+
+
+# --- P2-05: status comes from telemetry, not from a person -----------------------
+
+
+async def test_status_follows_telemetry(client: AsyncClient, live: FakeLive) -> None:
+    drone = await a_drone(client)
+    drone_id = UUID(drone["id"])
+    assert drone["status"] == "OFFLINE"
+
+    live.states[drone_id] = {"armed": False}
+    assert (await client.get(f"/drones/{drone_id}")).json()["status"] == "IDLE"
+
+    live.states[drone_id] = {"armed": True}
+    assert (await client.get(f"/drones/{drone_id}")).json()["status"] == "IN_FLIGHT"
+
+    del live.states[drone_id]
+    assert (await client.get(f"/drones/{drone_id}")).json()["status"] == "OFFLINE"
+
+
+async def test_maintenance_is_set_by_a_person_and_wins(
+    client: AsyncClient, live: FakeLive
+) -> None:
+    drone = await a_drone(client)
+    live.states[UUID(drone["id"])] = {"armed": False}
+
+    response = await client.put(
+        f"/drones/{drone['id']}/maintenance", json={"in_maintenance": True}
+    )
+    assert response.json()["status"] == "MAINTENANCE"
+
+    response = await client.put(
+        f"/drones/{drone['id']}/maintenance", json={"in_maintenance": False}
+    )
+    assert response.json()["status"] == "IDLE"
+
+
+async def test_status_cannot_be_set_by_hand(client: AsyncClient) -> None:
+    """There is no endpoint that writes a status, and the body field is ignored."""
+    drone = await a_drone(client, status="IN_FLIGHT")
+    assert drone["status"] == "OFFLINE"
+
+
+# --- bases and pilots --------------------------------------------------------------
+
+
+async def test_a_base_round_trips_its_position(client: AsyncClient) -> None:
+    name = unique("BASE")
+    response = await client.post(
+        "/bases",
+        json={"name": name, "lat_deg": 41.7, "lon_deg": 44.8, "elevation_amsl_m": 450},
+    )
+    assert response.status_code == 201, response.text
+    base = response.json()
+    assert (base["lat_deg"], base["lon_deg"]) == pytest.approx((41.7, 44.8))
+
+    drone = await a_drone(client, home_base_id=base["id"])
+    assert drone["home_base_id"] == base["id"]
+
+
+async def test_a_drone_at_an_unknown_base_is_refused(client: AsyncClient) -> None:
+    response = await client.post(
+        "/drones",
+        json={
+            "serial": unique("SN"),
+            "label": unique("T"),
+            "home_base_id": str(uuid4()),
+        },
+    )
+    assert response.status_code == 409
+
+
+async def test_a_pilot_status_changes_and_is_validated(client: AsyncClient) -> None:
+    created = (await client.post("/pilots", json={"name": unique("Pilot")})).json()
+    assert created["status"] == "OFF_DUTY"
+
+    changed = await client.put(
+        f"/pilots/{created['id']}/status", json={"status": "ON_DUTY"}
+    )
+    invalid = await client.put(
+        f"/pilots/{created['id']}/status", json={"status": "FLYING"}
+    )
+
+    assert changed.json()["status"] == "ON_DUTY"
+    assert invalid.status_code == 422
+
+
+# --- P2-06: the audit log ------------------------------------------------------------
+
+
+async def test_a_drones_history_can_be_reconstructed(client: AsyncClient) -> None:
+    """P2-06's criterion, for the entities that exist: every change, in order."""
+    drone = await a_drone(client)
+    await client.put(
+        f"/drones/{drone['id']}/maintenance", json={"in_maintenance": True}
+    )
+    await client.put(
+        f"/drones/{drone['id']}/maintenance", json={"in_maintenance": False}
+    )
+    await client.post(f"/drones/{drone['id']}/retire")
+
+    trail = (
+        await client.get(f"/events?entity_type=drone&entity_id={drone['id']}")
+    ).json()
+
+    assert [event["event_type"] for event in trail] == [
+        "registered",
+        "maintenance_started",
+        "maintenance_ended",
+        "retired",
+    ]
+    assert trail[0]["payload"]["label"] == drone["label"]
+
+
+async def test_the_audit_log_pages_without_losing_rows(client: AsyncClient) -> None:
+    drone = await a_drone(client)
+    for flag in (True, False, True):
+        await client.put(
+            f"/drones/{drone['id']}/maintenance", json={"in_maintenance": flag}
+        )
+
+    query = f"/events?entity_type=drone&entity_id={drone['id']}&limit=2"
+    first = (await client.get(query)).json()
+    second = (await client.get(f"{query}&after_id={first[-1]['id']}")).json()
+
+    assert len(first) == 2
+    assert len(second) == 2
+    assert [e["id"] for e in first + second] == sorted(e["id"] for e in first + second)
+
+
+async def test_a_refused_change_leaves_no_event(client: AsyncClient) -> None:
+    """The paired absence: the row and its event are one transaction."""
+    first = await a_drone(client)
+    await client.post("/drones", json={"serial": unique("SN"), "label": first["label"]})
+
+    registered = [
+        event
+        for event in (await client.get("/events?entity_type=drone")).json()
+        if event["event_type"] == "registered"
+        and event["payload"]["label"] == first["label"]
+    ]
+    assert len(registered) == 1
+
+
+async def test_the_audit_log_refuses_to_be_edited(
+    relational_engine: AsyncEngine, client: AsyncClient
+) -> None:
+    await a_drone(client)
+    for statement in (
+        "UPDATE events SET event_type = 'forged'",
+        "DELETE FROM events",
+        "TRUNCATE events",
+    ):
+        with pytest.raises(DBAPIError, match="append-only"):
+            async with relational_engine.begin() as connection:
+                await connection.execute(sa.text(statement))
+
+    async with relational_engine.connect() as connection:
+        forged = (
+            await connection.execute(
+                sa.text("SELECT count(*) FROM events WHERE event_type = 'forged'")
+            )
+        ).scalar_one()
+    assert forged == 0
