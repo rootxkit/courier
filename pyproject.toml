@@ -31,6 +31,9 @@ dependencies = [
     # The internal bus. The console subscribes to it rather than polling the
     # hypertable, so a browser refresh never becomes a database query.
     "nats-py>=2.6",
+    # Live drone state, P1-05. The asyncio client, because the Gateway is
+    # asyncio end to end; the TTL on each key is the definition of link lost.
+    "redis>=5.0",
     # The REST/WS API, per the stack table in CLAUDE.md. P1-08 needs only the
     # WebSocket half; the OpenAPI schema it generates becomes the source of
     # truth for the TypeScript clients in Phase 6.
@@ -191,6 +194,7 @@ markers = [
     "slow: takes tens of seconds but has no external dependency; excluded to keep the default run quick",
     "postgres: needs the telemetry database from `make up` and TELEMETRY_DATABASE_URL; excluded from the default run for the same reason as sitl",
     "nats: needs the NATS broker from `make up` and NATS_URL; excluded from the default run for the same reason as postgres",
+    "redis: needs Redis from `make up` and REDIS_URL; excluded from the default run for the same reason as postgres",
 ]
 filterwarnings = ["error"]
 

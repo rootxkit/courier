@@ -31,6 +31,7 @@ import sys
 from pathlib import Path
 
 import nats
+import redis.asyncio
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from common import configure_logging, get_logger, load_settings
@@ -38,6 +39,7 @@ from gateway.archive import RawArchive
 from gateway.binding import BindingResolver
 from gateway.config import GatewaySettings
 from gateway.ingest_store_pg import TimescaleIngestStore
+from gateway.live_state import LiveState
 from gateway.pipeline import StationPipelines
 from gateway.publisher import TelemetryPublisher
 from gateway.relay_server import RelayServer
@@ -113,10 +115,16 @@ async def run(args: argparse.Namespace) -> int:
     # carried them. The console needs both, and a station with no aircraft on
     # it produces only the second.
     publisher = TelemetryPublisher(bus=bus)
+    # P1-05. Expiry is the definition of link lost, so the TTL is the same
+    # setting that defines link loss everywhere else.
+    redis_client = redis.asyncio.from_url(str(settings.redis_url))
     pipelines = StationPipelines(
         resolver=BindingResolver(engine=engine),
         writer=DroneStateWriter(engine=engine),
         publisher=publisher,
+        live_state=LiveState(
+            redis=redis_client, link_timeout_s=settings.link_timeout_s
+        ),
     )
 
     server = RelayServer(
@@ -155,6 +163,7 @@ async def run(args: argparse.Namespace) -> int:
         _log.info("gateway stopping")
         await server.stop()
         await bus.drain()
+        await redis_client.aclose()
         await engine.dispose()
     return 0
 

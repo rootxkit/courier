@@ -609,3 +609,72 @@ async def test_an_unclaimed_source_is_still_announced_only_once() -> None:
 
     assert len(resolver.unclaimed) == 1
     assert resolver.suppressed == [0]
+
+
+# --- live state (P1-05) ----------------------------------------------------
+
+
+class FakeLiveState:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.updates: list[list[DroneStateRow]] = []
+        self.fail = fail
+
+    async def update(
+        self, rows: list[DroneStateRow], labels: dict[UUID, str] | None = None
+    ) -> dict[UUID, int]:
+        if self.fail:
+            raise ConnectionError("redis is gone")
+        self.updates.append(list(rows))
+        return {row.drone_id: 1 for row in rows}
+
+
+def with_live_state(
+    live: FakeLiveState, writer: FakeWriter | None = None
+) -> tuple[IngestPipeline, FakeWriter, FakePublisher]:
+    pipeline, _, writer, publisher = build(writer=writer)
+    pipeline.live_state = cast(Any, live)
+    return pipeline, writer, publisher
+
+
+async def test_rows_reach_live_state() -> None:
+    live = FakeLiveState()
+    pipeline, _, _ = with_live_state(live)
+
+    rows = await pipeline.process(
+        EPOCH, [record(0, heartbeat()), record(1, position())]
+    )
+
+    assert live.updates == [rows]
+
+
+async def test_a_redis_failure_costs_neither_the_insert_nor_the_publish() -> None:
+    pipeline, writer, publisher = with_live_state(FakeLiveState(fail=True))
+
+    rows = await pipeline.process(
+        EPOCH, [record(0, heartbeat()), record(1, position())]
+    )
+
+    assert writer.written == rows
+    assert publisher.rows == rows
+
+
+async def test_a_failed_insert_does_not_make_every_drone_look_link_lost() -> None:
+    """Live state is derived from the same rows, not from the hypertable. A
+    database hiccup must not flip the whole fleet to lost."""
+    live = FakeLiveState()
+    pipeline, _, _ = with_live_state(live, writer=FakeWriter(fail=True))
+
+    rows = await pipeline.process(
+        EPOCH, [record(0, heartbeat()), record(1, position())]
+    )
+
+    assert live.updates == [rows]
+
+
+async def test_a_batch_with_no_rows_touches_no_live_state() -> None:
+    live = FakeLiveState()
+    pipeline, _, _ = with_live_state(live)
+
+    await pipeline.process(EPOCH, [record(0, heartbeat())])
+
+    assert live.updates == []

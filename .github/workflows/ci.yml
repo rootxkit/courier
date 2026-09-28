@@ -71,7 +71,7 @@ jobs:
       # executing the path it claims to cover has happened three times in this
       # repository; an unexecuted branch arc is what makes that visible.
       - name: pytest with branch coverage
-        run: pytest -m 'not sitl and not slow and not postgres and not nats' --cov --cov-branch --cov-report=term-missing:skip-covered --cov-report=xml
+        run: pytest -m 'not sitl and not slow and not postgres and not nats and not redis' --cov --cov-branch --cov-report=term-missing:skip-covered --cov-report=xml
 
       # Ratchets, set just under the measured figures. They catch a regression;
       # they are not a target. Raise them as coverage rises.
@@ -126,6 +126,11 @@ jobs:
         image: nats:2.10-alpine
         ports:
           - 4222:4222
+      redis:
+        # Same image as infra/docker-compose.dev.yml.
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
       timescale:
         # Same image as infra/docker-compose.dev.yml. A different one would
         # test a database nobody runs.
@@ -184,6 +189,11 @@ jobs:
         env:
           NATS_URL: nats://localhost:4222
         run: pytest -m nats -v
+
+      - name: Live state tests
+        env:
+          REDIS_URL: redis://localhost:6379/0
+        run: pytest -m redis -v
 
       - name: Database tests
         run: pytest -m postgres -v --cov=gateway.ingest_store_pg --cov=gateway.retention --cov=gateway.binding --cov=gateway.state_writer --cov-branch --cov-report=term-missing
