@@ -72,6 +72,23 @@ def state_key(drone_id: UUID) -> str:
     return f"{KEY_PREFIX}:{drone_id}:state"
 
 
+async def read_live_state(redis: Redis, drone_id: UUID) -> dict[str, Any] | None:
+    """A drone's live state, or None when its link is lost.
+
+    Needs no timeout: expiry was set when the state was written, so an absent
+    key already means "not live". The API reads through this (P2-05) without
+    constructing a writer.
+    """
+    held = await redis.hgetall(state_key(drone_id))
+    if not held:
+        return None
+    state = held.get(b"state")
+    if state is None:
+        return None
+    decoded: dict[str, Any] = json.loads(state)
+    return decoded
+
+
 @dataclass
 class LiveState:
     """Writes the newest row per drone, and answers whether a drone is live."""
@@ -118,14 +135,7 @@ class LiveState:
 
     async def get(self, drone_id: UUID) -> dict[str, Any] | None:
         """The drone's live state, or None when its link is lost."""
-        held = await self.redis.hgetall(state_key(drone_id))
-        if not held:
-            return None
-        state = held.get(b"state")
-        if state is None:
-            return None
-        decoded: dict[str, Any] = json.loads(state)
-        return decoded
+        return await read_live_state(self.redis, drone_id)
 
     async def is_live(self, drone_id: UUID) -> bool:
         return await self.get(drone_id) is not None

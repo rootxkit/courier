@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from airspace.config import AirspaceSettings
-from api.config import ApiSettings
+from api.config import ApiSettings, ConsoleSettings
 from common.config import Settings, load_settings
 from dispatch.config import DispatchSettings
 from gateway.config import GatewaySettings
@@ -28,6 +28,7 @@ ENV_EXAMPLE = REPO_ROOT / "infra" / ".env.example"
 SERVICE_SETTINGS: tuple[type[Settings], ...] = (
     GatewaySettings,
     ApiSettings,
+    ConsoleSettings,
     DispatchSettings,
     AirspaceSettings,
 )

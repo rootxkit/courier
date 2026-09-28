@@ -307,6 +307,28 @@ class BindingResolver:
         except SQLAlchemyError as error:
             raise StoreError(f"could not close binding: {error}") from error
 
+    async def close_bindings_for_drone(self, drone_id: UUID, *, at: datetime) -> int:
+        """End every open binding that attributes telemetry to `drone_id`.
+
+        P2-05: retiring an airframe. Its SYSID must stop being attributed to
+        it from `at`, on every station, or the next aircraft to transmit as
+        that address would fly under a retired identity.
+        """
+        try:
+            async with self.engine.begin() as connection:
+                result = await connection.execute(
+                    sa.text(
+                        "UPDATE source_bindings "
+                        "SET valid = tstzrange(lower(valid), :at, '[)') "
+                        "WHERE drone_id = :drone_id AND upper(valid) IS NULL "
+                        "  AND lower(valid) < :at"
+                    ),
+                    {"drone_id": str(drone_id), "at": at},
+                )
+                return int(result.rowcount)
+        except SQLAlchemyError as error:
+            raise StoreError(f"could not close bindings: {error}") from error
+
     async def bindings_for(self, station_id: str, source_id: SourceId) -> list[Binding]:
         """Every binding this address has ever had, oldest first."""
         try:

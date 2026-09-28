@@ -240,3 +240,123 @@ def test_ignored_messages_are_counted() -> None:
     station.observe_ignored_message()
     station.observe_ignored_message()
     assert station.ignored_message_count == 2
+
+
+# --- lagging (P1-14) -------------------------------------------------------
+#
+# A backlog that is not clearing: the newest stored record is old AND the
+# relay's queue is growing. Each condition is exercised alone, to show neither
+# is enough, and together, to show the state is actually produced.
+
+NOW_NS = 1_790_000_000_000_000_000
+SECOND_NS = 1_000_000_000
+
+
+def fed(depths: list[int], *, stored_lag_s: float) -> StationLinkTracker:
+    """A tracker that has seen one status per second with these depths, and
+    whose newest stored record is `stored_lag_s` old at the last of them."""
+    station = tracker()
+    for n, depth in enumerate(depths):
+        station.observe_status(status(queue_depth=depth), now_s=10.0 + n)
+    station.observe_stored(NOW_NS - int(stored_lag_s * SECOND_NS))
+    return station
+
+
+def last_s(depths: list[int]) -> float:
+    return 10.0 + len(depths) - 1
+
+
+GROWING = [100, 900, 1_700, 2_500, 3_300, 4_100]
+CLEARING = list(reversed(GROWING))
+
+
+def test_an_old_backlog_that_keeps_growing_is_lagging() -> None:
+    station = fed(GROWING, stored_lag_s=40.0)
+    assert station.state(now_s=last_s(GROWING), now_utc_ns=NOW_NS) is LinkState.LAGGING
+    assert station.lag_s(now_utc_ns=NOW_NS) == 40.0
+
+
+def test_lagging_is_not_data_lost() -> None:
+    """The paired absence: a lagging station has lost nothing, and a real loss
+    on the same station still wins."""
+    station = fed(GROWING, stored_lag_s=40.0)
+    assert station.state(now_s=last_s(GROWING), now_utc_ns=NOW_NS) is not (
+        LinkState.DATA_LOST
+    )
+
+    station.observe_status(
+        status(queue_depth=5_000, dropped_intake_total=3),
+        now_s=last_s(GROWING) + 1,
+    )
+    assert (
+        station.state(now_s=last_s(GROWING) + 1, now_utc_ns=NOW_NS)
+        is LinkState.DATA_LOST
+    )
+
+
+def test_a_growing_queue_that_is_still_fresh_is_healthy() -> None:
+    """The queue grows for a moment after every reconnect; that alone is not
+    a backlog the Gateway is failing to clear."""
+    station = fed(GROWING, stored_lag_s=2.0)
+    assert station.state(now_s=last_s(GROWING), now_utc_ns=NOW_NS) is LinkState.HEALTHY
+
+
+def test_an_old_backlog_that_is_clearing_is_not_lagging() -> None:
+    """Catching up after an outage is the system working. It is also the
+    guard against a station clock that runs slow: that makes every record look
+    old, but cannot make the relay's queue grow."""
+    station = fed(CLEARING, stored_lag_s=40.0)
+    assert station.state(now_s=last_s(CLEARING), now_utc_ns=NOW_NS) is LinkState.HEALTHY
+
+
+def test_a_station_leaves_lagging_when_its_queue_stops_growing() -> None:
+    station = fed(GROWING, stored_lag_s=40.0)
+    assert station.state(now_s=last_s(GROWING), now_utc_ns=NOW_NS) is LinkState.LAGGING
+
+    for n, depth in enumerate([4_000, 3_000, 2_000, 1_000, 200]):
+        station.observe_status(status(queue_depth=depth), now_s=16.0 + n)
+
+    assert station.state(now_s=20.0, now_utc_ns=NOW_NS) is LinkState.HEALTHY
+
+
+def test_a_station_leaves_lagging_when_the_stored_record_is_fresh_again() -> None:
+    station = fed(GROWING, stored_lag_s=40.0)
+    station.observe_stored(NOW_NS - SECOND_NS)
+    assert station.state(now_s=last_s(GROWING), now_utc_ns=NOW_NS) is LinkState.HEALTHY
+
+
+def test_too_few_statuses_are_not_a_trend() -> None:
+    depths = GROWING[:3]
+    station = fed(depths, stored_lag_s=40.0)
+    assert station.state(now_s=last_s(depths), now_utc_ns=NOW_NS) is LinkState.HEALTHY
+
+
+def test_nothing_stored_yet_is_not_lagging() -> None:
+    station = tracker()
+    for n, depth in enumerate(GROWING):
+        station.observe_status(status(queue_depth=depth), now_s=10.0 + n)
+    assert station.lag_s(now_utc_ns=NOW_NS) is None
+    assert station.state(now_s=last_s(GROWING), now_utc_ns=NOW_NS) is LinkState.HEALTHY
+
+
+def test_an_older_batch_never_moves_the_stored_record_backwards() -> None:
+    station = tracker()
+    station.observe_stored(NOW_NS)
+    station.observe_stored(NOW_NS - 60 * SECOND_NS)
+    assert station.newest_stored_utc_ns == NOW_NS
+
+
+def test_radio_silent_outranks_lagging() -> None:
+    """Losing the aircraft is a flight-safety event; lagging is ours."""
+    station = fed(GROWING, stored_lag_s=40.0)
+    station.observe_status(
+        status(queue_depth=5_000, last_datagram_age_ms=10_000), now_s=16.0
+    )
+    assert station.state(now_s=16.0, now_utc_ns=NOW_NS) is LinkState.RADIO_SILENT
+
+
+def test_a_new_session_does_not_inherit_the_old_trend() -> None:
+    station = fed(GROWING, stored_lag_s=40.0)
+    station.start_session()
+    station.observe_status(status(queue_depth=9_000), now_s=30.0)
+    assert station.state(now_s=30.0, now_utc_ns=NOW_NS) is LinkState.HEALTHY

@@ -18,16 +18,21 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>courier — live map</title>
-    <link
-      rel="stylesheet"
-      href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
-    />
+    <!--
+      P1-12. Everything the map needs is served by the console itself, so it
+      works with no internet: a pilot in the field often has none. The
+      libraries are vendored in /static/vendor (with their licences); the
+      tiles, fonts and sprites come from /basemap, which is fetched once per
+      machine by infra/basemap/fetch_basemap.sh and never committed.
+    -->
+    <link rel="stylesheet" href="/static/vendor/maplibre-gl-4.7.1.css" />
     <style>
       :root {
         color-scheme: light dark;
         --healthy: #2e7d32;
         --radio-silent: #ed6c02;
         --unreachable: #0288d1;
+        --lagging: #ef6c00;
         --data-lost: #c62828;
         --unclaimed: #6a1b9a;
       }
@@ -74,6 +79,7 @@
       .healthy { background: var(--healthy); }
       .radio_silent { background: var(--radio-silent); }
       .unreachable { background: var(--unreachable); }
+      .lagging { background: var(--lagging); }
       .data_lost { background: var(--data-lost); }
       .unclaimed { background: var(--unclaimed); }
       .unplaced { background: #616161; }
@@ -112,12 +118,15 @@
         </select>
       </label>
       <div id="link" class="muted" style="padding-top: 6px"></div>
+      <div id="basemap" class="muted"></div>
       <div id="drones"></div>
       <div id="stations"></div>
       <div id="unclaimed"></div>
     </div>
 
-    <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+    <script src="/static/vendor/maplibre-gl-4.7.1.js"></script>
+    <script src="/static/vendor/pmtiles-4.5.0.js"></script>
+    <script src="/static/vendor/protomaps-basemaps-5.7.2.js"></script>
     <script>
       "use strict";
 
@@ -150,6 +159,10 @@
           // Deliberately says what is NOT happening. Spec §9: the relay is
           // alive and buffering, and nothing has been lost.
           unreachable: "unreachable — data buffered at the station",
+          // P1-14. Says what is NOT happening, like `unreachable`: the backlog
+          // is safe at the station, the map is behind.
+          lagging: "lagging — map is behind, nothing lost",
+          behind: "behind",
           data_lost: "data lost",
           no_binding: "transmitting, no binding — register to track",
           // P1-07. Deliberately not "register to track": the address is bound
@@ -158,6 +171,9 @@
           // Present, but the aircraft has not told us where it is. Not an
           // error: indoors, before the EKF has an origin, this is normal.
           unplaced: "no position yet",
+          // P1-12. The base map is fetched per machine; without it the page
+          // still works, over a blank background, and says why.
+          no_basemap: "no base map installed — run infra/basemap/fetch_basemap.sh",
           // Telemetry is arriving and the drone is bound, but the Gateway
           // could not read a label for it from known_drones.
           unnamed: "unnamed",
@@ -184,11 +200,14 @@
           healthy: "მუშაობს",
           radio_silent: "რადიო დუმს — სადგურმა დაკარგა აპარატი",
           unreachable: "მიუწვდომელია — მონაცემები ინახება სადგურზე",
+          lagging: "ჩამორჩება — რუკა ძველია, არაფერი იკარგება",
+          behind: "ჩამორჩენა",
           data_lost: "მონაცემები დაკარგულია",
           no_binding: "გადასცემს, მაგრამ არ არის მიბმული",
           not_assigned: "მიბმულია სხვა სადგურზე — აქ უარყოფილია",
           unnamed: "უსახელო",
           unplaced: "პოზიცია ჯერ არ არის",
+          no_basemap: "საბაზისო რუკა არ არის დაყენებული — გაუშვით infra/basemap/fetch_basemap.sh",
         },
       };
 
@@ -222,17 +241,138 @@
       document.getElementById("lang").addEventListener("change", (event) => {
         lang = event.target.value;
         applyStaticStrings();
+        applyBasemapStyle();
       });
 
       // --- map -------------------------------------------------------------
+      // P1-12. A self-hosted OpenStreetMap extract (Protomaps basemap) read
+      // straight from one PMTiles file with HTTP range requests. No tile
+      // server, no API key, no third party per request.
+      const BASEMAP_URL = "/basemap/basemap.pmtiles";
+      const protocol = new pmtiles.Protocol();
+      maplibregl.addProtocol("pmtiles", protocol.tile);
+
+      // The data is OpenStreetMap, so attribution is an obligation whether or
+      // not the tiles are self-hosted. The extract date is shown beside it:
+      // an offline map has no other way to say it is stale.
+      let basemapSource = null;
+      let basemapInstalled = false;
+
+      const darkScheme = window.matchMedia("(prefers-color-scheme: dark)");
+
+      function basemapAttribution() {
+        const osm =
+          '<a href="https://www.openstreetmap.org/copyright" target="_blank">© OpenStreetMap contributors</a>';
+        const date = basemapSource && basemapSource.osm_data_as_of
+          ? ` · ${escapeHtml(basemapSource.osm_data_as_of.slice(0, 10))}`
+          : "";
+        return `${osm}${date} · <a href="https://protomaps.com" target="_blank">Protomaps</a>`;
+      }
+
+      function basemapStyle() {
+        if (!basemapInstalled) {
+          return {
+            version: 8,
+            sources: {},
+            layers: [
+              {
+                id: "background",
+                type: "background",
+                paint: { "background-color": darkScheme.matches ? "#1e1e1e" : "#e8e8e8" },
+              },
+            ],
+          };
+        }
+        const flavor = darkScheme.matches ? "dark" : "light";
+        // Georgian labels come from OSM's `name`, which in Georgia is the
+        // Georgian name; `ka` falls back to it. The fonts carry Georgian
+        // glyphs (checked: U+10A0-10FF and U+1C90-1CBF are in the PBFs).
+        return {
+          version: 8,
+          glyphs: `${location.origin}/basemap/fonts/{fontstack}/{range}.pbf`,
+          sprite: `${location.origin}/basemap/sprites/v4/${flavor}`,
+          sources: {
+            protomaps: {
+              type: "vector",
+              url: `pmtiles://${location.origin}${BASEMAP_URL}`,
+              attribution: basemapAttribution(),
+            },
+          },
+          layers: basemapLayers(flavor),
+        };
+      }
+
+      // The basemap library has no Georgian: it falls back to English and
+      // draws both names, which is right for `en` and wrong for `ka`. The
+      // extract carries no `name:ka` either (checked in its metadata), but in
+      // Georgia OSM's plain `name` IS the Georgian name. So in `ka`, every
+      // label that shows a name shows that. Road shields (`ref`) are left
+      // alone.
+      function basemapLayers(flavor) {
+        const layers = basemaps.layers("protomaps", basemaps.namedFlavor(flavor), {
+          lang: "en",
+        });
+        if (lang !== "ka") return layers;
+        return layers.map((layer) => {
+          const field = layer.layout && layer.layout["text-field"];
+          if (!field || !JSON.stringify(field).includes('"name')) return layer;
+          return {
+            ...layer,
+            layout: {
+              ...layer.layout,
+              "text-field": ["coalesce", ["get", "name:ka"], ["get", "name"]],
+            },
+          };
+        });
+      }
+
       const map = new maplibregl.Map({
         container: "map",
-        // MapLibre's own demo tiles: no API key, no account, no vendor
-        // lock-in on a page whose job is to prove a data path.
-        style: "https://demotiles.maplibre.org/style.json",
-        center: [44.8271, 41.7151],
-        zoom: 11,
+        style: basemapStyle(),
+        // No coordinates in code (CLAUDE.md): the view is fitted to the
+        // installed extract's own bounds, and then to the drones.
+        center: [0, 0],
+        zoom: 1,
+        attributionControl: { compact: false },
       });
+
+      function applyBasemapStyle() {
+        map.setStyle(basemapStyle());
+      }
+      darkScheme.addEventListener("change", applyBasemapStyle);
+
+      async function loadBasemap() {
+        const notice = document.getElementById("basemap");
+        try {
+          const header = await new pmtiles.PMTiles(
+            `${location.origin}${BASEMAP_URL}`,
+          ).getHeader();
+          try {
+            const response = await fetch("/basemap/SOURCE.json");
+            basemapSource = response.ok ? await response.json() : null;
+          } catch (error) {
+            basemapSource = null;
+          }
+          basemapInstalled = true;
+          notice.textContent = "";
+          notice.dataset.i18n = "";
+          applyBasemapStyle();
+          if (!fitted) {
+            map.fitBounds(
+              [
+                [header.minLon, header.minLat],
+                [header.maxLon, header.maxLat],
+              ],
+              { padding: 20, animate: false },
+            );
+          }
+        } catch (error) {
+          basemapInstalled = false;
+          notice.dataset.i18n = "no_basemap";
+          notice.textContent = t("no_basemap");
+        }
+      }
+      loadBasemap();
 
       const drones = new Map();
       const stations = new Map();
@@ -380,8 +520,14 @@
           // from telemetry having stopped. That inference is exactly what
           // would render a buffering station as data loss.
           const label = t(s.state);
+          // P1-14. How far behind, only while lagging: in any other state a
+          // number here would read as a problem nobody needs to act on.
+          const behind =
+            s.state === "lagging" && typeof s.lag_s === "number"
+              ? ` <span class="muted">${t("behind")} ${Math.round(s.lag_s)}${t("s")}</span>`
+              : "";
           return (
-            `<div class="row"><span>${s.station_id}</span>` +
+            `<div class="row"><span>${s.station_id}${behind}</span>` +
             `<span class="pill ${s.state}">${label}</span></div>`
           );
         });

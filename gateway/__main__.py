@@ -140,6 +140,7 @@ async def run(args: argparse.Namespace) -> int:
         authenticator=authenticator,
         processor=pipelines,
         station_reporter=publisher,
+        lagging_after_s=settings.link_timeout_s,
         host=args.host,
         port=args.port,
     )

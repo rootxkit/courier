@@ -22,7 +22,7 @@ def main() -> None:
     settings = load_settings(ConsoleSettings)
     configure_logging(service=settings.service_name, level=settings.log_level.value)
     uvicorn.run(
-        create_app(str(settings.nats_url)),
+        create_app(str(settings.nats_url), basemap_dir=settings.basemap_dir),
         host=settings.console_host,
         port=settings.console_port,
     )

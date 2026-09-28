@@ -589,11 +589,13 @@ class RecordingReporter:
         last_datagram_age_ms: int | None = None,
         queue_depth: int | None = None,
         losses: Any = None,
+        lag_s: float | None = None,
     ) -> None:
         self.reports.append((station_id, state))
         self.last_datagram_age_ms = last_datagram_age_ms
         self.queue_depth = queue_depth
         self.losses = list(losses or [])
+        self.lag_s = lag_s
 
 
 async def wait_for_reports(reporter: RecordingReporter, count: int) -> None:
@@ -747,6 +749,69 @@ async def test_the_report_carries_the_relay_queue_depth_and_datagram_age() -> No
 
     assert reporter.queue_depth == 17
     assert reporter.last_datagram_age_ms == 42
+
+
+async def test_a_station_whose_backlog_grows_is_reported_lagging_and_recovers() -> None:
+    """P1-14, end to end over a real socket: into `lagging` and back out.
+
+    The stored batch was captured a year ago on the station's clock, so the
+    stored record is old. It takes the queue growing as well to make the
+    station lag, and the queue shrinking to bring it back.
+    """
+    store = InMemoryIngestStore()
+    reporter = RecordingReporter()
+    async with (
+        running(
+            store=store,
+            station_reporter=reporter,
+            station_report_interval_s=0.02,
+            lagging_after_s=5.0,
+        ) as server,
+        connect(url(server), additional_headers=auth()) as connection,
+    ):
+        await handshake(connection, hello())
+        await connection.send(batch(0, 3))
+        await read_until(connection, "ack")
+        await connection.send(status(queue_depth=100))
+        await wait_for_state(reporter, LinkState.HEALTHY)
+
+        for depth in (900, 1_700, 2_500, 3_300, 4_100):
+            await connection.send(status(queue_depth=depth))
+        await wait_for_state(reporter, LinkState.LAGGING)
+        lag_while_lagging = reporter.lag_s
+
+        for depth in (3_000, 2_000, 1_000, 500, 100):
+            await connection.send(status(queue_depth=depth))
+        await wait_for_state(reporter, LinkState.HEALTHY)
+
+    assert lag_while_lagging is not None and lag_while_lagging > 5.0
+    states = [state for _, state, _ in store.link_states]
+    # The event log records the transition in and the transition out.
+    assert LinkState.LAGGING in states
+    assert LinkState.HEALTHY in states[states.index(LinkState.LAGGING) :]
+
+
+async def test_a_steady_station_is_never_reported_lagging() -> None:
+    """The paired absence, on the same old record: without a growing queue,
+    an old capture time alone - a slow station clock - is not lagging."""
+    reporter = RecordingReporter()
+    async with (
+        running(
+            station_reporter=reporter,
+            station_report_interval_s=0.02,
+            lagging_after_s=5.0,
+        ) as server,
+        connect(url(server), additional_headers=auth()) as connection,
+    ):
+        await handshake(connection, hello())
+        await connection.send(batch(0, 3))
+        await read_until(connection, "ack")
+        for _ in range(8):
+            await connection.send(status(queue_depth=100))
+        await wait_for_reports(reporter, 10)
+
+    assert LinkState.LAGGING not in [state for _, state in reporter.reports]
+    assert reporter.lag_s is not None and reporter.lag_s > 5.0
 
 
 async def test_a_gateway_with_no_reporter_still_serves_the_transport() -> None:

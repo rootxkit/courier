@@ -99,6 +99,7 @@ class StationReporter(Protocol):
         last_datagram_age_ms: int | None = None,
         queue_depth: int | None = None,
         losses: list[LossEvent] | None = None,
+        lag_s: float | None = None,
     ) -> None: ...
 
 
@@ -140,6 +141,8 @@ class RelayServer:
     station_report_interval_s: float = STATION_REPORT_INTERVAL_S
     unreachable_after_s: float = 3.0
     radio_silent_after_ms: int = 3_000
+    # P1-14. The Gateway passes its link timeout; see StationLinkTracker.
+    lagging_after_s: float = 15.0
     # P1-10: where the time of storing a batch goes. Shared with the store and
     # the pipeline so one log line shows every stage's share.
     timings: StageTimings = field(default_factory=shared_timings)
@@ -244,6 +247,7 @@ class RelayServer:
                 station_id=station_id,
                 unreachable_after_s=self.unreachable_after_s,
                 radio_silent_after_ms=self.radio_silent_after_ms,
+                lagging_after_s=self.lagging_after_s,
             ),
         )
 
@@ -325,6 +329,7 @@ class _Session:
         self._watermark = -1
         self._acked = -1
         self._last_state: LinkState | None = None
+        self.tracker.start_session()
 
     async def run(self) -> None:
         # The state at connect, recorded and reported before anything is
@@ -370,6 +375,7 @@ class _Session:
             self._watermark = await self.server.store.store_records(
                 self.station_id, self.epoch, records
             )
+        self.tracker.observe_stored(max(record.recv_utc_ns for record in records))
         # Only now, with the bytes durable and the watermark advanced, does
         # anything look inside them. Obligation 9.
         if self.server.processor is not None:
@@ -443,7 +449,7 @@ class _Session:
         transitions that matter under a heartbeat, and `ingest_events` is what
         an incident is reconstructed from.
         """
-        state = self.tracker.state(now_s=now_s)
+        state = self.tracker.state(now_s=now_s, now_utc_ns=time.time_ns())
         if state != self._last_state:
             self._last_state = state
             await self.server.store.record_link_state(
@@ -512,4 +518,5 @@ class _Session:
             else status.last_datagram_age_ms,
             queue_depth=None if status is None else status.queue_depth,
             losses=list(self.tracker.losses),
+            lag_s=self.tracker.lag_s(now_utc_ns=time.time_ns()),
         )

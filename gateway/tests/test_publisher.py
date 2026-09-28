@@ -188,6 +188,34 @@ async def test_a_healthy_station_is_neither() -> None:
     assert (payload["data_is_lost"], payload["buffering"]) == (False, False)
 
 
+async def test_a_lagging_station_is_buffering_not_losing_and_says_how_far_behind() -> (
+    None
+):
+    """P1-14. The map is showing the past, and the console is told by how much;
+    nothing is lost, and the console is told that too."""
+    bus = RecordingBus()
+
+    await TelemetryPublisher(bus=bus).publish_station(
+        "tbilisi-base-1", LinkState.LAGGING, queue_depth=41_000, lag_s=37.456
+    )
+
+    _, payload = bus.published[0]
+    assert payload["state"] == "lagging"
+    assert payload["data_is_lost"] is False
+    assert payload["buffering"] is True
+    assert payload["lag_s"] == 37.5
+
+
+async def test_a_station_with_nothing_stored_has_no_lag() -> None:
+    """None, never zero: zero would claim the map is perfectly current."""
+    bus = RecordingBus()
+    await TelemetryPublisher(bus=bus).publish_station(
+        "tbilisi-base-1", LinkState.HEALTHY
+    )
+    _, payload = bus.published[0]
+    assert payload["lag_s"] is None
+
+
 # --- unclaimed sources -----------------------------------------------------
 
 

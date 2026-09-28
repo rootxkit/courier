@@ -109,11 +109,11 @@ jobs:
       # The SITL launcher and the commit-msg hook are executable code on the
       # critical path of every developer's day; they get linted too.
       - name: shellcheck
-        run: shellcheck sim/run_sitl.sh sim/stop_sitl.sh .githooks/commit-msg
+        run: shellcheck sim/run_sitl.sh sim/stop_sitl.sh .githooks/commit-msg infra/basemap/fetch_basemap.sh
 
       - name: Scripts are executable
         run: |
-          for f in sim/run_sitl.sh sim/stop_sitl.sh .githooks/commit-msg; do
+          for f in sim/run_sitl.sh sim/stop_sitl.sh .githooks/commit-msg infra/basemap/fetch_basemap.sh; do
             test -x "$f" || { echo "$f is not executable"; exit 1; }
           done
 
@@ -147,7 +147,24 @@ jobs:
           --health-timeout 5s
           --health-retries 36
           --health-start-period 40s
+      postgres:
+        # P2-01: the relational database, same image as the compose stack.
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: courier
+          POSTGRES_PASSWORD: courier_dev
+          POSTGRES_DB: courier
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U courier -d courier"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 24
+          --health-start-period 20s
     env:
+      DATABASE_URL: postgresql+asyncpg://courier:courier_dev@localhost:5432/courier
+      RELATIONAL_TEST_DATABASE_URL: postgresql+asyncpg://courier:courier_dev@localhost:5432/courier_test
       TELEMETRY_DATABASE_URL: postgresql+asyncpg://courier:courier_dev@localhost:5433/courier_telemetry
       # Tests create and drop this one themselves; the fixture refuses any
       # name that does not end in _test.
@@ -184,6 +201,13 @@ jobs:
           alembic -c infra/migrations/telemetry/alembic.ini upgrade head
           alembic -c infra/migrations/telemetry/alembic.ini downgrade base
           alembic -c infra/migrations/telemetry/alembic.ini upgrade head
+
+      # P2-01. The other tree, against the other database. Never merged.
+      - name: Relational migrations run clean up and down
+        run: |
+          alembic -c infra/migrations/relational/alembic.ini upgrade head
+          alembic -c infra/migrations/relational/alembic.ini downgrade base
+          alembic -c infra/migrations/relational/alembic.ini upgrade head
 
       - name: Bus tests
         env:
