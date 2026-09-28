@@ -43,7 +43,7 @@ of home. From the monitor's log, in UTC:
 | 20:28:46 | SITL-02 enters the zone | zone warning raised |
 | 20:29:25 | both returning home, converging | conflict raised: CPA 42.7 m in 57.7 s |
 | 20:29:32 | SITL-02 leaves the zone | zone warning cleared |
-| 20:29:57 | still returning (see the last note below) | conflict cleared |
+| 20:29:57 | SITL-02 stopped, 204 m from SITL-01 (see the last note below) | conflict cleared |
 
 16 `events` rows: one per aircraft per transition. The console showed the
 head-on alert with both labels and a critical badge.
@@ -57,9 +57,17 @@ head-on alert with both labels and a critical badge.
 - **A console opened after an alert showed its numbers from the moment of
   raising** ("in 57 s" long after). Active alerts are now republished every
   second.
-- **CPA is a straight-line prediction.** On the return, the conflict cleared
-  at 20:29:57 while the aircraft were still heading for homes 25 m apart. The
-  likely reason, not yet confirmed from the recorded tracks: slowing towards
-  a stop moves the straight-line closest approach beyond 60 s. §7.2 specifies linear CPA; an aircraft that slows to hover near
-  another is caught again only once relative velocity is near zero and the
-  current distance decides. Worth a scenario of its own under P5-12.
+- **CPA is a straight-line prediction, and the clear on the return was
+  correct.** Read from the recorded tracks with the P10-03 replay on
+  2026-09-29 (positions and finite-difference velocities from `drone_state`):
+  SITL-01 was stationary from 20:29:15 on, 0.0 m/s. SITL-02 flew towards it at
+  10 m/s from 20:29:21, which projected in a straight line to a closest
+  approach of about 42 m - hence the alert at 20:29:25. It decelerated from
+  20:29:51 and stopped at 20:29:56, 204 m from SITL-01, and the pair stayed
+  205 m apart until the recording ended at 20:30:30. The conflict cleared
+  at 20:29:57, a second after the stop. So nothing was missed: the alert was
+  the conservative side of a linear prediction, which cannot know an
+  aircraft will stop short. The earlier note here guessed the opposite
+  (that deceleration hid a real conflict); the record does not support it.
+  The case where slowing *does* hide a conflict - an aircraft slowing to
+  hover near another - is still worth a scenario of its own under P5-12.

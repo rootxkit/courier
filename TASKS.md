@@ -852,6 +852,16 @@ Each row is a task and a SITL test. None may be skipped.
       show the track stopping and say why, never interpolate across a hole. A
       smooth line through missing data invents evidence, which in an accident
       investigation is worse than showing nothing.
+      *Partial* 2026-09-29: `/replay` on the core API, see
+      [`docs/runbooks/p10-03-replay.md`](docs/runbooks/p10-03-replay.md). The
+      track is drawn as segments only; it is cut by silence, by any relay
+      `gap` between two samples however short (unless another station heard
+      the aircraft through it), and by telemetry without a position. Each
+      hole carries the cause the Gateway logged or "no recorded cause";
+      airspace alerts come from `events`. A departing station is now logged
+      `unreachable`. Verified on the 2026-09-28 SITL airspace run.
+      Outstanding: a live hole with a logged cause, which comes with P1-01
+      Procedure A.
 - [ ] **P10-04** Automatic `.bin` dataflash log retrieval and archival after
       each flight.
 - [ ] **P10-05** Maintenance tracking: flight hours, battery cycles, propeller

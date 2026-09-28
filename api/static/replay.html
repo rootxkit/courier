@@ -780,7 +780,12 @@
         const active = activeAlertsAt(cursorMs);
         const lines = [];
         if (hole) lines.push(fill(t("in_gap"), { why: describeHole(hole) }));
-        for (const alert of active) lines.push(`⚠ ${t("active_now")}: ${describeAlert(alert)}`);
+        // The numbers are the alert's when it was raised; say so, since the
+        // live console refreshes them and a replay of the audit log cannot.
+        for (const alert of active) {
+          const raisedAt = utc(Date.parse(alert.ts)).slice(11, 19);
+          lines.push(`⚠ ${t("active_now")} (${t("raised")} ${raisedAt}): ${describeAlert(alert)}`);
+        }
         status.textContent = lines.join("  ·  ");
         status.className = hole ? "gap" : "";
 
