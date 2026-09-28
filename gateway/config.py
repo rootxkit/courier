@@ -41,6 +41,15 @@ class GatewaySettings(
         default=15.0, gt=0.0, validation_alias="LINK_TIMEOUT_S"
     )
 
+    # P1-04: drone_state is inserted when this many rows are buffered or this
+    # long after the first one, whichever comes first.
+    state_flush_rows: int = Field(
+        default=100, ge=1, validation_alias="STATE_FLUSH_ROWS"
+    )
+    state_flush_interval_s: float = Field(
+        default=0.5, gt=0.0, validation_alias="STATE_FLUSH_INTERVAL_S"
+    )
+
     # Where the raw archive's hourly segments live. Server-side, not on a
     # pilot's laptop: the laptop's disk is protected by the relay's queue cap
     # (P7-11), which is a different mechanism for the same principle.
