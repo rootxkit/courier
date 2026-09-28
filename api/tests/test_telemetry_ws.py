@@ -263,7 +263,7 @@ async def test_the_page_carries_both_languages() -> None:
         assert state in page
 
 
-async def test_the_page_handles_only_the_three_console_message_kinds() -> None:
+async def test_the_page_handles_only_the_console_message_kinds() -> None:
     """P1-08 is minimal on purpose; corridors are P5 and the console is P6.
 
     Asserted on the message kinds the page branches on rather than by
@@ -279,4 +279,5 @@ async def test_the_page_handles_only_the_three_console_message_kinds() -> None:
         page = (await client.get("/")).text
 
     handled = set(re.findall(r'message\.kind === "(\w+)"', page))
-    assert handled == {"telemetry", "station", "events"}
+    # `alert` since P6-03: the airspace monitor's alerts panel.
+    assert handled == {"telemetry", "station", "events", "alert"}

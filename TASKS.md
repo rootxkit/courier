@@ -676,12 +676,25 @@ This is the phase where a bug means physical damage. Budget the most time here.
       *Done when:* a route through a no-fly polygon is rejected with the zone
       named in the error.
 
-- [ ] **P5-06** Neighbour lookup on each telemetry tick, 800 m radius.
+- [x] **P5-06** Neighbour lookup on each telemetry tick, 800 m radius.
       *Done when:* lookup stays under 5 ms at 100 airborne drones.
+      *Closed* 2026-09-29. A latitude-longitude grid with cells at least the
+      radius wide (`airspace/neighbours.py`); agrees with brute force over
+      300 scattered aircraft, and a test asserts the slowest of 100 lookups
+      at 100 drones is under 5 ms. The radius comes from `airspace_policy`.
 
-- [ ] **P5-07** CPA computation per `ARCHITECTURE.md` §7.2.
+- [x] **P5-07** CPA computation per `ARCHITECTURE.md` §7.2.
       *Done when:* unit tests cover head-on, crossing, overtaking, parallel, and
       the zero-relative-velocity degenerate case.
+      *Closed* 2026-09-29. All five, plus diverging pairs (judged on where
+      they are now), vertical separation evaluated at the CPA time, and a
+      climb that closes it. Thresholds live in `airspace_policy` (relational,
+      seeded with §7.2's Stage 0 values). `python -m airspace` raises a
+      critical alert per conflicting pair of armed aircraft, publishes it and
+      writes it to `events`. Watched live with two SITL aircraft: raised when
+      hovering 25 m apart, cleared when they separated, raised 57 s before a
+      head-on pass (CPA 2.8 m), cleared as they diverged. See
+      `docs/runbooks/p5-airspace-monitor.md`.
 
 - [ ] **P5-08** Deterministic resolution by drone ID with commanded descent or
       loiter, logged on both vehicles.
@@ -723,6 +736,17 @@ This is the phase where a bug means physical damage. Budget the most time here.
       number determines whether Stage 0 can safely run more than two aircraft
       at once — it is a go/no-go input, not a nice-to-have.
 
+- [x] **P5-15** In-flight zone incursion alerts: an armed aircraft inside a
+      `no_fly` (critical) or `restricted` (warning) zone, within its AMSL
+      band, is alerted as it happens. P5-05 checks routes before release;
+      this watches where aircraft actually are, which a monitoring operator
+      needs whether or not a flight was planned here.
+      *Done when:* an aircraft flown into a zone raises an alert naming the
+      zone, and leaving it clears the alert.
+      *Closed* 2026-09-29, added with the owner's agreement to build the
+      monitoring core. Watched live: both SITL aircraft raised and cleared a
+      warning on entering and leaving a restricted test zone.
+
 ---
 
 ## Phase 6 — Pilot console (2 weeks)
@@ -731,8 +755,13 @@ This is the phase where a bug means physical damage. Budget the most time here.
       Layer toggles.
 - [ ] **P6-02** Per-drone detail panel: full telemetry, mission progress,
       battery trend, link quality.
-- [ ] **P6-03** Alert system with severity levels, audible cue for critical,
+- [~] **P6-03** Alert system with severity levels, audible cue for critical,
       acknowledge flow.
+      *Partial* 2026-09-29: the console shows airspace alerts with severity,
+      repeats a tone for an unacknowledged critical one, and replays active
+      alerts to a console opened later. Acknowledgement is per console and
+      not yet recorded (P6-07), and station and battery alerts are not yet on
+      this path.
       **Alert text must not imply loss that has not happened.** A station going
       unreachable means the ground station cannot be reached from here; the
       relay is almost certainly still receiving and buffering, and the record

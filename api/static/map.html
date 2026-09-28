@@ -82,6 +82,11 @@
       .lagging { background: var(--lagging); }
       .data_lost { background: var(--data-lost); }
       .unclaimed { background: var(--unclaimed); }
+      .critical { background: var(--data-lost); }
+      .warning { background: var(--lagging); }
+      .alert-row { align-items: flex-start; }
+      .alert-row.unacked { font-weight: 600; }
+      button.ack { font: inherit; font-size: 12px; cursor: pointer; }
       .unplaced { background: #616161; }
       select { font: inherit; }
       .marker {
@@ -119,6 +124,7 @@
       </label>
       <div id="link" class="muted" style="padding-top: 6px"></div>
       <div id="basemap" class="muted"></div>
+      <div id="alerts"></div>
       <div id="drones"></div>
       <div id="stations"></div>
       <div id="unclaimed"></div>
@@ -163,6 +169,19 @@
           // is safe at the station, the map is behind.
           lagging: "lagging — map is behind, nothing lost",
           behind: "behind",
+          // P6-03. What the airspace monitor saw, in plain words. Neither
+          // wording claims anything about telemetry: these are about where
+          // aircraft are, not about the link.
+          alerts: "Airspace alerts",
+          critical: "critical",
+          warning: "warning",
+          conflict: "Converging",
+          conflict_detail: "closest {d} m in {t} s (vertical {v} m)",
+          zone: "Inside {zone}",
+          no_fly: "no-fly zone",
+          restricted: "restricted zone",
+          acknowledge: "Acknowledge",
+          acknowledged: "acknowledged",
           data_lost: "data lost",
           no_binding: "transmitting, no binding — register to track",
           // P1-07. Deliberately not "register to track": the address is bound
@@ -202,6 +221,16 @@
           unreachable: "მიუწვდომელია — მონაცემები ინახება სადგურზე",
           lagging: "ჩამორჩება — რუკა ძველია, არაფერი იკარგება",
           behind: "ჩამორჩენა",
+          alerts: "საჰაერო სივრცის გაფრთხილებები",
+          critical: "კრიტიკული",
+          warning: "გაფრთხილება",
+          conflict: "უახლოვდებიან",
+          conflict_detail: "უმცირესი მანძილი {d} მ {t} წმ-ში (ვერტიკალურად {v} მ)",
+          zone: "ზონაშია: {zone}",
+          no_fly: "აკრძალული ზონა",
+          restricted: "შეზღუდული ზონა",
+          acknowledge: "დადასტურება",
+          acknowledged: "დადასტურებულია",
           data_lost: "მონაცემები დაკარგულია",
           no_binding: "გადასცემს, მაგრამ არ არის მიბმული",
           not_assigned: "მიბმულია სხვა სადგურზე — აქ უარყოფილია",
@@ -377,6 +406,83 @@
       const drones = new Map();
       const stations = new Map();
       const unclaimed = new Map();
+      // P6-03. Active airspace alerts by key, and which of them this console
+      // has acknowledged. Acknowledging silences the cue here; it does not
+      // clear the alert, which only the airspace monitor does when the
+      // condition is gone.
+      const alerts = new Map();
+      const acknowledged = new Set();
+
+      const fill = (template, values) =>
+        template.replace(/\{(\w+)\}/g, (_, name) => String(values[name]));
+
+      // An audible cue for an unacknowledged critical alert, repeated while
+      // one exists. Generated, so there is no sound file to ship. Browsers
+      // allow audio only after the page has been clicked once; until then the
+      // cue is silent and the alert is still shown.
+      let audio = null;
+      function beep() {
+        try {
+          audio = audio || new AudioContext();
+          const oscillator = audio.createOscillator();
+          const gain = audio.createGain();
+          oscillator.frequency.value = 880;
+          gain.gain.value = 0.15;
+          oscillator.connect(gain).connect(audio.destination);
+          oscillator.start();
+          oscillator.stop(audio.currentTime + 0.25);
+        } catch (error) {
+          // No audio: the visual alert stands on its own.
+        }
+      }
+      setInterval(() => {
+        for (const [key, alert] of alerts) {
+          if (alert.severity === "critical" && !acknowledged.has(key)) {
+            beep();
+            return;
+          }
+        }
+      }, 2000);
+
+      function acknowledge(key) {
+        acknowledged.add(key);
+        render();
+      }
+      window.acknowledge = acknowledge;
+
+      function alertName(alert, index) {
+        const label = alert.labels && alert.labels[index];
+        return label ? escapeHtml(label) : escapeHtml(alert.drone_ids[index].slice(0, 8));
+      }
+
+      function renderAlerts() {
+        const rows = [...alerts.entries()].map(([key, alert]) => {
+          const d = alert.detail || {};
+          const what =
+            alert.kind === "conflict"
+              ? `${t("conflict")}: ${alertName(alert, 0)} ↔ ${alertName(alert, 1)}` +
+                `<div class="muted">${fill(t("conflict_detail"), {
+                  d: d.d_cpa_horizontal_m,
+                  t: d.t_cpa_s,
+                  v: d.d_alt_at_cpa_m,
+                })}</div>`
+              : `${alertName(alert, 0)}: ${fill(t("zone"), {
+                  zone: escapeHtml(d.zone_name),
+                })}<div class="muted">${t(d.zone_type)}</div>`;
+          const acked = acknowledged.has(key);
+          const action = acked
+            ? `<span class="muted">${t("acknowledged")}</span>`
+            : `<button class="ack" onclick="acknowledge('${escapeHtml(key)}')">${t("acknowledge")}</button>`;
+          return (
+            `<div class="row alert-row${acked ? "" : " unacked"}"><span>${what}</span>` +
+            `<span><span class="pill ${alert.severity}">${t(alert.severity)}</span> ${action}</span></div>`
+          );
+        });
+        document.getElementById("alerts").innerHTML = rows.length
+          ? `<div class="row"><strong>${t("alerts")}</strong><span class="muted">${rows.length}</span></div>` +
+            rows.join("")
+          : "";
+      }
       let fitted = false;
 
       function markerElement() {
@@ -455,6 +561,7 @@
       }
 
       function render() {
+        renderAlerts();
         const dronesPanel = document.getElementById("drones");
         const rows = [...drones.entries()].map(([id, entry]) => {
           const age = Math.round((Date.now() - entry.seenAt) / 1000);
@@ -565,6 +672,13 @@
             upsertDrone(message.data);
           } else if (message.kind === "station") {
             stations.set(message.data.station_id, message.data);
+          } else if (message.kind === "alert") {
+            if (message.data.state === "cleared") {
+              alerts.delete(message.data.key);
+              acknowledged.delete(message.data.key);
+            } else {
+              alerts.set(message.data.key, message.data);
+            }
           } else if (
             message.kind === "events" &&
             (message.name === "unclaimed_source" || message.name === "rejected_source")

@@ -1,0 +1,138 @@
+"""The airspace monitor as a service: bus in, alerts out, every alert audited.
+
+Subscribes to the Gateway's `telemetry.*`, feeds `AirspaceMonitor`, and for
+each alert raised or cleared:
+
+- publishes `alert.<key>` with `state` "raised" or "cleared", which the console
+  shows (P6-03), and republishes each active alert every tick with `state`
+  "active", so the numbers a console shows are current;
+- appends an `events` row in the relational database, so an incident can be
+  reconstructed from the audit log (P2-06) and not only from whoever was
+  watching.
+
+A publish or audit failure is logged and never stops the monitor: the next
+message must still be evaluated.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from typing import Any, Protocol
+
+import sqlalchemy as sa
+from sqlalchemy.ext.asyncio import AsyncEngine
+
+from airspace.monitor import AirspaceMonitor, Alert, Change
+from common import get_logger
+
+_log = get_logger(__name__)
+
+ALERT_SUBJECT = "alert"
+ACTOR_TYPE = "airspace"
+
+
+class Bus(Protocol):
+    async def publish(self, subject: str, payload: bytes) -> None: ...
+
+
+class AuditLog(Protocol):
+    async def record(self, alert: Alert, state: str) -> None: ...
+
+
+def alert_subject(alert: Alert) -> str:
+    # NATS tokens are separated by dots; the key has none.
+    return f"{ALERT_SUBJECT}.{alert.key}"
+
+
+def encode_alert(alert: Alert, state: str) -> bytes:
+    return json.dumps({"state": state, **alert.as_dict()}).encode("utf-8")
+
+
+@dataclass
+class EventsAuditLog:
+    """One `events` row per aircraft per alert transition."""
+
+    engine: AsyncEngine
+
+    async def record(self, alert: Alert, state: str) -> None:
+        async with self.engine.begin() as connection:
+            for drone_id in alert.drone_ids:
+                await connection.execute(
+                    sa.text(
+                        "INSERT INTO events (actor_type, entity_type, entity_id, "
+                        " event_type, payload) "
+                        "VALUES (:actor, 'drone', :drone_id, :event_type, "
+                        " CAST(:payload AS jsonb))"
+                    ),
+                    {
+                        "actor": ACTOR_TYPE,
+                        "drone_id": str(drone_id),
+                        "event_type": f"airspace_alert_{state}",
+                        "payload": json.dumps(alert.as_dict()),
+                    },
+                )
+
+
+@dataclass
+class AirspaceService:
+    monitor: AirspaceMonitor
+    bus: Bus
+    audit: AuditLog | None = None
+    clock: Callable[[], float] = time.monotonic
+
+    async def on_telemetry(self, payload: bytes) -> None:
+        try:
+            message: dict[str, Any] = json.loads(payload)
+            change = self.monitor.observe(message, now_s=self.clock())
+        except (ValueError, KeyError, TypeError) as error:
+            _log.warning("unusable telemetry message", extra={"error": repr(error)})
+            return
+        await self._emit(change)
+
+    async def on_tick(self) -> None:
+        await self._emit(self.monitor.tick(now_s=self.clock()))
+        # Refresh what is still active, on the bus only. An alert's numbers
+        # change as the pair closes; a console showing "closest 2.8 m in
+        # 57 s" from the moment it was raised is wrong a second later. Not
+        # audited: the log records transitions, not a heartbeat.
+        for alert in self.monitor.active:
+            await _guard(
+                "publish",
+                self.bus.publish(alert_subject(alert), encode_alert(alert, "active")),
+            )
+
+    async def _emit(self, change: Change) -> None:
+        for state, alerts in (("raised", change.raised), ("cleared", change.cleared)):
+            for alert in alerts:
+                await self._send(alert, state)
+
+    async def _send(self, alert: Alert, state: str) -> None:
+        _log.info(
+            "airspace alert",
+            extra={
+                "state": state,
+                "key": alert.key,
+                "kind": alert.kind.value,
+                "severity": alert.severity.value,
+                "drone_ids": [str(d) for d in alert.drone_ids],
+            },
+        )
+        await _guard(
+            "publish",
+            self.bus.publish(alert_subject(alert), encode_alert(alert, state)),
+        )
+        if self.audit is not None:
+            await _guard("audit", self.audit.record(alert, state))
+
+
+async def _guard(what: str, action: Awaitable[None]) -> None:
+    try:
+        await action
+    except Exception as error:
+        _log.error(
+            "could not deliver an airspace alert",
+            extra={"step": what, "error": repr(error)},
+        )

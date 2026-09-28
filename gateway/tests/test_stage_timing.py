@@ -91,7 +91,12 @@ def test_a_window_that_has_elapsed_is_reported_once_and_reset(
     logger = logging.getLogger("gateway.stage_timing")
     captured = Captured()
     monkeypatch.setattr(logger, "propagate", False)
-    monkeypatch.setattr(logger, "level", logging.INFO)
+    # setLevel, not an attribute patch: the logger caches isEnabledFor per
+    # level, and only setLevel clears that cache. Patching `level` left a
+    # cached "INFO is off" from an earlier test in force, so this passed or
+    # failed depending on which tests had logged through this module first.
+    previous_level = logger.level
+    logger.setLevel(logging.INFO)
     logger.addHandler(captured)
     try:
         stages, clock = timings(window_s=10.0)
@@ -103,6 +108,7 @@ def test_a_window_that_has_elapsed_is_reported_once_and_reset(
         assert stages.report_if_due() is True
     finally:
         logger.removeHandler(captured)
+        logger.setLevel(previous_level)
 
     [line] = [r for r in captured.records if r.getMessage() == "ingest stage timings"]
     fields = cast(Any, line)

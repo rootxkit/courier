@@ -49,7 +49,7 @@ _log = get_logger(__name__)
 
 # Everything the console needs, and nothing it does not. `>` would also carry
 # subjects added later for services that are not a browser.
-SUBSCRIBED_SUBJECTS = ("telemetry.*", "station.*", "events.*")
+SUBSCRIBED_SUBJECTS = ("telemetry.*", "station.*", "events.*", "alert.*")
 
 # Subjects that carry *state* - the latest message on one of these replaces the
 # previous one, so the latest is a complete picture and is worth replaying to a
@@ -60,7 +60,11 @@ SUBSCRIBED_SUBJECTS = ("telemetry.*", "station.*", "events.*")
 # subject would quietly turn them into one. A console that attaches after an
 # event was published does not see it, and that is a real gap - P6-01 fixes it
 # with a queried event history, not by pretending the bus remembers.
-SNAPSHOT_KINDS = frozenset({"telemetry", "station"})
+#
+# `alert` is state too (P6-03): an alert is active until the airspace monitor
+# publishes it cleared, and a console opened after it was raised must still
+# see it. A cleared alert is removed from the snapshot rather than replayed.
+SNAPSHOT_KINDS = frozenset({"telemetry", "station", "alert"})
 
 # A bound on the snapshot, which is otherwise one entry per distinct drone and
 # station the process has ever seen. In a fleet that is small; over a long
@@ -123,7 +127,13 @@ class ConsoleHub:
             return
 
         message = json.dumps({"kind": kind, "name": name, "data": body})
-        if kind in SNAPSHOT_KINDS:
+        if (
+            kind == "alert"
+            and isinstance(body, dict)
+            and body.get("state") == "cleared"
+        ):
+            self.snapshot.pop((kind, name), None)
+        elif kind in SNAPSHOT_KINDS:
             self._remember(kind, name, message)
         for queue in list(self.clients):
             try:
