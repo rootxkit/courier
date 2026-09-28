@@ -537,9 +537,11 @@ async def test_a_healthy_station_records_no_loss() -> None:
     # that unreachable - "connected, no status yet, not healthy" - but until
     # the state was reported on a timer nothing ever wrote it down, so the log
     # began wherever the first `status` put it.
+    # And `unreachable` last: the session ended, and the log says so (P10-03).
     assert [state for _, state, _ in store.link_states] == [
         LinkState.UNREACHABLE,
         LinkState.HEALTHY,
+        LinkState.UNREACHABLE,
     ]
 
 
@@ -683,10 +685,11 @@ async def test_the_event_log_keeps_only_transitions() -> None:
         await wait_for_reports(reporter, 5)
 
     assert len(reporter.reports) >= 5
-    # UNREACHABLE on connect, because no status has arrived yet, then HEALTHY.
-    # Never a third row for a state that did not change.
+    # UNREACHABLE on connect, because no status has arrived yet, then HEALTHY,
+    # then UNREACHABLE when the session ends. Never a row for a state that did
+    # not change, however many reports went out between.
     states = [state for _, state, _ in store.link_states]
-    assert states == [LinkState.UNREACHABLE, LinkState.HEALTHY]
+    assert states == [LinkState.UNREACHABLE, LinkState.HEALTHY, LinkState.UNREACHABLE]
 
 
 async def test_a_station_that_stops_sending_status_becomes_unreachable() -> None:
@@ -734,6 +737,25 @@ async def test_a_station_that_disconnects_is_not_left_reported_healthy() -> None
         await wait_for_state(reporter, LinkState.UNREACHABLE)
 
     assert reporter.reports[-1] == (STATION, LinkState.UNREACHABLE)
+
+
+async def test_a_station_that_disconnects_is_logged_unreachable() -> None:
+    """The event log, not only the live report. P10-03 replay explains a hole
+    in a track from `ingest_events`; a log whose last word on a departed
+    station is `healthy` leaves the commonest cause of a hole unexplained."""
+    store = InMemoryIngestStore()
+    reporter = RecordingReporter()
+    async with running(
+        store=store, station_reporter=reporter, station_report_interval_s=0.02
+    ) as server:
+        async with connect(url(server), additional_headers=auth()) as connection:
+            await handshake(connection, hello())
+            await connection.send(status())
+            await wait_for_state(reporter, LinkState.HEALTHY)
+        await wait_for_state(reporter, LinkState.UNREACHABLE)
+
+    states = [state for _, state, _ in store.link_states]
+    assert states[-2:] == [LinkState.HEALTHY, LinkState.UNREACHABLE]
 
 
 async def test_the_report_carries_the_relay_queue_depth_and_datagram_age() -> None:
