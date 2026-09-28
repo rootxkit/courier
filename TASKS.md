@@ -166,7 +166,7 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
 - [ ] **P1-06** NATS publication: `telemetry.{drone_id}`, `events.{type}`.
       *Done when:* a test subscriber receives every position update.
 
-- [ ] **P1-07** Gateway authentication: **per-station bearer token** on the
+- [x] **P1-07** Gateway authentication: **per-station bearer token** on the
       relay-v1 upgrade request, plus a server-side policy check binding
       `(station_id, sysid)`. Unauthenticated packets dropped and
       rate-limit-logged.
@@ -180,6 +180,18 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
       assigned. Direct UDP sources (SITL, bench testing) keep their own path.
       *Done when:* a spoofed SYSID is rejected, and a valid station presenting
       a vehicle it is not assigned is rejected and logged.
+      *Closed* 2026-09-28. The policy is `source_bindings` (spec §12 question
+      6). An address bound only on another station resolves to
+      `not assigned`. It is archived, not attributed, and recorded as a
+      `rejected_source` event. It is published on its own subject, so the map
+      never offers to register it. It is logged at most once per minute per
+      address with the suppressed count. 401s are rate-limited the same way.
+      Tested against PostgreSQL in both directions: rejected elsewhere,
+      resolved on the assigned station, accepted on both during a handover,
+      and unclaimed when bound nowhere.
+      *Not covered:* a compromised station replaying a SYSID that *is* bound
+      on it. That needs MAVLink 2 signing on the vehicle, outside Stage 0.
+      Token storage and rotation remain spec §12 question 1.
 
 - [x] **P1-08** WebSocket endpoint + minimal map page: MapLibre, one marker per
       drone, heading arrow, battery label.
