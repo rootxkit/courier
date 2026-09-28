@@ -24,23 +24,35 @@ was captured, which is the whole reason bindings have validity.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from uuid import UUID
 
 from common import get_logger
 from gateway.binding import BindingResolver, Resolution
-from gateway.classify import SourceKind, SourceRegistry
+from gateway.classify import Source, SourceKind, SourceRegistry
 from gateway.drone_state import (
     DroneStateRow,
     StateAssembler,
     timestamp_from_recv_utc_ns,
 )
-from gateway.parsing import SourceId, parse_datagram
+from gateway.parsing import ParsedMessage, SourceId, parse_datagram
 from gateway.publisher import TelemetryPublisher
 from gateway.relay_records import Record
 from gateway.stage_timing import StageTimings, shared_timings
 from gateway.state_writer import DroneStateWriter
 
 _log = get_logger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class _Observed:
+    """One parsed message, with its record's seq and capture time, and its
+    source as classified at that message."""
+
+    seq: int
+    ts: datetime
+    message: ParsedMessage
+    source: Source
 
 
 @dataclass
@@ -73,21 +85,62 @@ class IngestPipeline:
         self.assembler = StateAssembler(station_id=self.station_id)
 
     async def process(self, epoch: str, records: list[Record]) -> list[DroneStateRow]:
-        """Convert a batch of stored records. Never raises into the transport."""
+        """Convert a batch of stored records. Never raises into the transport.
+
+        Three passes, so bindings are read once per batch rather than once per
+        message (P1-13). Per message, the resolver cost one database query:
+        about 3.3 ms, which capped the Gateway at about 300 records/s at any
+        fleet size and was 96% of the time spent storing a batch (ADR-002).
+
+        Nothing about *which* binding applies changes. Each message is still
+        resolved against its own record's capture time, with the source as it
+        was classified at that message - `Source` is a frozen snapshot, so
+        classifying the whole batch first cannot leak a later HEARTBEAT back
+        into an earlier message's resolution.
+        """
+        observed = self._observe(epoch, records)
+        if not observed:
+            return []
+
+        try:
+            with self.timings.measure("process.resolve"):
+                resolutions = await self.resolver.resolve_batch(
+                    self.station_id,
+                    [(item.source, item.ts) for item in observed],
+                )
+        except Exception as error:
+            # The flight record is already durable (obligation 9); what is lost
+            # is this batch's derived view. Logged per batch, because a failed
+            # binding read fails every message in it the same way.
+            _log.error(
+                "could not resolve a batch",
+                extra={
+                    "station_id": self.station_id,
+                    "epoch": epoch,
+                    "first_seq": observed[0].seq,
+                    "last_seq": observed[-1].seq,
+                    "error": repr(error),
+                },
+            )
+            return []
+
         rows: list[DroneStateRow] = []
-        for record in records:
+        for item, resolution in zip(observed, resolutions, strict=True):
             try:
-                rows.extend(await self._process_record(epoch, record))
+                row = await self._assemble(epoch, item, resolution)
             except Exception as error:
                 _log.error(
                     "could not convert a record",
                     extra={
                         "station_id": self.station_id,
                         "epoch": epoch,
-                        "seq": record.seq,
+                        "seq": item.seq,
                         "error": repr(error),
                     },
                 )
+                continue
+            if row is not None:
+                rows.append(row)
 
         if rows:
             try:
@@ -122,48 +175,61 @@ class IngestPipeline:
             )
             return {}
 
-    async def _process_record(self, epoch: str, record: Record) -> list[DroneStateRow]:
-        with self.timings.measure("process.parse"):
-            parsed = parse_datagram(record.datagram)
-        self._bad_frames += parsed.bad_frame_count
+    def _observe(self, epoch: str, records: list[Record]) -> list[_Observed]:
+        """Parse and classify every message, in order, with its capture time."""
+        observed: list[_Observed] = []
+        for record in records:
+            try:
+                with self.timings.measure("process.parse"):
+                    parsed = parse_datagram(record.datagram)
+                self._bad_frames += parsed.bad_frame_count
 
-        # The record's own capture time. Used for the binding lookup and for
-        # the row, so a row's identity and its place in the flight come from
-        # one clock.
-        ts = timestamp_from_recv_utc_ns(record.recv_utc_ns)
+                # The record's own capture time. Used for the binding lookup
+                # and for the row, so a row's identity and its place in the
+                # flight come from one clock.
+                ts = timestamp_from_recv_utc_ns(record.recv_utc_ns)
+                for message in parsed.messages:
+                    source = self.registry.observe(message)
+                    observed.append(_Observed(record.seq, ts, message, source))
+            except Exception as error:
+                _log.error(
+                    "could not convert a record",
+                    extra={
+                        "station_id": self.station_id,
+                        "epoch": epoch,
+                        "seq": record.seq,
+                        "error": repr(error),
+                    },
+                )
+        return observed
 
-        rows: list[DroneStateRow] = []
-        for message in parsed.messages:
-            source = self.registry.observe(message)
-            with self.timings.measure("process.resolve"):
-                resolution = await self.resolver.resolve(self.station_id, source, at=ts)
+    async def _assemble(
+        self, epoch: str, item: _Observed, resolution: Resolution
+    ) -> DroneStateRow | None:
+        if resolution.drone_id is None:
+            await self._announce_unclaimed(epoch, item.source, resolution)
+            # Archived already, and deliberately not written to drone_state:
+            # §7 forbids auto-registration, so an unbound aircraft stays
+            # visible and unwritten until someone binds it.
+            return None
 
-            if resolution.drone_id is None:
-                await self._announce_unclaimed(epoch, source.source_id, resolution)
-                # Archived already, and deliberately not written to
-                # drone_state: §7 forbids auto-registration, so an unbound
-                # aircraft stays visible and unwritten until someone binds it.
-                continue
-
-            row = self.assembler.observe(
-                source, message, drone_id=resolution.drone_id, ts=ts
-            )
-            if row is not None:
-                rows.append(row)
-        return rows
+        return self.assembler.observe(
+            item.source, item.message, drone_id=resolution.drone_id, ts=item.ts
+        )
 
     async def _announce_unclaimed(
-        self, epoch: str, source_id: SourceId, resolution: Resolution
+        self, epoch: str, source: Source, resolution: Resolution
     ) -> None:
         # A GCS or a gimbal is not an unclaimed aircraft, it is a source that
         # was never going to be one. Announcing those would bury the case that
         # matters under QGroundControl's own heartbeat.
-        source = self.registry.sources.get(source_id)
-        if source is not None and source.kind in {
-            SourceKind.GCS,
-            SourceKind.COMPONENT,
-        }:
+        #
+        # Judged on the source as it was at this message, not as the registry
+        # holds it now. The registry has already seen the whole batch, so a
+        # HEARTBEAT later in it would otherwise decide for an earlier message.
+        if source.kind in {SourceKind.GCS, SourceKind.COMPONENT}:
             return
+        source_id = source.source_id
 
         if source_id in self._announced_unclaimed:
             return
