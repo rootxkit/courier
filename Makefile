@@ -69,7 +69,7 @@ COVERAGE_DB_ONLY := gateway/ingest_store_pg.py,gateway/retention.py,gateway/bind
 COVERAGE_MIN_DB_MODULES ?= 85
 
 .PHONY: help hooks up down stop ps logs reset psql psql-telemetry sim sim-stop \
-        venv lint fmt typecheck test test-cov test-slow test-sitl cover clean probe probe-roundtrip
+        venv lint fmt typecheck test test-cov test-slow test-sitl cover clean probe probe-roundtrip migrate migrate-down migrate-relational migrate-relational-down api
 
 help: ## Show this help
 	@echo "Courier — available targets:"
@@ -165,6 +165,17 @@ migrate: venv ## Apply telemetry database migrations
 migrate-down: venv ## Roll the telemetry database back one revision
 	$(TELEMETRY_ALEMBIC) downgrade -1
 
+RELATIONAL_ALEMBIC := $(VENV_BIN)/alembic -c infra/migrations/relational/alembic.ini
+
+migrate-relational: venv ## Apply relational database migrations (P2-01)
+	$(RELATIONAL_ALEMBIC) upgrade head
+
+migrate-relational-down: venv ## Roll the relational database back one revision
+	$(RELATIONAL_ALEMBIC) downgrade -1
+
+api: venv ## Serve the core API on :8010 (needs .env and `make up`)
+	$(VENV_BIN)/python -m api
+
 console: venv ## Serve the P1-08 map on :8000 (needs .env and `make up`)
 	$(VENV_BIN)/python -m api.console
 
@@ -175,9 +186,10 @@ test-bus: venv ## Run tests that need NATS (make up first)
 # _test; the fixture refuses anything else, because pointing them at the
 # development database once marked 14,288 archive rows deleted.
 TELEMETRY_TEST_DATABASE_URL ?= postgresql+asyncpg://courier:courier_dev@127.0.0.1:5433/courier_telemetry_test
+RELATIONAL_TEST_DATABASE_URL ?= postgresql+asyncpg://courier:courier_dev@127.0.0.1:5432/courier_test
 
 test-db: venv ## Run tests that need the telemetry database (make up first)
-	TELEMETRY_TEST_DATABASE_URL="$(TELEMETRY_TEST_DATABASE_URL)" $(VENV_BIN)/pytest -m postgres -v --cov=gateway.ingest_store_pg --cov=gateway.retention --cov=gateway.binding --cov=gateway.state_writer --cov=gateway.firmware_store --cov-branch --cov-report=term-missing
+	TELEMETRY_TEST_DATABASE_URL="$(TELEMETRY_TEST_DATABASE_URL)" RELATIONAL_TEST_DATABASE_URL="$(RELATIONAL_TEST_DATABASE_URL)" $(VENV_BIN)/pytest -m postgres -v --cov=gateway.ingest_store_pg --cov=gateway.retention --cov=gateway.binding --cov=gateway.state_writer --cov=gateway.firmware_store --cov-branch --cov-report=term-missing
 	$(VENV_BIN)/coverage report --include='$(COVERAGE_DB_ONLY)' --show-missing --fail-under=$(COVERAGE_MIN_DB_MODULES)
 
 test-slow: venv ## Run the slow tests excluded from `make test`
