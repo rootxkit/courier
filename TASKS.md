@@ -263,7 +263,7 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
       *Done when:* the map renders streets over the operating area with no
       network access beyond the console itself, and attribution is visible.
 
-- [ ] **P1-13** Resolve source bindings per batch, not per message.
+- [x] **P1-13** Resolve source bindings per batch, not per message.
       P1-10 measured this as the Gateway's ceiling. `IngestPipeline` calls
       `BindingResolver.resolve` for every MAVLink message, and each call runs
       its own `source_bindings` SELECT - about 3.3 ms, so about 300 records/s
@@ -278,6 +278,12 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
       above intake with a steady baseline, the stage timings show `resolve`
       calls per batch rather than per record, and the drain figure is recorded
       against ADR-002's requirement.
+      *Closed* 2026-09-28. At 11 SITL sources with bound aircraft, drain went
+      from 289 to 1,796 records/s against intake of 1,197. The baseline settled
+      in 2 s, and the backlog from a 60 s outage cleared: 72,345 records down
+      to 769. That is **1.5×, short of ADR-002's proposed 5×**. `resolve` now
+      runs 1,353 times for 254,315 records. Batch time is now spread across
+      stages: store 41%, resolve 36%, write 11%. See ADR-002, "After P1-13".
 
 - [ ] **P1-14** A `lagging` station state: the backlog is not clearing.
       Proposed in ADR-002. Today a station whose backlog grows looks healthy -

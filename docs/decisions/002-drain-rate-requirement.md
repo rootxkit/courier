@@ -145,6 +145,52 @@ belong to the Gateway task that implements it.
 - **P1-14:** the `lagging` station state above, with a test that produces it
   and one that clears it.
 
+## After P1-13 (2026-09-28)
+
+This section was added after the proposal above. It records the first
+measurement against it; nothing above was changed.
+
+Bindings are now read once per batch. Same harness and machine, 11 SITL
+sources. This time the aircraft **were bound**, so `write` and `publish` ran
+too. The earlier runs did not do that work, so the comparison favours the
+old code.
+
+| | Before (unbound) | After P1-13 (bound) |
+|---|---|---|
+| Intake | 1,281 /s | 1,197 /s |
+| Max drain | 289 /s | **1,796 /s** |
+| Drain / intake | 0.23x | **1.50x** |
+| Baseline | saturated | steady, settled in 2 s |
+| Drain stopped after the cut | 47.6 s | 1.0 s (141 records) |
+| Keepalive reconnections | 15 | 0 |
+
+The backlog from the 60 s outage (72,345 records) cleared to 769 within the
+120 s recovery. That is about 2 s of recovery per second of outage.
+
+Batch time is no longer dominated by one stage:
+
+| Stage | Share | Calls | Per call |
+|---|---|---|---|
+| `store` (index, watermark) | 41% | 1,353 | ~29 ms |
+| `process.resolve` | 36% | 1,353 | ~26 ms, one query per address in the batch |
+| `process.write` | 11% | 1,349 | ~8 ms |
+| `process.parse` | 7% | 254,315 | |
+| `store.archive` (zstd + fsync) | 4% | 1,353 | |
+
+At steady state the relay sends small batches, about 188 records each. The
+remaining costs are therefore **fixed costs per batch**: a handful of database
+round trips in `store` and one query per address in `resolve`. They are not
+per-record costs any more. The proposed 5x is not met.
+
+The obvious next steps are these, each to be measured before it is believed:
+
+- cache bindings between batches, invalidated on rebinding;
+- fold `store`'s round trips into fewer statements.
+
+Free memory on the machine fell to 1.2 GiB by the end of this run, against
+5.6 GiB in the runs the day before. The run is still valid, because neither
+drop counter moved. But this machine is near its limit for 11 SITL vehicles.
+
 ## Reproducing
 
 ```

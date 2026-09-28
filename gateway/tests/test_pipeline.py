@@ -40,11 +40,18 @@ class FakeResolver:
         drone_id: UUID | None = DRONE,
         labels: dict[UUID, str] | None = None,
         labels_fail: bool = False,
+        rebound_at: datetime | None = None,
+        rebound_to: UUID | None = None,
     ) -> None:
         self.drone_id = drone_id
         self.unclaimed: list[Resolution] = []
         self.labels = labels if labels is not None else {DRONE: "SITL-01"}
         self.labels_fail = labels_fail
+        # A SYSID reassigned at `rebound_at`: records captured from then on
+        # belong to `rebound_to`. Mirrors BindingResolver's validity ranges.
+        self.rebound_at = rebound_at
+        self.rebound_to = rebound_to
+        self.batch_calls = 0
 
     async def labels_for(self, drone_ids: set[UUID]) -> dict[UUID, str]:
         if self.labels_fail:
@@ -61,7 +68,18 @@ class FakeResolver:
         if self.drone_id is None:
             reason = UNCLASSIFIED if source.kind.value == "unclassified" else UNBOUND
             return Resolution(source.source_id, None, reason)
+        if self.rebound_at is not None and at >= self.rebound_at:
+            return Resolution(source.source_id, self.rebound_to)
         return Resolution(source.source_id, self.drone_id)
+
+    async def resolve_batch(
+        self, station_id: str, records: list[tuple[Any, datetime]]
+    ) -> list[Resolution]:
+        self.batch_calls += 1
+        return [
+            await self.resolve(station_id, source, at=moment)
+            for source, moment in records
+        ]
 
     async def record_unclaimed(
         self, station_id: str, epoch: str | None, resolution: Resolution
@@ -310,6 +328,32 @@ async def test_a_resolver_failure_does_not_raise() -> None:
     assert writer.written == []
 
 
+async def test_a_failed_batch_does_not_poison_the_next_one() -> None:
+    """The presence half of the resolver failure: once the database is back,
+    the next batch converts normally."""
+
+    class FlakyResolver(FakeResolver):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fail_next = True
+
+        async def resolve_batch(
+            self, station_id: str, records: list[tuple[Any, datetime]]
+        ) -> list[Resolution]:
+            if self.fail_next:
+                self.fail_next = False
+                raise RuntimeError("the database is gone")
+            return await super().resolve_batch(station_id, records)
+
+    pipeline, _, writer, _ = build(resolver=FlakyResolver())
+
+    assert await pipeline.process(EPOCH, [record(0, heartbeat())]) == []
+    rows = await pipeline.process(EPOCH, [record(1, position())])
+
+    assert len(rows) == 1
+    assert writer.written == rows
+
+
 async def test_bad_frames_are_counted() -> None:
     """Corruption reaches somewhere it can be seen rather than vanishing."""
     pipeline, _, _, _ = build()
@@ -411,3 +455,77 @@ async def test_a_row_is_still_published_when_the_label_lookup_fails() -> None:
     assert writer.written == rows
     assert publisher.rows == rows
     assert publisher.labels == {}
+
+
+# --- bindings are read per batch (P1-13) -----------------------------------
+#
+# P1-10 measured one binding query per MAVLink message as 96% of the time the
+# Gateway spent storing a batch. These pin the fix and, more importantly, what
+# the fix must not change: which binding applies to which message.
+
+
+async def test_a_batch_is_resolved_with_one_call_not_one_per_message() -> None:
+    pipeline, resolver, _, _ = build()
+    batch = [record(0, heartbeat())] + [
+        record(n, position(), offset_ns=n * 250_000_000) for n in range(1, 50)
+    ]
+
+    rows = await pipeline.process(EPOCH, batch)
+
+    assert resolver.batch_calls == 1
+    assert len(rows) == 49
+
+
+async def test_a_batch_crossing_a_rebinding_splits_between_two_drones() -> None:
+    """A replayed backlog straddling a SYSID reassignment. Every record must
+    resolve against the binding in force when it was *captured*, so one batch
+    legitimately yields two drone_ids for one address."""
+    successor = UUID("5d2c6a9e-8f41-4b7a-9c3e-1a2b3c4d5e6f")
+    cutover = datetime(2026, 9, 24, 12, 0, 2, tzinfo=UTC)
+    resolver = FakeResolver(rebound_at=cutover, rebound_to=successor)
+    pipeline, _, _, _ = build(resolver=resolver)
+    batch = [record(0, heartbeat())] + [
+        record(n, position(), offset_ns=n * 500_000_000) for n in range(1, 9)
+    ]
+
+    rows = await pipeline.process(EPOCH, batch)
+
+    assert resolver.batch_calls == 1
+    before = [row for row in rows if row.ts < cutover]
+    after = [row for row in rows if row.ts >= cutover]
+    assert before and after
+    assert {row.drone_id for row in before} == {DRONE}
+    assert {row.drone_id for row in after} == {successor}
+
+
+async def test_a_heartbeat_later_in_the_batch_does_not_reclassify_an_earlier_message() -> (
+    None
+):
+    """Classification is per message, as it was when messages were resolved
+    one at a time. A position that arrives before its source's first HEARTBEAT
+    is unclassified at that moment and produces no row, even though the
+    HEARTBEAT is in the same batch."""
+
+    class ClassifyingResolver(FakeResolver):
+        # BindingResolver's rule, which the plain fake skips: a source that
+        # has not sent a HEARTBEAT never resolves, bound or not.
+        async def resolve(
+            self, station_id: str, source: Any, *, at: datetime
+        ) -> Resolution:
+            if source.kind.value == "unclassified":
+                return Resolution(source.source_id, None, UNCLASSIFIED)
+            return await super().resolve(station_id, source, at=at)
+
+    pipeline, _, _, _ = build(resolver=ClassifyingResolver())
+
+    rows = await pipeline.process(
+        EPOCH,
+        [
+            record(0, position()),
+            record(1, heartbeat(), offset_ns=100_000_000),
+            record(2, position(), offset_ns=300_000_000),
+        ],
+    )
+
+    assert len(rows) == 1
+    assert rows[0].ts == datetime(2026, 9, 24, 12, 0, 0, 300_000, tzinfo=UTC)

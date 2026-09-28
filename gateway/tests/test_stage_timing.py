@@ -120,12 +120,13 @@ def test_an_idle_gateway_reports_nothing() -> None:
     assert stages.report_if_due() is False
 
 
-async def test_the_pipeline_times_resolve_once_per_message() -> None:
-    """Pins what is being measured, not what it should be.
+async def test_the_pipeline_times_resolve_once_per_batch() -> None:
+    """Pins what is being measured.
 
-    Resolution runs once per MAVLink message, not once per batch, so a
-    1,240-record batch costs at least 1,240 resolver calls. If that changes,
-    this test should change with it and say why.
+    Until P1-13, resolution ran once per MAVLink message, so a 1,240-record
+    batch cost at least 1,240 database queries and `process_resolve_calls`
+    equalled the record count. It now runs once per batch; if that changes
+    back, the stage timings will show it first.
     """
     stages, _ = timings()
     writer = FakeWriter()
@@ -143,7 +144,7 @@ async def test_the_pipeline_times_resolve_once_per_message() -> None:
     await pipeline.process(EPOCH, batch)
 
     snapshot = stages.snapshot()
-    assert snapshot["process_resolve_calls"] == 6
+    assert snapshot["process_resolve_calls"] == 1
     assert snapshot["process_parse_calls"] == 6
     assert snapshot["process_write_calls"] == 1
     assert snapshot["process_publish_calls"] == 1
