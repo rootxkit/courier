@@ -26,7 +26,12 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers=False: fileConfig's default disables every
+    # logger that already exists. Run in-process - as the database test
+    # fixture does - that silenced `gateway.*` for the rest of the session,
+    # so a test asserting that nothing was logged passed whatever the code
+    # did. From the alembic CLI it changes nothing: no other logger exists yet.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # Autogenerate is deliberately not wired to a metadata object. The tables here
 # are written by hand: TimescaleDB hypertables, retention policies and
