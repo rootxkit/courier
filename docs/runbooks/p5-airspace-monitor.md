@@ -43,7 +43,7 @@ of home. From the monitor's log, in UTC:
 | 20:28:46 | SITL-02 enters the zone | zone warning raised |
 | 20:29:25 | both returning home, converging | conflict raised: CPA 42.7 m in 57.7 s |
 | 20:29:32 | SITL-02 leaves the zone | zone warning cleared |
-| 20:29:57 | decelerating towards home | conflict cleared |
+| 20:29:57 | still returning (see the last note below) | conflict cleared |
 
 16 `events` rows: one per aircraft per transition. The console showed the
 head-on alert with both labels and a critical badge.
@@ -58,8 +58,8 @@ head-on alert with both labels and a critical badge.
   raising** ("in 57 s" long after). Active alerts are now republished every
   second.
 - **CPA is a straight-line prediction.** On the return, the conflict cleared
-  at 20:29:57 while the aircraft were still converging on homes 25 m apart:
-  decelerating towards a stop, their predicted closest approach moved beyond
-  60 s. §7.2 specifies linear CPA; an aircraft that slows to hover near
+  at 20:29:57 while the aircraft were still heading for homes 25 m apart. The
+  likely reason, not yet confirmed from the recorded tracks: slowing towards
+  a stop moves the straight-line closest approach beyond 60 s. §7.2 specifies linear CPA; an aircraft that slows to hover near
   another is caught again only once relative velocity is near zero and the
   current distance decides. Worth a scenario of its own under P5-12.
