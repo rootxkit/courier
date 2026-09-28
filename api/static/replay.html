@@ -1,0 +1,917 @@
+<!doctype html>
+<!--
+  P10-03. Flight replay: a past flight on the map, scrubbed in time.
+
+  The one rule this page exists to keep: **a hole in the record is shown as a
+  hole.** The API cuts the track into segments wherever telemetry is missing
+  (api/replay.py) and this page draws each segment as a line and nothing
+  between them. Holes are marked at both ends and listed with the reason the
+  Gateway's own log gives, or "no recorded cause" when it gives none. A line
+  across a hole would invent a path, and in an incident review that is worse
+  than showing nothing (TASKS.md P10-03).
+
+  Served by the core API, not by the console: a replay is database reads, and
+  the console never reads a database (api/telemetry_ws.py).
+
+  Every user-facing string goes through `t()` with `en` and `ka` (CLAUDE.md).
+  Times are shown in UTC, which is what every log this page is checked against
+  is written in.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>courier — replay</title>
+    <link rel="stylesheet" href="/static/vendor/maplibre-gl-4.7.1.css" />
+    <style>
+      :root {
+        color-scheme: light dark;
+        --track: #1565c0;
+        --lost: #c62828;
+        --not-lost: #0288d1;
+        --unexplained: #616161;
+        --no-position: #8e24aa;
+        --alert: #ef6c00;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      #map { position: absolute; inset: 0; }
+      .panel {
+        position: absolute;
+        z-index: 2;
+        padding: 10px 14px;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.95);
+        box-shadow: 0 2px 14px rgba(0, 0, 0, 0.2);
+      }
+      @media (prefers-color-scheme: dark) {
+        .panel { background: rgba(28, 28, 30, 0.95); color: #eee; }
+      }
+      #side {
+        top: 12px;
+        left: 12px;
+        width: min(360px, calc(100vw - 24px));
+        max-height: calc(100vh - 190px);
+        overflow: auto;
+      }
+      #player {
+        left: 12px;
+        right: 12px;
+        bottom: 28px;
+      }
+      h1 { font-size: 15px; margin: 0 0 8px; }
+      h2 { font-size: 13px; margin: 10px 0 4px; }
+      .row {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 4px 0;
+        border-top: 1px solid rgba(128, 128, 128, 0.25);
+      }
+      .clickable { cursor: pointer; }
+      .clickable:hover { background: rgba(128, 128, 128, 0.12); }
+      .selected { font-weight: 600; }
+      .muted { opacity: 0.7; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+      .pill {
+        display: inline-block;
+        padding: 1px 7px;
+        border-radius: 999px;
+        color: #fff;
+        font-size: 12px;
+        white-space: nowrap;
+      }
+      .lost { background: var(--lost); }
+      .not_lost { background: var(--not-lost); }
+      .unexplained { background: var(--unexplained); }
+      .no_position { background: var(--no-position); }
+      .alert { background: var(--alert); }
+      select, input, button { font: inherit; }
+      label { display: block; margin: 4px 0; }
+      #controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+      #scrub { flex: 1; min-width: 200px; }
+      #timeline { width: 100%; height: 14px; display: block; margin-top: 6px; }
+      #status {
+        margin-top: 6px;
+        min-height: 1.45em;
+      }
+      #status.gap { color: var(--lost); font-weight: 600; }
+      .grid {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 2px 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="map"></div>
+
+    <div id="side" class="panel">
+      <h1>courier — <span data-i18n="replay"></span></h1>
+      <label>
+        <span data-i18n="language"></span>
+        <select id="lang">
+          <option value="en">English</option>
+          <option value="ka">ქართული</option>
+        </select>
+      </label>
+      <label>
+        <span data-i18n="drone"></span>
+        <select id="drone"></select>
+      </label>
+      <div id="basemap" class="muted"></div>
+      <h2 data-i18n="flights"></h2>
+      <div id="flights"></div>
+      <h2 data-i18n="window"></h2>
+      <label><span data-i18n="from_utc"></span> <input id="from" class="mono" size="24" /></label>
+      <label><span data-i18n="to_utc"></span> <input id="to" class="mono" size="24" /></label>
+      <button id="load" data-i18n="load"></button>
+      <div id="message" class="muted"></div>
+      <h2 data-i18n="at_cursor"></h2>
+      <div id="state" class="grid"></div>
+      <h2 data-i18n="holes"></h2>
+      <div id="holes"></div>
+      <h2 data-i18n="alerts"></h2>
+      <div id="alerts"></div>
+      <h2 data-i18n="other_losses"></h2>
+      <div id="losses"></div>
+    </div>
+
+    <div id="player" class="panel">
+      <div id="controls">
+        <button id="play" data-i18n="play"></button>
+        <select id="speed">
+          <option value="1">1×</option>
+          <option value="5" selected>5×</option>
+          <option value="20">20×</option>
+          <option value="60">60×</option>
+        </select>
+        <input id="scrub" type="range" min="0" max="1000" value="0" step="1" />
+        <span id="clock" class="mono"></span>
+      </div>
+      <canvas id="timeline"></canvas>
+      <div id="status"></div>
+    </div>
+
+    <script src="/static/vendor/maplibre-gl-4.7.1.js"></script>
+    <script src="/static/vendor/pmtiles-4.5.0.js"></script>
+    <script src="/static/vendor/protomaps-basemaps-5.7.2.js"></script>
+    <script>
+      "use strict";
+
+      // --- i18n ------------------------------------------------------------
+      const STRINGS = {
+        en: {
+          replay: "flight replay",
+          language: "Language",
+          drone: "Aircraft",
+          flights: "Flights (armed)",
+          no_flights: "no armed flights in the last 30 days",
+          window: "Window",
+          from_utc: "from (UTC)",
+          to_utc: "to (UTC)",
+          load: "Load",
+          loading: "loading…",
+          at_cursor: "At the cursor",
+          holes: "Holes in the record",
+          no_holes: "none — the record is continuous",
+          alerts: "Airspace alerts",
+          no_alerts: "none",
+          alerts_unavailable: "not available: {why}",
+          other_losses: "Losses that did not cut this track",
+          none: "none",
+          play: "Play",
+          pause: "Pause",
+          samples: "{n} samples, {s} segments",
+          empty: "no telemetry for this aircraft in this window",
+          failed: "could not load: {why}",
+          // Hole causes. Each says what is known and nothing more.
+          no_telemetry: "no telemetry for {d} s",
+          no_position: "telemetry without a position for {d} s",
+          no_position_tag: "no position",
+          unexplained: "no recorded cause",
+          data_lost: "data lost",
+          not_lost: "not recorded as lost",
+          relay_gap: "relay dropped {n} records (queue cap) on {station}",
+          relay_gap_approx: "relay dropped {n} records on {station} — time approximate",
+          intake_drop: "{n} datagrams dropped at the relay before sequencing, on {station}",
+          relay_restart: "relay on {station} restarted; what it held in memory was lost",
+          relay_queue_replaced: "relay queue on {station} was replaced; undelivered records lost",
+          // Deliberately says what is NOT known: §9 presumes buffering.
+          station_unreachable: "{station} unreachable — data was buffered at the station; if still missing, it never arrived",
+          station_radio_silent: "{station} heard no aircraft (radio silent)",
+          station_lagging: "{station} was delivering late",
+          heard_elsewhere: "heard over another station",
+          elsewhere: "outside this track",
+          in_gap: "No data here: {why}",
+          conflict: "Converging with {other}",
+          conflict_detail: "closest {d} m in {t} s",
+          zone: "Inside {zone}",
+          raised: "raised",
+          cleared: "cleared",
+          active_now: "active now",
+          time: "time",
+          position: "position",
+          alt_amsl: "altitude AMSL",
+          alt_home: "above home",
+          speed: "ground speed",
+          climb: "climb",
+          heading: "heading",
+          battery: "battery",
+          mode: "mode",
+          armed: "armed",
+          station: "station",
+          yes: "yes",
+          no: "no",
+          unknown: "unknown",
+          no_basemap: "no base map installed — run infra/basemap/fetch_basemap.sh",
+          unnamed: "unnamed",
+        },
+        ka: {
+          replay: "ფრენის ჩანაწერი",
+          language: "ენა",
+          drone: "აპარატი",
+          flights: "ფრენები (ჩართული ძრავებით)",
+          no_flights: "ბოლო 30 დღეში ფრენა არ არის",
+          window: "დროის შუალედი",
+          from_utc: "დან (UTC)",
+          to_utc: "მდე (UTC)",
+          load: "ჩატვირთვა",
+          loading: "იტვირთება…",
+          at_cursor: "კურსორის მომენტში",
+          holes: "ხარვეზები ჩანაწერში",
+          no_holes: "არ არის — ჩანაწერი უწყვეტია",
+          alerts: "საჰაერო სივრცის გაფრთხილებები",
+          no_alerts: "არ არის",
+          alerts_unavailable: "მიუწვდომელია: {why}",
+          other_losses: "დანაკარგები, რომლებმაც ეს ტრასა არ გაწყვიტა",
+          none: "არ არის",
+          play: "დაკვრა",
+          pause: "პაუზა",
+          samples: "{n} ჩანაწერი, {s} მონაკვეთი",
+          empty: "ამ შუალედში ამ აპარატის ტელემეტრია არ არის",
+          failed: "ვერ ჩაიტვირთა: {why}",
+          no_telemetry: "ტელემეტრია არ არის {d} წმ",
+          no_position: "ტელემეტრია პოზიციის გარეშე {d} წმ",
+          no_position_tag: "პოზიცია არ არის",
+          unexplained: "მიზეზი არ არის ჩაწერილი",
+          data_lost: "მონაცემები დაკარგულია",
+          not_lost: "დაკარგვა არ არის ჩაწერილი",
+          relay_gap: "რელემ გადააგდო {n} ჩანაწერი (რიგი გაივსო), {station}",
+          relay_gap_approx: "რელემ გადააგდო {n} ჩანაწერი, {station} — დრო მიახლოებითია",
+          intake_drop: "{n} დატაგრამა გადაიგდო რელეზე დანომრვამდე, {station}",
+          relay_restart: "რელე {station} გადაიტვირთა; მეხსიერებაში არსებული დაიკარგა",
+          relay_queue_replaced: "რელეს რიგი {station} შეიცვალა; მიუწოდებელი ჩანაწერები დაიკარგა",
+          station_unreachable: "{station} მიუწვდომელი იყო — მონაცემები სადგურზე ინახებოდა; თუ ახლაც აკლია, არ ჩამოსულა",
+          station_radio_silent: "{station} ვერცერთ აპარატს ვერ ისმენდა (რადიო დუმდა)",
+          station_lagging: "{station} აგვიანებდა მიწოდებას",
+          heard_elsewhere: "სხვა სადგურმა მიიღო",
+          elsewhere: "ამ ტრასის გარეთ",
+          in_gap: "აქ მონაცემები არ არის: {why}",
+          conflict: "უახლოვდება: {other}",
+          conflict_detail: "უმცირესი მანძილი {d} მ {t} წმ-ში",
+          zone: "ზონაშია: {zone}",
+          raised: "ამოქმედდა",
+          cleared: "მოიხსნა",
+          active_now: "ახლა აქტიურია",
+          time: "დრო",
+          position: "პოზიცია",
+          alt_amsl: "სიმაღლე ზღვის დონიდან",
+          alt_home: "სახლის წერტილიდან",
+          speed: "სიჩქარე",
+          climb: "აწევა",
+          heading: "კურსი",
+          battery: "ბატარეა",
+          mode: "რეჟიმი",
+          armed: "ძრავები ჩართულია",
+          station: "სადგური",
+          yes: "კი",
+          no: "არა",
+          unknown: "უცნობია",
+          no_basemap: "საბაზისო რუკა არ არის დაყენებული — გაუშვით infra/basemap/fetch_basemap.sh",
+          unnamed: "უსახელო",
+        },
+      };
+
+      let lang = "en";
+      const t = (key) => (STRINGS[lang] && STRINGS[lang][key]) || STRINGS.en[key] || key;
+      const fill = (template, values) =>
+        template.replace(/\{(\w+)\}/g, (_, name) => String(values[name]));
+
+      // Everything shown here came from the database, so it is data and never
+      // markup: a label of `<img onerror=...>` must render as that text.
+      const escapeHtml = (value) =>
+        String(value).replace(
+          /[&<>"']/g,
+          (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
+        );
+
+      const utc = (ms) => new Date(ms).toISOString().replace("T", " ").slice(0, 21) + " UTC";
+      const num = (value, digits, unit) =>
+        value === null || value === undefined ? t("unknown") : `${value.toFixed(digits)} ${unit}`;
+
+      document.getElementById("lang").addEventListener("change", (event) => {
+        lang = event.target.value;
+        applyStaticStrings();
+        applyBasemapStyle();
+      });
+
+      function applyStaticStrings() {
+        document.documentElement.lang = lang;
+        for (const node of document.querySelectorAll("[data-i18n]")) {
+          if (node.dataset.i18n) node.textContent = t(node.dataset.i18n);
+        }
+        document.getElementById("play").textContent = playing ? t("pause") : t("play");
+        renderFlights();
+        renderLists();
+        renderCursor();
+      }
+
+      // --- map -------------------------------------------------------------
+      // The same self-hosted base map as the live console (P1-12).
+      const BASEMAP_URL = "/basemap/basemap.pmtiles";
+      const protocol = new pmtiles.Protocol();
+      maplibregl.addProtocol("pmtiles", protocol.tile);
+      let basemapSource = null;
+      let basemapInstalled = false;
+      const darkScheme = window.matchMedia("(prefers-color-scheme: dark)");
+
+      function basemapAttribution() {
+        const osm =
+          '<a href="https://www.openstreetmap.org/copyright" target="_blank">© OpenStreetMap contributors</a>';
+        const date =
+          basemapSource && basemapSource.osm_data_as_of
+            ? ` · ${escapeHtml(basemapSource.osm_data_as_of.slice(0, 10))}`
+            : "";
+        return `${osm}${date} · <a href="https://protomaps.com" target="_blank">Protomaps</a>`;
+      }
+
+      function basemapLayers(flavor) {
+        const layers = basemaps.layers("protomaps", basemaps.namedFlavor(flavor), { lang: "en" });
+        if (lang !== "ka") return layers;
+        return layers.map((layer) => {
+          const field = layer.layout && layer.layout["text-field"];
+          if (!field || !JSON.stringify(field).includes('"name')) return layer;
+          return {
+            ...layer,
+            layout: { ...layer.layout, "text-field": ["coalesce", ["get", "name:ka"], ["get", "name"]] },
+          };
+        });
+      }
+
+      function basemapStyle() {
+        if (!basemapInstalled) {
+          return {
+            version: 8,
+            sources: {},
+            layers: [
+              {
+                id: "background",
+                type: "background",
+                paint: { "background-color": darkScheme.matches ? "#1e1e1e" : "#e8e8e8" },
+              },
+            ],
+          };
+        }
+        const flavor = darkScheme.matches ? "dark" : "light";
+        return {
+          version: 8,
+          glyphs: `${location.origin}/basemap/fonts/{fontstack}/{range}.pbf`,
+          sprite: `${location.origin}/basemap/sprites/v4/${flavor}`,
+          sources: {
+            protomaps: {
+              type: "vector",
+              url: `pmtiles://${location.origin}${BASEMAP_URL}`,
+              attribution: basemapAttribution(),
+            },
+          },
+          layers: basemapLayers(flavor),
+        };
+      }
+
+      const map = new maplibregl.Map({
+        container: "map",
+        style: basemapStyle(),
+        center: [0, 0],
+        zoom: 1,
+        attributionControl: { compact: false },
+      });
+
+      function applyBasemapStyle() {
+        map.setStyle(basemapStyle());
+      }
+      darkScheme.addEventListener("change", applyBasemapStyle);
+
+      async function loadBasemap() {
+        const notice = document.getElementById("basemap");
+        try {
+          await new pmtiles.PMTiles(`${location.origin}${BASEMAP_URL}`).getHeader();
+          try {
+            const response = await fetch("/basemap/SOURCE.json");
+            basemapSource = response.ok ? await response.json() : null;
+          } catch (error) {
+            basemapSource = null;
+          }
+          basemapInstalled = true;
+          notice.dataset.i18n = "";
+          notice.textContent = "";
+          applyBasemapStyle();
+        } catch (error) {
+          basemapInstalled = false;
+          notice.dataset.i18n = "no_basemap";
+          notice.textContent = t("no_basemap");
+        }
+      }
+      loadBasemap();
+
+      // The replay's own layers, re-added whenever the style is replaced
+      // (language or colour scheme), since a new style drops every source.
+      const EMPTY = { type: "FeatureCollection", features: [] };
+      const layerData = { track: EMPTY, holes: EMPTY, cursor: EMPTY };
+
+      function addReplayLayers() {
+        for (const name of Object.keys(layerData)) {
+          if (!map.getSource(name)) map.addSource(name, { type: "geojson", data: layerData[name] });
+        }
+        if (!map.getLayer("track-line")) {
+          map.addLayer({
+            id: "track-line",
+            type: "line",
+            source: "track",
+            filter: ["==", ["geometry-type"], "LineString"],
+            paint: { "line-color": getCss("--track"), "line-width": 3 },
+          });
+          // A segment of one sample has no line to draw; it is still evidence.
+          map.addLayer({
+            id: "track-point",
+            type: "circle",
+            source: "track",
+            filter: ["==", ["geometry-type"], "Point"],
+            paint: { "circle-color": getCss("--track"), "circle-radius": 3 },
+          });
+          // Both ends of every hole: where the record stops, and where it
+          // resumes. Hollow, because nothing is known between them.
+          map.addLayer({
+            id: "hole-ends",
+            type: "circle",
+            source: "holes",
+            paint: {
+              "circle-radius": 6,
+              "circle-color": "rgba(0,0,0,0)",
+              "circle-stroke-width": 3,
+              "circle-stroke-color": ["get", "color"],
+            },
+          });
+          map.addLayer({
+            id: "cursor",
+            type: "circle",
+            source: "cursor",
+            paint: {
+              "circle-radius": 8,
+              "circle-color": ["case", ["get", "stale"], "rgba(0,0,0,0)", getCss("--alert")],
+              "circle-stroke-width": 3,
+              "circle-stroke-color": ["case", ["get", "stale"], getCss("--unexplained"), "#ffffff"],
+            },
+          });
+        }
+      }
+      map.on("style.load", addReplayLayers);
+
+      function setLayer(name, data) {
+        layerData[name] = data;
+        const source = map.getSource(name);
+        if (source) source.setData(data);
+      }
+
+      function getCss(name) {
+        return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+      }
+
+      // --- data ------------------------------------------------------------
+      let drones = [];
+      let flights = [];
+      let replay = null;
+      let times = [];
+      let windowStart = 0;
+      let windowEnd = 0;
+      let cursorMs = 0;
+      let playing = false;
+      let selectedFlight = null;
+
+      const droneSelect = document.getElementById("drone");
+
+      async function loadDrones() {
+        const response = await fetch("/drones?include_retired=true");
+        drones = response.ok ? await response.json() : [];
+        droneSelect.innerHTML = drones
+          .map((d) => `<option value="${escapeHtml(d.id)}">${escapeHtml(d.label || t("unnamed"))}</option>`)
+          .join("");
+        const wanted = new URLSearchParams(location.search).get("drone");
+        if (wanted && drones.some((d) => d.id === wanted)) droneSelect.value = wanted;
+        await loadFlights();
+      }
+      droneSelect.addEventListener("change", loadFlights);
+
+      async function loadFlights() {
+        flights = [];
+        selectedFlight = null;
+        if (droneSelect.value) {
+          const response = await fetch(`/replay/drones/${droneSelect.value}/flights`);
+          flights = response.ok ? await response.json() : [];
+        }
+        renderFlights();
+      }
+
+      function renderFlights() {
+        const node = document.getElementById("flights");
+        if (!flights.length) {
+          node.innerHTML = `<div class="muted">${escapeHtml(t("no_flights"))}</div>`;
+          return;
+        }
+        node.innerHTML = flights
+          .map(
+            (f, i) =>
+              `<div class="row clickable ${i === selectedFlight ? "selected" : ""}" data-flight="${i}">` +
+              `<span class="mono">${escapeHtml(utc(Date.parse(f.start)).slice(0, 19))}</span>` +
+              `<span class="muted">${escapeHtml(Math.round(f.duration_s))} s</span></div>`,
+          )
+          .join("");
+        for (const row of node.querySelectorAll("[data-flight]")) {
+          row.addEventListener("click", () => {
+            selectedFlight = Number(row.dataset.flight);
+            const f = flights[selectedFlight];
+            // A little either side, so take-off and landing are in view.
+            const pad = 30000;
+            document.getElementById("from").value = new Date(Date.parse(f.start) - pad).toISOString();
+            document.getElementById("to").value = new Date(Date.parse(f.end) + pad).toISOString();
+            renderFlights();
+            loadReplay();
+          });
+        }
+      }
+
+      document.getElementById("load").addEventListener("click", loadReplay);
+
+      async function loadReplay() {
+        const message = document.getElementById("message");
+        const from = document.getElementById("from").value.trim();
+        const to = document.getElementById("to").value.trim();
+        if (!droneSelect.value || !from || !to) return;
+        message.textContent = t("loading");
+        setPlaying(false);
+        const query = new URLSearchParams({ start: from, end: to });
+        let response;
+        try {
+          response = await fetch(`/replay/drones/${droneSelect.value}?${query}`);
+        } catch (error) {
+          message.textContent = fill(t("failed"), { why: String(error) });
+          return;
+        }
+        if (!response.ok) {
+          let why = response.status;
+          try {
+            why = (await response.json()).detail || why;
+          } catch (error) {
+            // The status is the reason, then.
+          }
+          message.textContent = fill(t("failed"), { why: typeof why === "string" ? why : JSON.stringify(why) });
+          return;
+        }
+        replay = await response.json();
+        times = replay.samples.map((s) => Date.parse(s.ts));
+        windowStart = Date.parse(replay.start);
+        windowEnd = Date.parse(replay.end);
+        cursorMs = times.length ? times[0] : windowStart;
+        message.textContent = replay.samples.length
+          ? fill(t("samples"), { n: replay.samples.length, s: replay.segments.length })
+          : t("empty");
+        drawTrack();
+        renderLists();
+        renderCursor();
+        fitTrack();
+      }
+
+      // --- drawing ---------------------------------------------------------
+      function holeClass(hole) {
+        if (hole.cause === "no_position") return "no_position";
+        if (!hole.explained) return "unexplained";
+        return hole.data_lost ? "lost" : "not_lost";
+      }
+
+      const HOLE_COLOR = {
+        lost: "--lost",
+        not_lost: "--not-lost",
+        unexplained: "--unexplained",
+        no_position: "--no-position",
+      };
+
+      function drawTrack() {
+        const s = replay.samples;
+        const coordinates = (i) => [s[i].lon_deg, s[i].lat_deg];
+        const features = replay.segments.map(([first, last]) => {
+          if (first === last) {
+            return { type: "Feature", properties: {}, geometry: { type: "Point", coordinates: coordinates(first) } };
+          }
+          const line = [];
+          for (let i = first; i <= last; i++) line.push(coordinates(i));
+          return { type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: line } };
+        });
+        setLayer("track", { type: "FeatureCollection", features });
+
+        const ends = [];
+        for (const hole of replay.holes) {
+          const color = getCss(HOLE_COLOR[holeClass(hole)]);
+          for (const index of [hole.after_index, hole.before_index]) {
+            const sample = s[index];
+            if (sample.lat_deg === null || sample.lon_deg === null) continue;
+            ends.push({
+              type: "Feature",
+              properties: { color },
+              geometry: { type: "Point", coordinates: coordinates(index) },
+            });
+          }
+        }
+        setLayer("holes", { type: "FeatureCollection", features: ends });
+        drawTimeline();
+      }
+
+      function fitTrack() {
+        const points = replay.samples.filter((s) => s.lat_deg !== null && s.lon_deg !== null);
+        if (!points.length) return;
+        const lons = points.map((p) => p.lon_deg);
+        const lats = points.map((p) => p.lat_deg);
+        map.fitBounds(
+          [
+            [Math.min(...lons), Math.min(...lats)],
+            [Math.max(...lons), Math.max(...lats)],
+          ],
+          { padding: 80, maxZoom: 18, animate: false },
+        );
+      }
+
+      // Holes as bands, alerts as ticks, across the whole window.
+      function drawTimeline() {
+        const canvas = document.getElementById("timeline");
+        const width = (canvas.width = canvas.clientWidth * devicePixelRatio);
+        const height = (canvas.height = canvas.clientHeight * devicePixelRatio);
+        const ctx = canvas.getContext("2d");
+        ctx.clearRect(0, 0, width, height);
+        if (!replay) return;
+        const span = windowEnd - windowStart || 1;
+        const x = (ms) => ((ms - windowStart) / span) * width;
+        if (times.length) {
+          ctx.fillStyle = getCss("--track");
+          ctx.globalAlpha = 0.35;
+          ctx.fillRect(x(times[0]), 0, x(times[times.length - 1]) - x(times[0]), height);
+          ctx.globalAlpha = 1;
+        }
+        for (const hole of replay.holes) {
+          ctx.fillStyle = getCss(HOLE_COLOR[holeClass(hole)]);
+          const a = x(Date.parse(hole.after_ts));
+          const b = x(Date.parse(hole.before_ts));
+          ctx.fillRect(a, 0, Math.max(b - a, 2), height);
+        }
+        for (const alert of replay.alerts || []) {
+          ctx.fillStyle = getCss("--alert");
+          ctx.fillRect(x(Date.parse(alert.ts)) - 1, 0, 3, height / 2);
+        }
+      }
+      window.addEventListener("resize", drawTimeline);
+
+      // --- cursor ----------------------------------------------------------
+      const scrub = document.getElementById("scrub");
+      scrub.addEventListener("input", () => {
+        cursorMs = windowStart + (Number(scrub.value) / 1000) * (windowEnd - windowStart);
+        renderCursor();
+      });
+
+      function lastSampleAt(ms) {
+        let lo = 0;
+        let hi = times.length - 1;
+        let found = -1;
+        while (lo <= hi) {
+          const mid = (lo + hi) >> 1;
+          if (times[mid] <= ms) {
+            found = mid;
+            lo = mid + 1;
+          } else {
+            hi = mid - 1;
+          }
+        }
+        return found;
+      }
+
+      function holeAt(ms) {
+        return replay.holes.find((h) => Date.parse(h.after_ts) < ms && ms < Date.parse(h.before_ts));
+      }
+
+      function describeHole(hole) {
+        const d = hole.duration_s.toFixed(1);
+        const head = fill(t(hole.cause), { d });
+        if (hole.cause === "no_position") return head;
+        if (!hole.reasons.length) return `${head} — ${t("unexplained")}`;
+        return `${head} — ${hole.reasons.map(describeEvidence).join("; ")}`;
+      }
+
+      function describeEvidence(item) {
+        const values = {
+          station: item.station_id,
+          n: item.detail.missing_count ?? item.detail.datagram_count ?? "?",
+        };
+        const key = item.kind === "relay_gap" && !item.exact ? "relay_gap_approx" : item.kind;
+        return fill(t(key), values);
+      }
+
+      function describeAlert(alert) {
+        const detail = alert.detail || {};
+        if (alert.kind === "conflict") {
+          const others = (alert.labels || []).filter((label, i) => alert.drone_ids[i] !== replay.drone_id);
+          const head = fill(t("conflict"), { other: others.join(", ") || t("unnamed") });
+          return `${head} (${fill(t("conflict_detail"), { d: detail.d_cpa_horizontal_m, t: detail.t_cpa_s })})`;
+        }
+        return fill(t("zone"), { zone: detail.zone_name || "?" });
+      }
+
+      function activeAlertsAt(ms) {
+        const state = new Map();
+        for (const alert of replay.alerts || []) {
+          if (Date.parse(alert.ts) > ms) break;
+          if (alert.state === "raised") state.set(alert.key, alert);
+          else state.delete(alert.key);
+        }
+        return [...state.values()];
+      }
+
+      function renderCursor() {
+        const clock = document.getElementById("clock");
+        const status = document.getElementById("status");
+        const stateNode = document.getElementById("state");
+        if (!replay) {
+          clock.textContent = "";
+          status.textContent = "";
+          stateNode.innerHTML = "";
+          return;
+        }
+        const span = windowEnd - windowStart || 1;
+        scrub.value = String(Math.round(((cursorMs - windowStart) / span) * 1000));
+        clock.textContent = utc(cursorMs);
+
+        const index = lastSampleAt(cursorMs);
+        const hole = holeAt(cursorMs);
+        const active = activeAlertsAt(cursorMs);
+        const lines = [];
+        if (hole) lines.push(fill(t("in_gap"), { why: describeHole(hole) }));
+        for (const alert of active) lines.push(`⚠ ${t("active_now")}: ${describeAlert(alert)}`);
+        status.textContent = lines.join("  ·  ");
+        status.className = hole ? "gap" : "";
+
+        if (index < 0) {
+          setLayer("cursor", EMPTY);
+          stateNode.innerHTML = "";
+          return;
+        }
+        const s = replay.samples[index];
+        // Inside a hole the marker stays where the record stopped, hollow:
+        // that is the last place the aircraft is known to have been, not
+        // where it is.
+        const stale = Boolean(hole) || cursorMs - times[index] > replay.gap_threshold_s * 1000;
+        setLayer(
+          "cursor",
+          s.lat_deg === null || s.lon_deg === null
+            ? EMPTY
+            : {
+                type: "FeatureCollection",
+                features: [
+                  { type: "Feature", properties: { stale }, geometry: { type: "Point", coordinates: [s.lon_deg, s.lat_deg] } },
+                ],
+              },
+        );
+        const yesNo = (v) => (v === null || v === undefined ? t("unknown") : v ? t("yes") : t("no"));
+        const rows = [
+          ["time", utc(times[index])],
+          [
+            "position",
+            s.lat_deg === null ? t("unknown") : `${s.lat_deg.toFixed(6)}, ${s.lon_deg.toFixed(6)}`,
+          ],
+          ["alt_amsl", num(s.alt_amsl_m, 1, "m")],
+          ["alt_home", num(s.alt_above_home_m, 1, "m")],
+          ["speed", num(s.groundspeed_ms, 1, "m/s")],
+          ["climb", num(s.climb_ms, 1, "m/s")],
+          ["heading", num(s.heading_deg, 0, "°")],
+          ["battery", num(s.batt_pct, 0, "%")],
+          ["mode", s.mode ?? t("unknown")],
+          ["armed", yesNo(s.armed)],
+          ["station", s.station_id],
+        ];
+        stateNode.innerHTML = rows
+          .map(([key, value]) => `<span class="muted">${escapeHtml(t(key))}</span><span class="mono">${escapeHtml(value)}</span>`)
+          .join("");
+      }
+
+      function jumpTo(ms) {
+        setPlaying(false);
+        cursorMs = ms;
+        renderCursor();
+      }
+
+      function renderLists() {
+        const holesNode = document.getElementById("holes");
+        const alertsNode = document.getElementById("alerts");
+        const lossesNode = document.getElementById("losses");
+        if (!replay) {
+          holesNode.innerHTML = alertsNode.innerHTML = lossesNode.innerHTML = "";
+          return;
+        }
+        holesNode.innerHTML = replay.holes.length
+          ? replay.holes
+              .map((hole, i) => {
+                const cls = holeClass(hole);
+                const tag =
+                  { lost: t("data_lost"), unexplained: t("unexplained"), no_position: t("no_position_tag"), not_lost: t("not_lost") }[cls];
+                return (
+                  `<div class="row clickable" data-hole="${i}"><span>` +
+                  `<span class="mono">${escapeHtml(utc(Date.parse(hole.after_ts)).slice(11, 21))}</span> ` +
+                  `${escapeHtml(describeHole(hole))}</span>` +
+                  `<span class="pill ${cls}">${escapeHtml(tag)}</span></div>`
+                );
+              })
+              .join("")
+          : `<div class="muted">${escapeHtml(t("no_holes"))}</div>`;
+        for (const row of holesNode.querySelectorAll("[data-hole]")) {
+          row.addEventListener("click", () => jumpTo(Date.parse(replay.holes[Number(row.dataset.hole)].after_ts) + 1));
+        }
+
+        if (replay.alerts === null) {
+          alertsNode.innerHTML = `<div class="muted">${escapeHtml(fill(t("alerts_unavailable"), { why: replay.alerts_error }))}</div>`;
+        } else if (!replay.alerts.length) {
+          alertsNode.innerHTML = `<div class="muted">${escapeHtml(t("no_alerts"))}</div>`;
+        } else {
+          alertsNode.innerHTML = replay.alerts
+            .map(
+              (alert, i) =>
+                `<div class="row clickable" data-alert="${i}"><span>` +
+                `<span class="mono">${escapeHtml(utc(Date.parse(alert.ts)).slice(11, 21))}</span> ` +
+                `${escapeHtml(describeAlert(alert))}</span>` +
+                `<span class="pill alert">${escapeHtml(t(alert.state))}</span></div>`,
+            )
+            .join("");
+          for (const row of alertsNode.querySelectorAll("[data-alert]")) {
+            row.addEventListener("click", () => jumpTo(Date.parse(replay.alerts[Number(row.dataset.alert)].ts)));
+          }
+        }
+
+        // Loss evidence that is not a reason for any hole: a gap heard over
+        // another station, or one outside the track. Listed so that nothing
+        // the Gateway logged about this window is silently dropped.
+        const used = new Set();
+        for (const hole of replay.holes) for (const r of hole.reasons) used.add(JSON.stringify(r));
+        const others = replay.evidence.filter((e) => e.data_lost && !used.has(JSON.stringify(e)));
+        lossesNode.innerHTML = others.length
+          ? others
+              .map(
+                (e) =>
+                  `<div class="row"><span><span class="mono">${escapeHtml(utc(Date.parse(e.start)).slice(11, 21))}</span> ` +
+                  `${escapeHtml(describeEvidence(e))}</span>` +
+                  `<span class="muted">${escapeHtml(e.track_effect === "heard_elsewhere" ? t("heard_elsewhere") : t("elsewhere"))}</span></div>`,
+              )
+              .join("")
+          : `<div class="muted">${escapeHtml(t("none"))}</div>`;
+        drawTimeline();
+      }
+
+      // --- playback --------------------------------------------------------
+      const playButton = document.getElementById("play");
+      playButton.addEventListener("click", () => setPlaying(!playing));
+
+      function setPlaying(value) {
+        playing = value && Boolean(replay);
+        playButton.textContent = playing ? t("pause") : t("play");
+        if (playing) {
+          if (cursorMs >= windowEnd) cursorMs = windowStart;
+          lastFrame = performance.now();
+          requestAnimationFrame(step);
+        }
+      }
+
+      let lastFrame = 0;
+      function step(now) {
+        if (!playing) return;
+        const speed = Number(document.getElementById("speed").value);
+        cursorMs += (now - lastFrame) * speed;
+        lastFrame = now;
+        if (cursorMs >= windowEnd) {
+          cursorMs = windowEnd;
+          setPlaying(false);
+        }
+        renderCursor();
+        if (playing) requestAnimationFrame(step);
+      }
+
+      applyStaticStrings();
+      loadDrones();
+    </script>
+  </body>
+</html>

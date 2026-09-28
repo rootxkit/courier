@@ -14,13 +14,16 @@ types are generated from it (CLAUDE.md), never written by hand.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
+from api.assets import STATIC, mount_map_assets
 from api.registry import (
     AirframeParams,
     ConflictError,
@@ -30,8 +33,12 @@ from api.registry import (
     PilotStatus,
     RegistryError,
 )
+from api.replay import DroneNotFoundError, ReplayError, ReplayStore, WindowTooLargeError
 
 MAX_EVENTS_PER_PAGE = 1_000
+MAX_FLIGHTS_PER_PAGE = 200
+# How far back the flight list looks when not told. A default, not a limit.
+DEFAULT_FLIGHT_LOOKBACK = timedelta(days=30)
 
 
 class BaseIn(BaseModel):
@@ -128,7 +135,29 @@ def _http(error: RegistryError) -> HTTPException:
     return HTTPException(status_code=400, detail=str(error))
 
 
-def create_api_app(registry: FleetRegistry) -> FastAPI:
+def _replay_http(error: ReplayError) -> HTTPException:
+    if isinstance(error, DroneNotFoundError):
+        return HTTPException(status_code=404, detail=str(error))
+    if isinstance(error, WindowTooLargeError):
+        return HTTPException(status_code=413, detail=str(error))
+    return HTTPException(status_code=422, detail=str(error))
+
+
+def _utc(value: datetime) -> datetime:
+    """A time with no zone is refused rather than guessed (CLAUDE.md: UTC)."""
+    if value.tzinfo is None:
+        raise HTTPException(
+            status_code=422, detail="times must carry a zone, e.g. a trailing Z"
+        )
+    return value.astimezone(UTC)
+
+
+def create_api_app(
+    registry: FleetRegistry,
+    *,
+    replay: ReplayStore | None = None,
+    basemap_dir: Path | None = None,
+) -> FastAPI:
     app = FastAPI(title="courier API", version="0.1.0")
 
     # --- bases ----------------------------------------------------------------
@@ -227,4 +256,42 @@ def create_api_app(registry: FleetRegistry) -> FastAPI:
             limit=limit,
         )
 
+    # --- replay (P10-03) -------------------------------------------------------
+
+    if replay is not None:
+        mount_map_assets(app, basemap_dir)
+        _add_replay_routes(app, replay)
+
     return app
+
+
+def _add_replay_routes(app: FastAPI, replay: ReplayStore) -> None:
+    @app.get("/replay", response_class=HTMLResponse, include_in_schema=False)
+    async def replay_page() -> str:
+        return (STATIC / "replay.html").read_text(encoding="utf-8")
+
+    @app.get("/replay/drones/{drone_id}/flights")
+    async def flights(
+        drone_id: UUID,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int = Query(default=50, ge=1, le=MAX_FLIGHTS_PER_PAGE),
+    ) -> list[dict[str, Any]]:
+        """Armed spans of this aircraft, newest first."""
+        end = _utc(until) if until is not None else datetime.now(tz=UTC)
+        start = _utc(since) if since is not None else end - DEFAULT_FLIGHT_LOOKBACK
+        try:
+            return await replay.flights(drone_id, since=start, until=end, limit=limit)
+        except ReplayError as error:
+            raise _replay_http(error) from error
+
+    @app.get("/replay/drones/{drone_id}")
+    async def replay_window(
+        drone_id: UUID, start: datetime, end: datetime
+    ) -> dict[str, Any]:
+        """Every stored sample in the window, the holes in it and why, the
+        loss evidence around it, and the airspace alerts raised and cleared."""
+        try:
+            return await replay.replay(drone_id, start=_utc(start), end=_utc(end))
+        except ReplayError as error:
+            raise _replay_http(error) from error

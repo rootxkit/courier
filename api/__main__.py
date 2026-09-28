@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from api.app import create_api_app
 from api.config import ApiSettings
 from api.registry import FleetRegistry
+from api.replay import ReplayStore
 from common import configure_logging, load_settings
 from gateway.binding import BindingResolver
 from gateway.live_state import read_live_state
@@ -43,7 +44,15 @@ def build_app(settings: ApiSettings) -> FastAPI:
         projection=BindingResolver(engine=telemetry_engine),
         live=RedisLiveState(redis_client),
     )
-    app = create_api_app(registry)
+    replay = ReplayStore(
+        telemetry=telemetry_engine,
+        relational=engine,
+        gap_threshold_s=settings.replay_gap_threshold_s,
+        evidence_slack_s=settings.replay_evidence_slack_s,
+        flight_split_s=settings.replay_flight_split_s,
+        max_samples=settings.replay_max_samples,
+    )
+    app = create_api_app(registry, replay=replay, basemap_dir=settings.basemap_dir)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
