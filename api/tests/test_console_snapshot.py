@@ -141,6 +141,36 @@ def test_an_event_still_reaches_a_console_that_is_already_attached() -> None:
 # --- the snapshot stays bounded --------------------------------------------
 
 
+def test_an_active_alert_is_replayed_to_a_console_that_attaches_later() -> None:
+    """P6-03: an alert raised before the console opened is still showing."""
+    hub = ConsoleHub()
+    publish(hub, "alert.conflict:a:b", state="raised", severity="critical")
+
+    replayed = drain(hub.attach())
+
+    assert [m["kind"] for m in replayed] == ["alert"]
+    assert replayed[0]["data"]["state"] == "raised"
+
+
+def test_a_cleared_alert_is_not_replayed() -> None:
+    """The paired case: clearing removes it, rather than replaying 'cleared'
+    forever or, worse, leaving 'raised' as the last word."""
+    hub = ConsoleHub()
+    publish(hub, "alert.conflict:a:b", state="raised", severity="critical")
+    publish(hub, "alert.conflict:a:b", state="cleared", severity="critical")
+
+    assert drain(hub.attach()) == []
+
+
+def test_a_cleared_alert_still_reaches_a_console_already_attached() -> None:
+    hub = ConsoleHub()
+    queue = hub.attach()
+    publish(hub, "alert.conflict:a:b", state="raised")
+    publish(hub, "alert.conflict:a:b", state="cleared")
+
+    assert [m["data"]["state"] for m in drain(queue)] == ["raised", "cleared"]
+
+
 def test_the_snapshot_evicts_the_least_recently_seen_source() -> None:
     """One entry per source seen, for the life of the process, is a leak.
 
