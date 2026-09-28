@@ -139,13 +139,13 @@ typecheck: venv ## mypy, strict on the safety-relevant modules
 	$(VENV_BIN)/mypy
 
 test: venv ## Run unit tests (slow and SITL tests excluded)
-	$(VENV_BIN)/pytest -m 'not sitl and not slow and not postgres and not nats'
+	$(VENV_BIN)/pytest -m 'not sitl and not slow and not postgres and not nats and not redis'
 
 test-cov: venv ## Run unit tests with a coverage report
-	$(VENV_BIN)/pytest -m 'not sitl and not slow and not postgres and not nats' --cov --cov-branch --cov-report=term-missing
+	$(VENV_BIN)/pytest -m 'not sitl and not slow and not postgres and not nats and not redis' --cov --cov-branch --cov-report=term-missing
 
 cover: venv ## Branch coverage with the thresholds enforced (what CI runs)
-	$(VENV_BIN)/pytest -m 'not sitl and not slow and not postgres and not nats' --cov --cov-branch --cov-report=term-missing:skip-covered --cov-report=xml
+	$(VENV_BIN)/pytest -m 'not sitl and not slow and not postgres and not nats and not redis' --cov --cov-branch --cov-report=term-missing:skip-covered --cov-report=xml
 	@echo
 	@echo "=== agent/ - uncovered lines and branch arcs ==="
 	$(VENV_BIN)/coverage report --include='agent/*' --show-missing --fail-under=$(COVERAGE_MIN_AGENT)

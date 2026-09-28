@@ -35,6 +35,7 @@ from gateway.drone_state import (
     StateAssembler,
     timestamp_from_recv_utc_ns,
 )
+from gateway.live_state import LiveState
 from gateway.parsing import ParsedMessage, SourceId, parse_datagram
 from gateway.publisher import TelemetryPublisher
 from gateway.rate_limit import RateLimiter
@@ -73,6 +74,8 @@ class IngestPipeline:
     # P1-07: sources refused by station policy are reported at most once per
     # address per interval, with a count of what was suppressed in between.
     rejections: RateLimiter = field(default_factory=RateLimiter)
+    # P1-05. Optional so the pipeline runs, and is tested, without Redis.
+    live_state: LiveState | None = None
 
     registry: SourceRegistry = field(init=False)
     assembler: StateAssembler = field(init=False)
@@ -147,6 +150,7 @@ class IngestPipeline:
                 rows.append(row)
 
         if rows:
+            labels: dict[UUID, str] = {}
             try:
                 with self.timings.measure("process.write"):
                     await self.writer.write(rows)
@@ -159,6 +163,19 @@ class IngestPipeline:
                     "could not write drone_state",
                     extra={"station_id": self.station_id, "error": repr(error)},
                 )
+            # Its own handler, after the write rather than inside it. Live
+            # state is derived from the same rows but is not downstream of the
+            # hypertable: a failed insert must not also make every drone look
+            # link-lost, and a Redis failure must not cost the insert.
+            if self.live_state is not None:
+                try:
+                    with self.timings.measure("process.live_state"):
+                        await self.live_state.update(rows, labels)
+                except Exception as error:
+                    _log.error(
+                        "could not update live state",
+                        extra={"station_id": self.station_id, "error": repr(error)},
+                    )
         return rows
 
     async def _labels(self, rows: list[DroneStateRow]) -> dict[UUID, str]:
@@ -305,6 +322,7 @@ class StationPipelines:
     resolver: BindingResolver
     writer: DroneStateWriter
     publisher: TelemetryPublisher
+    live_state: LiveState | None = None
 
     pipelines: dict[str, IngestPipeline] = field(default_factory=dict)
 
@@ -316,6 +334,7 @@ class StationPipelines:
                 resolver=self.resolver,
                 writer=self.writer,
                 publisher=self.publisher,
+                live_state=self.live_state,
             )
             self.pipelines[station_id] = pipeline
         return pipeline

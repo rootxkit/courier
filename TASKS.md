@@ -186,10 +186,18 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
       - A p99 measurement. The stage timings give totals, not percentiles.
         At 11 SITL sources the *average* `process.write` was ~8 ms per batch.
 
-- [ ] **P1-05** Redis live state: `drone:{id}:state` with 15 s TTL. Expiry is
+- [x] **P1-05** Redis live state: `drone:{id}:state` with 15 s TTL. Expiry is
       the definition of "link lost".
       *Done when:* killing a SITL instance flips its status within 20 s.
-      *Status 2026-09-28:* not started. Only `REDIS_URL` exists in config.
+      *Closed* 2026-09-28. An 11-aircraft SITL run was used, and one instance
+      was killed. It flipped to link-lost in 14.9 s. The other ten stayed
+      live throughout. See `docs/runbooks/p1-05-link-loss.md`.
+      Expiry counts from **capture** time, capped at now plus the timeout:
+      - A replayed backlog never makes a lost aircraft look live.
+      - An older record never overwrites a newer one; the check is a
+        compare-and-set in Redis.
+      - A station clock running behind fails toward "link lost".
+      Correcting station clocks is still spec §12 question 4.
 
 - [x] **P1-06** NATS publication: `telemetry.{drone_id}`, `events.{type}`.
       *Done when:* a test subscriber receives every position update.
