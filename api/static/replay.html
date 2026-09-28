@@ -218,6 +218,9 @@
           alt_amsl: "altitude AMSL",
           alt_home: "above home",
           speed: "ground speed",
+          // Ground velocity north / east / down, as MAVLink sends it: down is
+          // positive, so a climb reads negative.
+          velocity_ned: "velocity N / E / D",
           climb: "climb",
           heading: "heading",
           battery: "battery",
@@ -283,6 +286,7 @@
           alt_amsl: "სიმაღლე ზღვის დონიდან",
           alt_home: "სახლის წერტილიდან",
           speed: "სიჩქარე",
+          velocity_ned: "სიჩქარე ჩ / ა / ქ",
           climb: "აწევა",
           heading: "კურსი",
           battery: "ბატარეა",
@@ -402,8 +406,12 @@
         attributionControl: { compact: false },
       });
 
+      // A full reload, not a diff. Diffing a new base map against the old
+      // style removes the replay's own layers (they are in neither) and fires
+      // no `style.load` to put them back: the track silently vanished the
+      // first time this ran, on the base map arriving after page load.
       function applyBasemapStyle() {
-        map.setStyle(basemapStyle());
+        map.setStyle(basemapStyle(), { diff: false });
       }
       darkScheme.addEventListener("change", applyBasemapStyle);
 
@@ -807,6 +815,12 @@
           ["alt_amsl", num(s.alt_amsl_m, 1, "m")],
           ["alt_home", num(s.alt_above_home_m, 1, "m")],
           ["speed", num(s.groundspeed_ms, 1, "m/s")],
+          [
+            "velocity_ned",
+            [s.vx_ms, s.vy_ms, s.vz_ms].some((v) => v === null || v === undefined)
+              ? t("unknown")
+              : `${s.vx_ms.toFixed(1)} / ${s.vy_ms.toFixed(1)} / ${s.vz_ms.toFixed(1)} m/s`,
+          ],
           ["climb", num(s.climb_ms, 1, "m/s")],
           ["heading", num(s.heading_deg, 0, "°")],
           ["battery", num(s.batt_pct, 0, "%")],

@@ -118,3 +118,14 @@ def test_the_page_never_joins_two_segments() -> None:
 
     assert "replay.segments.map" in page
     assert page.count('type: "LineString"') == 1
+
+
+def test_a_new_base_map_style_does_not_wipe_the_track() -> None:
+    """A diffed `setStyle` removes the replay's layers and fires no
+    `style.load` to restore them; seen on the device on 2026-09-29, where the
+    base map arriving after page load left an empty map."""
+    page = PAGE.read_text(encoding="utf-8")
+
+    assert "map.setStyle(basemapStyle(), { diff: false })" in page
+    assert page.count("map.setStyle(") == 1
+    assert 'map.on("style.load", addReplayLayers)' in page
