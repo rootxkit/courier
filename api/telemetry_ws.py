@@ -38,11 +38,11 @@ from typing import Any
 
 import nats
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, Response
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse
 from nats.aio.client import Client as NatsClient
 from nats.aio.msg import Msg
 
+from api.assets import STATIC, mount_map_assets
 from common import get_logger
 
 _log = get_logger(__name__)
@@ -82,8 +82,6 @@ SNAPSHOT_MAX_ENTRIES = 512
 # Bounding startup here leaves the client's own reconnect policy untouched for
 # the case that matters - a broker that goes away *after* a good connection.
 CONNECT_TIMEOUT_S = 5.0
-
-STATIC = Path(__file__).parent / "static"
 
 
 @dataclass
@@ -219,24 +217,9 @@ def create_app(
         """The minimal P1-08 map. `web-pilot/` replaces this in P6-01."""
         return (STATIC / "map.html").read_text(encoding="utf-8")
 
-    # P1-12. The vendored map libraries, and the base map. Both are served by
-    # the console itself so the page works with no internet. The base map is
-    # per machine and may be absent. That is a 404 the page handles by saying
-    # so - never a console that will not start, and never a 500: Starlette's
-    # StaticFiles raises on every request to a directory that does not exist.
-    # Checked at startup, so a base map fetched later needs a restart.
-    app.mount("/static", StaticFiles(directory=STATIC), name="static")
-    if basemap_dir is not None and basemap_dir.is_dir():
-        app.mount("/basemap", StaticFiles(directory=basemap_dir), name="basemap")
-    else:
-        _log.warning(
-            "no base map installed; the map will draw without one",
-            extra={"basemap_dir": str(basemap_dir)},
-        )
-
-        @app.get("/basemap/{path:path}", include_in_schema=False)
-        async def no_basemap(path: str) -> Response:
-            return Response(status_code=404)
+    # P1-12. The vendored map libraries, and the base map, served by the
+    # console itself so the page works with no internet.
+    mount_map_assets(app, basemap_dir)
 
     @app.get("/healthz")
     async def health() -> dict[str, Any]:

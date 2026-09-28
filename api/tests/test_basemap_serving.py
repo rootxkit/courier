@@ -12,7 +12,8 @@ from pathlib import Path
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from api.telemetry_ws import STATIC, create_app
+from api.assets import STATIC
+from api.telemetry_ws import create_app
 from tests.ports import free_tcp_port
 
 
