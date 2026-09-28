@@ -33,6 +33,7 @@ from websockets.http11 import Request, Response
 
 from common import BoundLogger, bind, get_logger
 from gateway.ingest_store import IngestStore, StoreError
+from gateway.rate_limit import RateLimiter
 from gateway.relay_messages import (
     ControlMessageError,
     Gap,
@@ -142,6 +143,10 @@ class RelayServer:
     # P1-10: where the time of storing a batch goes. Shared with the store and
     # the pipeline so one log line shows every stage's share.
     timings: StageTimings = field(default_factory=shared_timings)
+    # P1-07: refused connections are logged at most once per remote address
+    # per interval, with a count of those suppressed in between. Each one
+    # costs a caller nothing, so logging all of them is a way to fill a disk.
+    auth_rejections: RateLimiter = field(default_factory=RateLimiter)
 
     def __post_init__(self) -> None:
         self._server: Server | None = None
@@ -193,20 +198,32 @@ class RelayServer:
         """
         presented = request.headers.get("Authorization")
         if presented is None or not presented.startswith(_AUTHORIZATION_SCHEME):
+            self._log_rejected_connection(connection, "missing bearer token")
             return connection.respond(401, "missing bearer token\n")
 
         token = presented[len(_AUTHORIZATION_SCHEME) :]
         station_id = await self.authenticator.station_for_token(token)
         if station_id is None:
             # The token is deliberately not logged, not even truncated.
-            _log.warning(
-                "rejected relay connection", extra={"remote": str(request.path)}
-            )
+            self._log_rejected_connection(connection, "unknown or revoked token")
             return connection.respond(401, "unknown or revoked token\n")
 
         # Carried on the connection so the handler does not re-authenticate.
         connection.station_id = station_id  # type: ignore[attr-defined]
         return None
+
+    def _log_rejected_connection(
+        self, connection: ServerConnection, reason: str
+    ) -> None:
+        remote = connection.remote_address
+        host = str(remote[0]) if remote else "unknown"
+        suppressed = self.auth_rejections.admit(host)
+        if suppressed is None:
+            return
+        _log.warning(
+            "rejected relay connection",
+            extra={"remote": host, "reason": reason, "suppressed": suppressed},
+        )
 
     # --- connection lifecycle ---------------------------------------------
 
