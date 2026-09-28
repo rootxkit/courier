@@ -16,9 +16,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import websockets
@@ -27,6 +28,7 @@ from websockets.asyncio.client import connect
 from agent.framing import Record as RelayRecord
 from agent.framing import encode_records
 from gateway.ingest_store import InMemoryIngestStore
+from gateway.rate_limit import RateLimiter
 from gateway.relay_messages import Gap
 from gateway.relay_records import Record
 from gateway.relay_server import RelayServer
@@ -763,3 +765,76 @@ async def test_a_gateway_with_no_reporter_still_serves_the_transport() -> None:
         await read_until(connection, "ack")
 
     assert len(store.records[(STATION, EPOCH)]) == 4
+
+
+# --- refused connections are logged, but not without limit (P1-07) ---------
+
+
+class Captured(logging.Handler):
+    """Captured on the module's own logger with propagation off, rather than
+    through the root logger, where a handler left behind by another test may
+    hold a stream that has already been closed."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+@contextlib.contextmanager
+def captured_rejections(monkeypatch: pytest.MonkeyPatch) -> Any:
+    logger = logging.getLogger("gateway.relay_server")
+    handler = Captured()
+    monkeypatch.setattr(logger, "propagate", False)
+    logger.addHandler(handler)
+    try:
+        yield handler
+    finally:
+        logger.removeHandler(handler)
+
+
+async def attempt(server: RelayServer, headers: dict[str, str] | None) -> None:
+    with contextlib.suppress(websockets.InvalidStatus):
+        async with connect(url(server), additional_headers=headers or {}):
+            pass
+
+
+async def test_repeated_bad_tokens_are_logged_once_per_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each refusal costs the caller nothing, so logging every one is a way to
+    fill the disk. The first is logged; the rest are counted."""
+    clock = [0.0]
+    limiter = RateLimiter(interval_s=60.0, clock=lambda: clock[0])
+
+    with captured_rejections(monkeypatch) as handler:
+        async with running(auth_rejections=limiter) as server:
+            for _ in range(5):
+                await attempt(server, {"Authorization": "Bearer wrong"})
+            await attempt(server, None)
+            clock[0] += 61.0
+            await attempt(server, {"Authorization": "Bearer wrong"})
+
+    lines = [
+        r for r in handler.records if r.getMessage() == "rejected relay connection"
+    ]
+    assert [cast(Any, r).suppressed for r in lines] == [0, 5]
+    assert cast(Any, lines[0]).reason == "unknown or revoked token"
+
+
+async def test_a_valid_token_logs_no_rejection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The absence half, paired with the one above."""
+    with captured_rejections(monkeypatch) as handler:
+        async with (
+            running() as server,
+            connect(
+                url(server), additional_headers={"Authorization": f"Bearer {TOKEN}"}
+            ),
+        ):
+            pass
+
+    assert not [
+        r for r in handler.records if r.getMessage() == "rejected relay connection"
+    ]

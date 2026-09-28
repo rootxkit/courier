@@ -132,6 +132,20 @@ Per the P1-07 refinement recorded in `relay-v1.md` §3:
 - A frame whose SYSID is not assigned to the presenting station is rejected and
   rate-limit-logged. A compromised ground station cannot mint vehicles it was
   never assigned.
+- **The policy is `source_bindings` itself** (§12 question 6, answered
+  2026-09-28). A station may carry exactly the addresses bound on it; a
+  handover is the same drone bound on both stations (§8). At a record's
+  timestamp an address is therefore *resolved* (bound here), *unclaimed*
+  (bound nowhere: announced once, as in §7), or *rejected* (bound on another
+  station only). A rejection is archived like everything else, never written
+  to `drone_state`, recorded as a `rejected_source` event and published on
+  `events.rejected_source`, and reported at most once per address per minute
+  with the count suppressed in between, so it neither floods nor goes quiet.
+  Refused connections (`401`) are rate-limited the same way, per remote host.
+- **What this does not catch:** a compromised station replaying a SYSID that
+  *is* bound on it. Nothing in the address distinguishes that from the real
+  aircraft; it needs vehicle-side signing (MAVLink 2 signing), which is
+  outside Stage 0's receive-only scope.
 - Direct UDP sources (§11) keep their own path and are never production.
 
 Token storage, rotation and revocation are an open question (§12).
@@ -463,8 +477,11 @@ Listed, not resolved. Each needs an answer before the code that depends on it.
    It must not acknowledge what it has not stored, so the relay's queue becomes
    the buffer — which is correct, but the behaviour should be deliberate and
    bounded rather than emergent.
-6. **Station-to-vehicle policy source.** Database table, configuration, or
-   derived from the `drones` registry's `home_base_id`?
+6. ~~**Station-to-vehicle policy source.**~~ **ANSWERED (2026-09-28):**
+   `source_bindings`, with no separate table. A station may carry what is bound
+   on it; see §5. A separate assignments table was rejected because it would
+   be a second record of the same fact, able to disagree with the first, and
+   `home_base_id` because the Gateway cannot reach the relational registry.
 7. **Does a `component` ever need a row of its own?** A gimbal's attitude is
    archived today. If P8 wants it live, where does it go — it is not a drone.
 8. **Ordering writes from two stations whose clocks disagree.** §8 accepts two

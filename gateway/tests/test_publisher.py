@@ -16,7 +16,7 @@ from uuid import uuid4
 
 import pytest
 
-from gateway.binding import UNBOUND, Resolution
+from gateway.binding import NOT_ASSIGNED, UNBOUND, Resolution
 from gateway.drone_state import DroneStateRow
 from gateway.parsing import SourceId
 from gateway.publisher import (
@@ -210,6 +210,23 @@ async def test_an_unclaimed_source_is_published_so_it_can_be_acted_on() -> None:
     assert payload["sysid"] == 1
     assert payload["compid"] == 1
     assert payload["reason"] == UNBOUND
+
+
+async def test_a_rejected_source_is_published_on_its_own_subject() -> None:
+    """P1-07. The console must not show "no binding - register to track" for
+    an address bound on another station: registering it would bless a spoof."""
+    bus = RecordingBus()
+    resolution = Resolution(
+        source_id=ADDRESS, drone_id=None, unclaimed_reason=NOT_ASSIGNED
+    )
+
+    await TelemetryPublisher(bus=bus).publish_unclaimed(
+        "tbilisi-base-1", resolution, ADDRESS
+    )
+
+    subject, payload = bus.published[0]
+    assert subject == "events.rejected_source"
+    assert payload["reason"] == NOT_ASSIGNED
 
 
 # --- failure does not stop ingest ------------------------------------------
