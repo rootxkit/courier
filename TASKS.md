@@ -299,7 +299,7 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
       state) is in `docs/decisions/002-drain-rate-requirement.md` **awaiting a
       ruling**. The fixes are P1-13 and P1-14.
 
-- [ ] **P1-11** Record `AUTOPILOT_VERSION` per vehicle, so firmware is fleet
+- [x] **P1-11** Record `AUTOPILOT_VERSION` per vehicle, so firmware is fleet
       data rather than something read off a screen.
       The aircraft's firmware version is not in the raw archive: the message is
       only sent on request, Stage 0 is receive-only and cannot ask, and by the
@@ -314,6 +314,15 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
       *Done when:* connecting QGC to an aircraft results in a recorded flight
       software version for that `drone_id`, and a vehicle that never offers one
       is visibly unknown rather than silently absent.
+      *Closed* 2026-09-28, for the Gateway's side. `drone_firmware` holds one
+      row per change, and the console renders `fw unknown` until a version is
+      recorded (unit-tested payload; the page was not watched live). Two SITL aircraft: the one asked for its version got one row
+      (`4.8.0-dev`, `66c89850`), a second request added none, and the one
+      never asked got none.
+      MAVProxy does not request the version on connect, so a script stood in
+      for QGC's request on the same path. QGC's own request has not been
+      observed; the first P1-01 session with the real aircraft confirms it.
+      `docs/runbooks/p1-11-firmware.md`.
 
 - [ ] **P1-12** Self-hosted base map: a Georgia PMTiles extract served by the
       console itself.

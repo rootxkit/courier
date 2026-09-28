@@ -140,6 +140,9 @@
           age: "last seen",
           loss: "loss",
           hb_gap: "heartbeat gap",
+          // P1-11. Flight software, as the aircraft last reported it.
+          firmware: "fw",
+          fw_unknown: "unknown",
           s: "s",
           seconds: "s ago",
           healthy: "healthy",
@@ -174,6 +177,8 @@
           age: "ბოლო სიგნალი",
           loss: "დანაკარგი",
           hb_gap: "heartbeat-ის შეფერხება",
+          firmware: "პროგრამა",
+          fw_unknown: "უცნობია",
           s: "წმ",
           seconds: "წმ წინ",
           healthy: "მუშაობს",
@@ -347,12 +352,21 @@
             link.heartbeat_gap_max_s === undefined
               ? "—"
               : `${link.heartbeat_gap_max_s.toFixed(1)}${t("s")}`;
+          // P1-11. "unknown" rather than a blank until the aircraft has
+          // reported a version: QGC asks on connect, so a relay attached
+          // after QGC connected will not have seen the answer. Escaped,
+          // because the git hash is text the aircraft chose.
+          const fw = entry.data.firmware;
+          const firmware = fw && fw.version
+            ? escapeHtml(fw.git_hash ? `${fw.version} (${fw.git_hash})` : fw.version)
+            : `<span class="muted">${t("fw_unknown")}</span>`;
           return (
             `<div class="row"><span>${label} ` +
             `<span class="muted mono">${id.slice(0, 8)}</span></span>` +
             `<span class="muted">${t("battery")} ${battery} · ` +
             `${t("heading")} ${heading} · ${t("loss")} ${loss} · ` +
-            `${t("hb_gap")} ${gap} · ${age}${t("seconds")}${unplaced}</span></div>`
+            `${t("hb_gap")} ${gap} · ${t("firmware")} ${firmware} · ` +
+            `${age}${t("seconds")}${unplaced}</span></div>`
           );
         });
         dronesPanel.innerHTML =

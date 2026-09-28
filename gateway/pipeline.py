@@ -35,6 +35,9 @@ from gateway.drone_state import (
     StateAssembler,
     timestamp_from_recv_utc_ns,
 )
+from gateway.firmware import MESSAGE_NAME as AUTOPILOT_VERSION
+from gateway.firmware import firmware_from_message
+from gateway.firmware_store import FirmwareRegistry
 from gateway.link_quality import LinkQualityTracker
 from gateway.live_state import LiveState
 from gateway.parsing import ParsedMessage, SourceId, parse_datagram
@@ -77,6 +80,8 @@ class IngestPipeline:
     rejections: RateLimiter = field(default_factory=RateLimiter)
     # P1-05. Optional so the pipeline runs, and is tested, without Redis.
     live_state: LiveState | None = None
+    # P1-11. Optional for the same reason as live state.
+    firmware: FirmwareRegistry | None = None
 
     registry: SourceRegistry = field(init=False)
     assembler: StateAssembler = field(init=False)
@@ -168,7 +173,8 @@ class IngestPipeline:
                         drone_id: self._links[source_id].snapshot().as_dict()
                         for drone_id, source_id in sources_by_drone.items()
                     }
-                    await self.publisher.publish_rows(rows, labels, links)
+                    firmware = await self._firmware_summaries(rows)
+                    await self.publisher.publish_rows(rows, labels, links, firmware)
             except Exception as error:
                 _log.error(
                     "could not write drone_state",
@@ -256,9 +262,59 @@ class IngestPipeline:
             # visible and unwritten until someone binds it.
             return None
 
+        if item.message.name == AUTOPILOT_VERSION and self.firmware is not None:
+            await self._record_firmware(resolution.drone_id, item)
+
         return self.assembler.observe(
             item.source, item.message, drone_id=resolution.drone_id, ts=item.ts
         )
+
+    async def _record_firmware(self, drone_id: UUID, item: _Observed) -> None:
+        """P1-11. Its own handler: a firmware record is worth having, and not
+        worth a row of position."""
+        assert self.firmware is not None
+        try:
+            recorded = await self.firmware.observe(
+                drone_id,
+                self.station_id,
+                item.ts,
+                firmware_from_message(item.message.payload),
+            )
+        except Exception as error:
+            _log.error(
+                "could not record firmware",
+                extra={"station_id": self.station_id, "error": repr(error)},
+            )
+            return
+        if recorded:
+            _log.info(
+                "firmware recorded",
+                extra={"station_id": self.station_id, "drone_id": str(drone_id)},
+            )
+
+    async def _firmware_summaries(
+        self, rows: list[DroneStateRow]
+    ) -> dict[UUID, dict[str, str | None]]:
+        """Latest firmware per drone in the batch, from the registry's cache.
+
+        A drone with none recorded is absent here and published as null, which
+        the console shows as unknown - never as a blank that reads as fine.
+        """
+        if self.firmware is None:
+            return {}
+        summaries: dict[UUID, dict[str, str | None]] = {}
+        for drone_id in {row.drone_id for row in rows}:
+            try:
+                known = await self.firmware.latest(drone_id)
+            except Exception as error:
+                _log.warning(
+                    "could not read firmware",
+                    extra={"station_id": self.station_id, "error": repr(error)},
+                )
+                continue
+            if known is not None:
+                summaries[drone_id] = known.summary()
+        return summaries
 
     async def _announce_unclaimed(
         self, epoch: str, source: Source, resolution: Resolution
@@ -341,6 +397,7 @@ class StationPipelines:
     writer: RowWriter
     publisher: TelemetryPublisher
     live_state: LiveState | None = None
+    firmware: FirmwareRegistry | None = None
 
     pipelines: dict[str, IngestPipeline] = field(default_factory=dict)
 
@@ -353,6 +410,7 @@ class StationPipelines:
                 writer=self.writer,
                 publisher=self.publisher,
                 live_state=self.live_state,
+                firmware=self.firmware,
             )
             self.pipelines[station_id] = pipeline
         return pipeline
