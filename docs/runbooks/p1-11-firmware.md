@@ -37,7 +37,14 @@ it, and MAVProxy fans the reply out to every output, the relay's included.
 That is the same path QGC's request takes: a ground station asks, and the
 relay sees the answer.
 
-**Not observed here:** QGC itself requesting the version on connect. That is
+**Observed on the real aircraft, 2026-09-28:** with the Gateway and relay
+running first, reconnecting the aircraft over USB to QGC Daily produced
+`firmware recorded` 44 s after the relay started: `hexa-01`, ArduPilot 4.6.3,
+git `92b0cd78`, vendor 0x1209, product 0x5741. So QGC does request the version
+on connect. The aircraft runs 4.6.3 while SITL runs 4.8.0-dev.
+
+Before that run, this section read: **Not observed here:** QGC itself
+requesting the version on connect. That is
 TASKS.md's premise, and it is confirmed or refuted on the first session with
 the real aircraft and QGC (P1-01). If it does not hold, the aircraft stays
 `fw unknown`, which is the visible failure the criterion asks for.
