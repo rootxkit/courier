@@ -19,10 +19,11 @@ from uuid import UUID
 import pytest
 from pymavlink.dialects.v20 import ardupilotmega as mavlink
 
-from gateway.binding import UNBOUND, UNCLASSIFIED, Resolution
+from gateway.binding import NOT_ASSIGNED, UNBOUND, UNCLASSIFIED, Resolution
 from gateway.drone_state import DroneStateRow
 from gateway.parsing import SourceId
 from gateway.pipeline import IngestPipeline, StationPipelines
+from gateway.rate_limit import RateLimiter
 from gateway.relay_records import Record
 
 STATION = "tbilisi-base-1"
@@ -52,6 +53,9 @@ class FakeResolver:
         self.rebound_at = rebound_at
         self.rebound_to = rebound_to
         self.batch_calls = 0
+        self.suppressed: list[int] = []
+        # Every vehicle resolves as bound on another station (P1-07).
+        self.not_assigned = False
 
     async def labels_for(self, drone_ids: set[UUID]) -> dict[UUID, str]:
         if self.labels_fail:
@@ -65,6 +69,8 @@ class FakeResolver:
     async def resolve(
         self, station_id: str, source: Any, *, at: datetime
     ) -> Resolution:
+        if self.not_assigned and source.kind.value == "vehicle":
+            return Resolution(source.source_id, None, NOT_ASSIGNED)
         if self.drone_id is None:
             reason = UNCLASSIFIED if source.kind.value == "unclassified" else UNBOUND
             return Resolution(source.source_id, None, reason)
@@ -82,9 +88,15 @@ class FakeResolver:
         ]
 
     async def record_unclaimed(
-        self, station_id: str, epoch: str | None, resolution: Resolution
+        self,
+        station_id: str,
+        epoch: str | None,
+        resolution: Resolution,
+        *,
+        suppressed: int = 0,
     ) -> None:
         self.unclaimed.append(resolution)
+        self.suppressed.append(suppressed)
 
 
 class FakeWriter:
@@ -529,3 +541,71 @@ async def test_a_heartbeat_later_in_the_batch_does_not_reclassify_an_earlier_mes
 
     assert len(rows) == 1
     assert rows[0].ts == datetime(2026, 9, 24, 12, 0, 0, 300_000, tzinfo=UTC)
+
+
+# --- sources refused by station policy (P1-07) -----------------------------
+
+
+class Clock:
+    def __init__(self) -> None:
+        self.now_s = 0.0
+
+    def __call__(self) -> float:
+        return self.now_s
+
+
+def a_station_presenting_someone_elses_aircraft() -> tuple[
+    IngestPipeline, FakeResolver, FakeWriter, FakePublisher, Clock
+]:
+    resolver = FakeResolver()
+    resolver.not_assigned = True
+    pipeline, _, writer, publisher = build(resolver=resolver)
+    clock = Clock()
+    pipeline.rejections = RateLimiter(interval_s=60.0, clock=clock)
+    return pipeline, resolver, writer, publisher, clock
+
+
+async def test_a_rejected_source_produces_no_row_and_is_reported() -> None:
+    pipeline, resolver, writer, publisher, _ = (
+        a_station_presenting_someone_elses_aircraft()
+    )
+
+    rows = await pipeline.process(
+        EPOCH, [record(0, heartbeat()), record(1, position())]
+    )
+
+    assert rows == []
+    assert writer.written == []
+    assert [r.unclaimed_reason for r in resolver.unclaimed] == [NOT_ASSIGNED]
+    assert publisher.unclaimed == [SourceId(sysid=1, compid=1)]
+
+
+async def test_a_continuing_rejection_is_reported_again_with_its_count() -> None:
+    """Unlike an unclaimed source, a refusal must not go quiet after its first
+    report - and it must not flood either."""
+    pipeline, resolver, _, _, clock = a_station_presenting_someone_elses_aircraft()
+    batch = [record(0, heartbeat())] + [record(n, position()) for n in range(1, 10)]
+
+    await pipeline.process(EPOCH, batch)
+    assert resolver.suppressed == [0]
+
+    clock.now_s += 30.0
+    await pipeline.process(EPOCH, batch)
+    assert resolver.suppressed == [0], "reported again inside the interval"
+
+    clock.now_s += 31.0
+    await pipeline.process(EPOCH, batch)
+    # 9 more in the first batch, 10 in the second, then this one reported.
+    assert resolver.suppressed == [0, 19]
+
+
+async def test_an_unclaimed_source_is_still_announced_only_once() -> None:
+    """The rejection path must not change the unclaimed one: an aircraft being
+    set up is announced once, as before."""
+    pipeline, resolver, _, _ = build(resolver=FakeResolver(drone_id=None))
+
+    for _ in range(3):
+        await pipeline.process(EPOCH, [record(0, heartbeat())])
+
+    assert len(resolver.unclaimed) == 1
+    assert resolver.suppressed == [0]

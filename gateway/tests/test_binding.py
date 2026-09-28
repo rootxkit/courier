@@ -22,6 +22,7 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from gateway.binding import (
+    NOT_ASSIGNED,
     UNBOUND,
     UNCLASSIFIED,
     Binding,
@@ -50,13 +51,14 @@ async def station(
         yield name
     finally:
         async with engine.begin() as connection:
+            # LIKE, so a test's second station (`{name}-b`) is cleaned too.
             await connection.execute(
-                sa.text("DELETE FROM source_bindings WHERE station_id = :s"),
-                {"s": name},
+                sa.text("DELETE FROM source_bindings WHERE station_id LIKE :p"),
+                {"p": f"{name}%"},
             )
             await connection.execute(
-                sa.text("DELETE FROM ingest_events WHERE station_id = :s"),
-                {"s": name},
+                sa.text("DELETE FROM ingest_events WHERE station_id LIKE :p"),
+                {"p": f"{name}%"},
             )
             # Drones are referenced by bindings, so they go last.
             await connection.execute(
@@ -506,3 +508,112 @@ def test_covers_is_inclusive_below_and_exclusive_above() -> None:
     assert binding.covers(NOON)
     assert binding.covers(HANDOVER - timedelta(microseconds=1))
     assert not binding.covers(HANDOVER)
+
+
+# --- station policy: bindings decide which station may carry what (P1-07) ---
+#
+# relay-v1 §3: a station authenticates as itself, and which aircraft it may
+# carry is server policy. That policy is source_bindings. An address bound on
+# another station is refused here, not merely unclaimed.
+
+
+async def test_an_address_bound_on_another_station_is_rejected(
+    resolver: BindingResolver, station: str
+) -> None:
+    """A spoofed SYSID, or a station presenting an aircraft it was never
+    assigned. Archived either way; never attributed."""
+    other = f"{station}-b"
+    drone = await a_drone(resolver, station, "assigned-to-b")
+    await resolver.bind(other, ADDRESS, drone, bound_from=NOON, created_by="test")
+
+    [resolution] = await resolver.resolve_batch(station, [(vehicle(), HANDOVER)])
+
+    assert resolution.drone_id is None
+    assert resolution.unclaimed_reason == NOT_ASSIGNED
+    assert resolution.is_rejected
+
+
+async def test_the_station_it_is_assigned_to_still_resolves_it(
+    resolver: BindingResolver, station: str
+) -> None:
+    """The presence half: the policy must not refuse the rightful station."""
+    other = f"{station}-b"
+    drone = await a_drone(resolver, station, "assigned-to-b")
+    await resolver.bind(other, ADDRESS, drone, bound_from=NOON, created_by="test")
+
+    [resolution] = await resolver.resolve_batch(other, [(vehicle(), HANDOVER)])
+
+    assert resolution.drone_id == drone
+    assert not resolution.is_rejected
+
+
+async def test_a_handover_bound_on_both_stations_resolves_on_both(
+    resolver: BindingResolver, station: str
+) -> None:
+    """Spec §8: two stations relaying one aircraft is normal, not a spoof."""
+    other = f"{station}-b"
+    drone = await a_drone(resolver, station, "handover")
+    await resolver.bind(station, ADDRESS, drone, bound_from=NOON, created_by="test")
+    await resolver.bind(other, ADDRESS, drone, bound_from=NOON, created_by="test")
+
+    [here] = await resolver.resolve_batch(station, [(vehicle(), HANDOVER)])
+    [there] = await resolver.resolve_batch(other, [(vehicle(), HANDOVER)])
+
+    assert here.drone_id == drone
+    assert there.drone_id == drone
+
+
+async def test_an_address_bound_nowhere_is_unclaimed_not_rejected(
+    resolver: BindingResolver, station: str
+) -> None:
+    """An aircraft being set up is normal and must not be reported as hostile."""
+    [resolution] = await resolver.resolve_batch(station, [(vehicle(), HANDOVER)])
+
+    assert resolution.unclaimed_reason == UNBOUND
+    assert not resolution.is_rejected
+
+
+async def test_a_binding_elsewhere_that_has_ended_does_not_reject(
+    resolver: BindingResolver, station: str
+) -> None:
+    """Judged at the record's timestamp: bound on another station last week
+    and bound nowhere now is unclaimed."""
+    other = f"{station}-b"
+    drone = await a_drone(resolver, station, "moved-away")
+    await resolver.bind(
+        other,
+        ADDRESS,
+        drone,
+        bound_from=NOON - timedelta(days=7),
+        bound_until=NOON - timedelta(days=6),
+        created_by="test",
+    )
+
+    [resolution] = await resolver.resolve_batch(station, [(vehicle(), HANDOVER)])
+
+    assert resolution.unclaimed_reason == UNBOUND
+
+
+async def test_a_rejection_is_recorded_as_its_own_event_type(
+    resolver: BindingResolver, station: str, engine: AsyncEngine
+) -> None:
+    other = f"{station}-b"
+    drone = await a_drone(resolver, station, "assigned-to-b")
+    await resolver.bind(other, ADDRESS, drone, bound_from=NOON, created_by="test")
+    [resolution] = await resolver.resolve_batch(station, [(vehicle(), HANDOVER)])
+
+    await resolver.record_unclaimed(station, None, resolution, suppressed=37)
+
+    async with engine.connect() as connection:
+        row = (
+            await connection.execute(
+                sa.text(
+                    "SELECT event_type, payload FROM ingest_events "
+                    "WHERE station_id = :s"
+                ),
+                {"s": station},
+            )
+        ).one()
+    assert row.event_type == "rejected_source"
+    assert row.payload["suppressed"] == 37
+    assert row.payload["reason"] == NOT_ASSIGNED

@@ -37,6 +37,7 @@ from gateway.drone_state import (
 )
 from gateway.parsing import ParsedMessage, SourceId, parse_datagram
 from gateway.publisher import TelemetryPublisher
+from gateway.rate_limit import RateLimiter
 from gateway.relay_records import Record
 from gateway.stage_timing import StageTimings, shared_timings
 from gateway.state_writer import DroneStateWriter
@@ -69,6 +70,9 @@ class IngestPipeline:
     writer: DroneStateWriter
     publisher: TelemetryPublisher
     timings: StageTimings = field(default_factory=shared_timings)
+    # P1-07: sources refused by station policy are reported at most once per
+    # address per interval, with a count of what was suppressed in between.
+    rejections: RateLimiter = field(default_factory=RateLimiter)
 
     registry: SourceRegistry = field(init=False)
     assembler: StateAssembler = field(init=False)
@@ -206,6 +210,10 @@ class IngestPipeline:
     async def _assemble(
         self, epoch: str, item: _Observed, resolution: Resolution
     ) -> DroneStateRow | None:
+        if resolution.is_rejected:
+            await self._report_rejected(epoch, resolution)
+            return None
+
         if resolution.drone_id is None:
             await self._announce_unclaimed(epoch, item.source, resolution)
             # Archived already, and deliberately not written to drone_state:
@@ -245,6 +253,33 @@ class IngestPipeline:
             },
         )
         await self.resolver.record_unclaimed(self.station_id, epoch, resolution)
+        await self.publisher.publish_unclaimed(self.station_id, resolution, source_id)
+
+    async def _report_rejected(self, epoch: str, resolution: Resolution) -> None:
+        """A station presented an address bound on another station (P1-07).
+
+        Not announced once like an unclaimed source: a refusal that goes quiet
+        after its first report reads as a refusal that stopped. Reported at
+        most once per address per interval instead, carrying the count
+        suppressed since the last report, so it neither floods nor falls
+        silent. The records themselves are already archived.
+        """
+        source_id = resolution.source_id
+        suppressed = self.rejections.admit(source_id)
+        if suppressed is None:
+            return
+        _log.warning(
+            "rejected source: not assigned to this station",
+            extra={
+                "station_id": self.station_id,
+                "sysid": source_id.sysid,
+                "compid": source_id.compid,
+                "suppressed": suppressed,
+            },
+        )
+        await self.resolver.record_unclaimed(
+            self.station_id, epoch, resolution, suppressed=suppressed
+        )
         await self.publisher.publish_unclaimed(self.station_id, resolution, source_id)
 
     def forget_unclaimed(self, source_id: SourceId) -> None:

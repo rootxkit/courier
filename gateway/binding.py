@@ -32,6 +32,25 @@ than one `@>` query per record - a replayed backlog is tens of thousands of
 records and each would otherwise be a round trip. `test_binding.py` pins the
 Python arithmetic against PostgreSQL's own `@>` operator at the boundary
 instant, so the duplication cannot drift.
+
+## Bindings are also the station policy (P1-07)
+
+A station authenticates as itself and relays whatever its radio hears, so
+which aircraft it may carry is server policy (relay-v1 §3). That policy *is*
+`source_bindings`: a station may carry exactly the addresses bound on it, and
+a handover between stations is the same drone bound on both (spec §8).
+
+That gives an address three outcomes at a record's timestamp, not two:
+
+- bound on this station: resolved;
+- bound on no station: **unclaimed**, the normal state of an aircraft being
+  set up, announced once;
+- bound on another station but not this one: **not assigned**, a rejection. It
+  is what a spoofed SYSID or a misrouted station looks like, and unlike an
+  unclaimed source it is reported for as long as it continues.
+
+Either way nothing is discarded: the records are already archived, and only
+attribution to a drone is refused.
 """
 
 from __future__ import annotations
@@ -128,8 +147,16 @@ class Resolution:
     def is_claimed(self) -> bool:
         return self.drone_id is not None
 
+    @property
+    def is_rejected(self) -> bool:
+        """Refused by station policy, as opposed to merely unclaimed."""
+        return self.unclaimed_reason == NOT_ASSIGNED
+
 
 UNBOUND: str = "no binding covers this address at the record's timestamp"
+NOT_ASSIGNED: str = (
+    "the address is bound on another station, not on the station presenting it"
+)
 NOT_A_VEHICLE: str = "the source is not classified as a vehicle"
 UNCLASSIFIED: str = "the source has never sent a HEARTBEAT"
 
@@ -315,6 +342,36 @@ class BindingResolver:
             for row in rows
         ]
 
+    async def _bindings_on_any_station(self, source_id: SourceId) -> list[Binding]:
+        """Every binding this address has on any station, oldest first."""
+        try:
+            async with self.engine.connect() as connection:
+                rows = (
+                    await connection.execute(
+                        sa.text(
+                            "SELECT station_id, drone_id, lower(valid) AS bound_from, "
+                            "       upper(valid) AS bound_until "
+                            "FROM source_bindings "
+                            "WHERE sysid = :sysid AND compid = :compid "
+                            "ORDER BY lower(valid)"
+                        ),
+                        {"sysid": source_id.sysid, "compid": source_id.compid},
+                    )
+                ).all()
+        except SQLAlchemyError as error:
+            raise StoreError(f"could not read bindings: {error}") from error
+
+        return [
+            Binding(
+                station_id=row.station_id,
+                source_id=source_id,
+                drone_id=row.drone_id,
+                bound_from=row.bound_from,
+                bound_until=row.bound_until,
+            )
+            for row in rows
+        ]
+
     async def resolve(
         self, station_id: str, source: Source, *, at: datetime
     ) -> Resolution:
@@ -339,17 +396,21 @@ class BindingResolver:
             for source, _ in records
             if source.kind is SourceKind.VEHICLE
         }
+        # One query per address, across every station. The other stations'
+        # bindings are what distinguish "not assigned here" from "unclaimed",
+        # and reading them separately would double the queries per batch.
         known: dict[SourceId, list[Binding]] = {}
         for address in addresses:
-            known[address] = await self.bindings_for(station_id, address)
+            known[address] = await self._bindings_on_any_station(address)
 
         resolved: list[Resolution] = []
         for source, moment in records:
-            resolved.append(self._resolve_one(source, moment, known))
+            resolved.append(self._resolve_one(station_id, source, moment, known))
         return resolved
 
     def _resolve_one(
         self,
+        station_id: str,
         source: Source,
         moment: datetime,
         known: dict[SourceId, list[Binding]],
@@ -364,32 +425,58 @@ class BindingResolver:
         if source.kind is not SourceKind.VEHICLE:
             return Resolution(source.source_id, None, NOT_A_VEHICLE)
 
-        for binding in known.get(source.source_id, []):
-            if binding.covers(moment):
+        in_force = [
+            binding
+            for binding in known.get(source.source_id, [])
+            if binding.covers(moment)
+        ]
+        for binding in in_force:
+            if binding.station_id == station_id:
                 return Resolution(source.source_id, binding.drone_id)
 
+        # Bound, but somewhere else, at this instant. Judged at the record's
+        # timestamp like everything here: an address that was bound elsewhere
+        # last week and is bound nowhere now is unclaimed, not rejected.
+        if in_force:
+            return Resolution(source.source_id, None, NOT_ASSIGNED)
         return Resolution(source.source_id, None, UNBOUND)
 
     async def record_unclaimed(
-        self, station_id: str, epoch: str | None, resolution: Resolution
+        self,
+        station_id: str,
+        epoch: str | None,
+        resolution: Resolution,
+        *,
+        suppressed: int = 0,
     ) -> None:
-        """Surface an unclaimed source as an event.
+        """Surface an unclaimed or rejected source as an event.
 
         §7: normal during setup and serious in flight, so it is an event and a
-        console state rather than a log line nobody reads.
+        console state rather than a log line nobody reads. A source refused by
+        station policy (P1-07) is a different event type, because it is a
+        different finding: not "nobody has said what this is" but "this
+        station was never assigned it". `suppressed` is how many rejections
+        were counted, not reported, since the previous event for the address.
         """
+        payload: dict[str, object] = {
+            "sysid": resolution.source_id.sysid,
+            "compid": resolution.source_id.compid,
+            "reason": resolution.unclaimed_reason,
+        }
+        if resolution.is_rejected:
+            payload["suppressed"] = suppressed
         try:
             async with self.engine.begin() as connection:
                 await connection.execute(
                     sa.insert(_events).values(
                         station_id=station_id,
                         epoch=epoch,
-                        event_type="unclaimed_source",
-                        payload={
-                            "sysid": resolution.source_id.sysid,
-                            "compid": resolution.source_id.compid,
-                            "reason": resolution.unclaimed_reason,
-                        },
+                        event_type=(
+                            "rejected_source"
+                            if resolution.is_rejected
+                            else "unclaimed_source"
+                        ),
+                        payload=payload,
                     )
                 )
         except SQLAlchemyError as error:

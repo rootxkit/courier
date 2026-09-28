@@ -200,8 +200,13 @@ class TelemetryPublisher:
     async def publish_unclaimed(
         self, station_id: str, resolution: Resolution, source_id: SourceId
     ) -> None:
+        # A source refused by station policy (P1-07) has its own subject: the
+        # console must not render "not assigned to this station" as "no
+        # binding - register to track", which invites registering a spoof.
         await self._send(
-            event_subject("unclaimed_source"),
+            event_subject(
+                "rejected_source" if resolution.is_rejected else "unclaimed_source"
+            ),
             encode_unclaimed(
                 station_id,
                 resolution,

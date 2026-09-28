@@ -146,6 +146,9 @@
           unreachable: "unreachable — data buffered at the station",
           data_lost: "data lost",
           no_binding: "transmitting, no binding — register to track",
+          // P1-07. Deliberately not "register to track": the address is bound
+          // on another station, so registering it here would bless a spoof.
+          not_assigned: "bound to another station — rejected here",
           // Present, but the aircraft has not told us where it is. Not an
           // error: indoors, before the EKF has an origin, this is normal.
           unplaced: "no position yet",
@@ -172,6 +175,7 @@
           unreachable: "მიუწვდომელია — მონაცემები ინახება სადგურზე",
           data_lost: "მონაცემები დაკარგულია",
           no_binding: "გადასცემს, მაგრამ არ არის მიბმული",
+          not_assigned: "მიბმულია სხვა სადგურზე — აქ უარყოფილია",
           unnamed: "უსახელო",
           unplaced: "პოზიცია ჯერ არ არის",
         },
@@ -354,7 +358,7 @@
         const unclaimedRows = [...unclaimed.values()].map(
           (u) =>
             `<div class="row"><span>${u.station_id} · ${u.sysid}/${u.compid}</span>` +
-            `<span class="pill unclaimed">${t("no_binding")}</span></div>`
+            `<span class="pill unclaimed">${t(u.rejected ? "not_assigned" : "no_binding")}</span></div>`
         );
         document.getElementById("unclaimed").innerHTML =
           `<div class="row"><strong>${t("unclaimed")}</strong></div>` +
@@ -381,9 +385,12 @@
             upsertDrone(message.data);
           } else if (message.kind === "station") {
             stations.set(message.data.station_id, message.data);
-          } else if (message.kind === "events" && message.name === "unclaimed_source") {
+          } else if (
+            message.kind === "events" &&
+            (message.name === "unclaimed_source" || message.name === "rejected_source")
+          ) {
             const key = `${message.data.station_id}/${message.data.sysid}/${message.data.compid}`;
-            unclaimed.set(key, message.data);
+            unclaimed.set(key, { ...message.data, rejected: message.name === "rejected_source" });
           }
           render();
         };
