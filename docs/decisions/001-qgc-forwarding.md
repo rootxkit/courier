@@ -1,6 +1,6 @@
 # 001 — QGC MAVLink forwarding: what the link can and cannot do
 
-- **Status:** PROPOSED — findings 1 and 3 measured; finding 2 unresolved, see below
+- **Status:** PROPOSED — findings 1, 2 and 3 measured over USB; radio-port rates outstanding
 - **Date:** 2026-09-21
 - **Task:** P1-00
 
@@ -11,8 +11,8 @@ assumption; run `tools/mavlink_probe.py` and paste real output.
 
 | | |
 |---|---|
-| QGroundControl version | **TO FILL** — Help → About. The executable's version resource reads `0.0.0.0`, so it cannot be read programmatically |
-| Vehicle / autopilot | ArduPilot, SYSID 1, component 1. Exact firmware **TO FILL** |
+| QGroundControl version | **QGroundControl Daily** (window title, 2026-09-28); exact build still **TO FILL** from Help → About. The executable's version resource reads `0.0.0.0`, so it cannot be read programmatically |
+| Vehicle / autopilot | ArduPilot **4.6.3** (official, git `92b0cd78`), SYSID 1, component 1. Read from the aircraft's own `AUTOPILOT_VERSION` by P1-11 on 2026-09-28 |
 | Radio link | **USB direct** — so the rates below are `SR0_*` on `SERIAL0`, not the radio port |
 | Ground station OS | Windows 11 Pro 10.0.26200 |
 | Vehicle SYSID | 1 (component 1) |
@@ -180,9 +180,33 @@ Baseline: listening 15s without injecting anything.
 RESULT: INCONCLUSIVE.
 ```
 
-**Conclusion: UNTESTED. Not telemetry-only, not bidirectional — unknown.**
+That was the first attempt, 2026-09-21. The re-run, 2026-09-28, with QGC left
+idle on the flight view and no other ground station open:
 
-The probe refused to answer, and that refusal is the finding. `PARAM_VALUE`
+```
+Waiting for a frame on 127.0.0.1:14445 to learn the peer...
+Peer 127.0.0.1:62184, vehicle SYSID 1
+
+Baseline: listening 15s without injecting anything.
+  unsolicited PARAM_VALUE: 0 (0 matching SYSID_THISMAV)
+
+Injecting PARAM_REQUEST_READ for 'SYSID_THISMAV' every 5s for up to 45s.
+Counting a reply only within 2s of an injection; 3 needed.
+  attempts 9, correlated 0, uncorrelated 0
+
+RESULT: TELEMETRY-ONLY.
+```
+
+**Conclusion: TELEMETRY-ONLY, for this QGC build over USB.** The baseline was
+silent, so a reply would have been attributable; nine requests produced none.
+It holds for the build measured: forwarding behaviour is undocumented and may
+differ between QGC builds, which is one more reason the design never depends
+on it either way.
+
+What follows is the reasoning from the first attempt, kept because it is why
+the re-run was valid.
+
+The first probe refused to answer, and that refusal was the finding. `PARAM_VALUE`
 arrives on the forwarded stream without anyone asking for it: once during the
 15-second baseline, and twice during the 60-second capture in finding 1. QGC
 requests parameters on its own schedule.
@@ -195,7 +219,7 @@ number that would look like a measurement.
 
 To resolve it, quiet the ground station first — close other GCS instances, let
 QGC finish its initial parameter download, and leave it idle on the flight view
-for a couple of minutes — then re-run. Until then this stays UNTESTED.
+for a couple of minutes — then re-run. That is what the 2026-09-28 run did.
 
 **This does not block anything.** The plan treats the channel as telemetry-only
 by design, and every safety argument in `ARCHITECTURE.md` §3 depends on the
@@ -204,9 +228,10 @@ change what we build; it would only inform P3B timing. Even if the channel
 turned out to be bidirectional, it is undocumented and varies by QGC build, so
 it would remain something to route around rather than to use.
 
-**Do not record this as telemetry-only.** A one-way link and an untested link
-look identical from here, and writing down the convenient one is how the
-original version of this probe came to be believed for a whole session.
+Until the re-run it was deliberately not recorded as telemetry-only: a one-way
+link and an untested link look identical from here, and writing down the
+convenient one is how the original version of this probe came to be believed
+for a whole session.
 
 ## Finding 3 — bandwidth
 

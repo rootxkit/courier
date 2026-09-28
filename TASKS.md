@@ -75,11 +75,14 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
       aircraft and fill in `docs/decisions/001-qgc-forwarding.md`.
       *Done when:* the decision record contains measured output, not
       assumptions. Everything downstream depends on this being accurate.
-      *Partial:* findings 1 and 3 measured over USB direct. Outstanding —
-      QGC version and firmware in the environment table; finding 2 is UNTESTED,
-      re-run `roundtrip` with the ground station quiet; radio-port rates
-      (`SR1_*`/`SR2_*`) must be measured separately before any multi-aircraft
-      flight; `MISSION_ITEM_REACHED` to be confirmed on the first mission run.
+      *Partial:* findings 1, 2 and 3 measured over USB direct. Finding 2 is
+      TELEMETRY-ONLY (2026-09-28: silent baseline, 9 requests, 0 replies).
+      Firmware recorded (ArduPilot 4.6.3). Outstanding — the exact QGC build
+      (Help → About; the window says "Daily"); radio-port rates, which on this
+      aircraft go through a SIYI MK15 whose QGC runs on the controller itself,
+      so they are measured once forwarding from the controller reaches a relay
+      (see P1-01); `MISSION_ITEM_REACHED` to be confirmed on the first mission
+      run.
 
 - [~] **P1-01** Ground relay process: read UDP 14445, authenticate, forward to
       Gateway over TLS WebSocket, disk-backed queue that replays after an
@@ -101,8 +104,15 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
       sink resumed from its own disk and the relay refilled the gap exactly.
       Outstanding: Procedure A over a real LAN, which also covers TLS and the
       half-open-connection detection path that a connection refusal never
-      exercises; and QGC-to-relay integrity, which the relay's own counters
-      cannot see (`tools/analyze_capture.py`).
+      exercises.
+      QGC-to-relay integrity over USB, 2026-09-28: 10 minutes, 49,812 frames
+      from the aircraft, 0 lost by MAVLink sequence, 0 relay sequence
+      discontinuities, 2,857 B/s (read from the Gateway's archive).
+      **Open question for the field:** the aircraft's SIYI MK15 runs QGC on the
+      controller (Android), where this relay cannot run. QGC forwarding is
+      plain UDP with no authentication and no buffering, so it must not be
+      pointed at the internet; it needs a relay on the same network, or a
+      relay on the controller. To be settled with the staging server.
 
 - [ ] **P1-01b** QGC setup documentation: forwarding configuration, stream rate
       tuning (`SR*_` parameters), multi-vehicle SYSID assignment, radio `NETID`
@@ -320,8 +330,9 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
       (`4.8.0-dev`, `66c89850`), a second request added none, and the one
       never asked got none.
       MAVProxy does not request the version on connect, so a script stood in
-      for QGC's request on the same path. QGC's own request has not been
-      observed; the first P1-01 session with the real aircraft confirms it.
+      for QGC's request on the same path. QGC's own request was then observed
+      on the real aircraft (2026-09-28): `hexa-01` recorded as ArduPilot
+      4.6.3 on reconnect.
       `docs/runbooks/p1-11-firmware.md`.
 
 - [x] **P1-12** Self-hosted base map: a Georgia PMTiles extract served by the
