@@ -324,7 +324,7 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
       observed; the first P1-01 session with the real aircraft confirms it.
       `docs/runbooks/p1-11-firmware.md`.
 
-- [ ] **P1-12** Self-hosted base map: a Georgia PMTiles extract served by the
+- [x] **P1-12** Self-hosted base map: a Georgia PMTiles extract served by the
       console itself.
       The P1-08 map has no base layer. The demo style's tiles stop at zoom 6 and
       contain only country outlines, so at city zoom there is nothing to draw —
@@ -339,6 +339,15 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
       offline basemap has no way of telling anyone it is stale.
       *Done when:* the map renders streets over the operating area with no
       network access beyond the console itself, and attribution is visible.
+      *Closed* 2026-09-28. Protomaps build 20260928 (OSM data as of
+      2026-09-28 04:00 UTC), bbox 39.9,41.0,46.8,43.6 at zoom 0-15: 333 MB,
+      one PMTiles file, installed per machine by
+      `infra/basemap/fetch_basemap.sh` and never committed. MapLibre, PMTiles
+      and the style library are vendored. Watched on the development machine:
+      Tbilisi streets at zoom 14, every request to 127.0.0.1 only, OSM
+      attribution with the extract date visible. In Georgian the labels are
+      OSM's `name` (Georgian script); the fonts were checked to carry it.
+      See `docs/runbooks/p1-12-basemap.md`.
 
 - [x] **P1-13** Resolve source bindings per batch, not per message.
       P1-10 measured this as the Gateway's ceiling. `IngestPipeline` calls
@@ -390,9 +399,14 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
 
 Goal: orders exist, move through states, and are fully auditable.
 
-- [ ] **P2-01** Alembic migrations for the full schema in
+- [~] **P2-01** Alembic migrations for the full schema in
       `docs/ARCHITECTURE.md` §4, with GiST indexes on all geometry.
       *Done when:* `make migrate` runs clean up and down.
+      *Partial* 2026-09-28: the relational tree exists with `bases`,
+      `pilots`, `drones`, `airspace_zones` and `events` (GiST on every
+      geometry; `events` append-only by trigger), and runs up, down and up in
+      CI (`make migrate-relational`). `orders` and `missions` are held back
+      until the business direction is decided (courier or monitoring).
 
 - [ ] **P2-02** Seed data: 3 bases, 10 drones, 3 pilots, realistic Tbilisi
       coordinates and airframe parameters.
@@ -407,7 +421,7 @@ Goal: orders exist, move through states, and are fully auditable.
       *Done when:* an order runs through all states via API calls and `events`
       holds the complete trail.
 
-- [ ] **P2-05** Drone and pilot registry API, including status transitions
+- [x] **P2-05** Drone and pilot registry API, including status transitions
       (`IDLE`, `ASSIGNED`, `IN_FLIGHT`, `CHARGING`, `MAINTENANCE`, `OFFLINE`).
       **Registering or retiring a drone must project into the telemetry
       database's `known_drones`.** The Gateway never connects to the relational
@@ -422,10 +436,23 @@ Goal: orders exist, move through states, and are fully auditable.
       *Done when:* status is derived from telemetry freshness, not set by hand,
       and registering a drone makes it bindable in the telemetry database
       without anyone touching that database by hand.
+      *Closed* 2026-09-28 (`python -m api`). Status is derived on every read:
+      MAINTENANCE when set by a person, OFFLINE without live telemetry,
+      IN_FLIGHT when armed, IDLE otherwise. ASSIGNED needs missions and
+      CHARGING a charging signal; neither exists, so neither is produced
+      yet. Registering writes `known_drones` in the same transaction and a
+      test binds the new drone; retiring closes its bindings. Checked live
+      on the development machine against both databases.
+      **The API has no operator authentication** - nothing in this file
+      provides it - so it binds to loopback and must not be exposed.
 
-- [ ] **P2-06** Append-only audit log with a query API filtered by entity and
+- [~] **P2-06** Append-only audit log with a query API filtered by entity and
       time range.
       *Done when:* an auditor can reconstruct an order's full history.
+      *Partial* 2026-09-28: `events` refuses UPDATE, DELETE and TRUNCATE in
+      the database; every registry change writes its row in the same
+      transaction; `GET /events` filters by entity and time and pages by id.
+      A drone's history is reconstructed in a test. Orders do not exist yet.
 
 - [ ] **P2-07** Pricing calculation: distance, weight, priority tier.
       *Done when:* quote endpoint returns price and ETA before order creation.
