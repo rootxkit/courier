@@ -41,7 +41,7 @@ from gateway.publisher import TelemetryPublisher
 from gateway.rate_limit import RateLimiter
 from gateway.relay_records import Record
 from gateway.stage_timing import StageTimings, shared_timings
-from gateway.state_writer import RowWriter
+from gateway.state_buffer import RowWriter
 
 _log = get_logger(__name__)
 

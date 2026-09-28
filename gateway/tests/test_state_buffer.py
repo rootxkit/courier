@@ -16,7 +16,7 @@ import pytest
 
 from gateway.drone_state import DroneStateRow
 from gateway.stage_timing import StageTimings
-from gateway.state_writer import BufferedStateWriter
+from gateway.state_buffer import BufferedStateWriter
 
 NOON = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)
 DRONE = uuid4()
