@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from pydantic import Field
 
 from common import NatsSettings, PostgresSettings, RedisSettings, ServiceSettings
@@ -27,4 +29,10 @@ class ConsoleSettings(ServiceSettings, NatsSettings):
     console_host: str = Field(default="127.0.0.1", validation_alias="CONSOLE_HOST")
     console_port: int = Field(
         default=8000, ge=1, le=65535, validation_alias="CONSOLE_PORT"
+    )
+    # P1-12. Where `infra/basemap/fetch_basemap.sh` put the base map. Per
+    # machine and never committed; relative paths are from the working
+    # directory the console is started in.
+    basemap_dir: Path = Field(
+        default=Path("local/basemap"), validation_alias="BASEMAP_DIR"
     )
