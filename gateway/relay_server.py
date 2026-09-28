@@ -498,6 +498,22 @@ class _Session:
         state = self.tracker.state(now_s=time.monotonic())
         if state is not LinkState.DATA_LOST:
             state = LinkState.UNREACHABLE
+        # Logged as well as reported. Without the row the event log's last
+        # word on a station that left mid-flight was `healthy`, and P10-03
+        # replay, which explains a hole in a track from this log, had nothing
+        # to say about the commonest cause of one.
+        if state != self._last_state:
+            self._last_state = state
+            try:
+                await self.server.store.record_link_state(
+                    self.station_id, state, at_utc_ns=time.time_ns()
+                )
+            except StoreError as error:
+                # The session is over either way; the report below still
+                # goes out, so the console is not left showing `healthy`.
+                self.log.error(
+                    "could not log the disconnect", extra={"error": str(error)}
+                )
         await self._report(state)
 
     async def _report(self, state: LinkState) -> None:
