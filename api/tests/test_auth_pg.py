@@ -107,7 +107,7 @@ async def test_the_password_is_not_stored(
 ) -> None:
     created = await make(store)
     async with relational_engine.connect() as connection:
-        stored = (
+        stored: str = (
             await connection.execute(
                 sa.text("SELECT password_hash FROM operators WHERE id = :id"),
                 {"id": created["id"]},
@@ -153,7 +153,7 @@ async def test_the_session_token_is_not_stored(
 ) -> None:
     login = await store.login((await make(store))["username"], PASSWORD)
     async with relational_engine.connect() as connection:
-        found = (
+        found: int = (
             await connection.execute(
                 sa.text(
                     "SELECT count(*) FROM operator_sessions "
@@ -189,7 +189,7 @@ async def test_an_unknown_name_is_refused_the_same_way(
 
     assert refused.value.kind == "invalid_credentials"
     async with relational_engine.connect() as connection:
-        payload = (
+        payload: dict[str, Any] = (
             await connection.execute(
                 sa.text(
                     "SELECT payload FROM events WHERE event_type = 'login_failed' "
