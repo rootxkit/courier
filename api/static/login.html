@@ -1,0 +1,133 @@
+<!doctype html>
+<!--
+  P6-08. Operator sign-in. Posts to /auth/login; on success the API sets the
+  session cookie (HttpOnly, so this page never sees the token) and the
+  console-feed ticket, and the page returns to where it was sent from.
+
+  `next` is only ever a path on this server: an absolute URL there would make
+  this page an open redirect.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>courier — sign in</title>
+    <style>
+      :root { color-scheme: light dark; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+        background: #eef0f3;
+      }
+      @media (prefers-color-scheme: dark) { body { background: #16181c; color: #eee; } }
+      form {
+        width: min(360px, calc(100vw - 32px));
+        padding: 24px;
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.96);
+        box-shadow: 0 4px 24px rgba(0, 0, 0, 0.12);
+      }
+      @media (prefers-color-scheme: dark) { form { background: #24272c; } }
+      h1 { font-size: 18px; margin: 0 0 16px; }
+      label { display: block; margin: 12px 0 4px; font-size: 13px; opacity: 0.8; }
+      input, select, button { font: inherit; width: 100%; padding: 8px 10px; border-radius: 8px; }
+      input { border: 1px solid rgba(128, 128, 128, 0.5); background: transparent; color: inherit; }
+      button { margin-top: 18px; border: 0; background: #1565c0; color: #fff; cursor: pointer; }
+      button:disabled { opacity: 0.6; cursor: default; }
+      #error { color: #c62828; min-height: 1.5em; margin-top: 10px; font-size: 14px; }
+      .lang { display: flex; justify-content: flex-end; }
+      .lang select { width: auto; padding: 2px 6px; font-size: 13px; }
+    </style>
+  </head>
+  <body>
+    <form id="form" autocomplete="on">
+      <div class="lang">
+        <select id="lang" aria-label="Language">
+          <option value="en">English</option>
+          <option value="ka">ქართული</option>
+        </select>
+      </div>
+      <h1 data-i18n="title"></h1>
+      <label for="username" data-i18n="username"></label>
+      <input id="username" name="username" autocomplete="username" required autofocus />
+      <label for="password" data-i18n="password"></label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required />
+      <button id="submit" type="submit" data-i18n="sign_in"></button>
+      <div id="error" role="alert"></div>
+    </form>
+    <script>
+      "use strict";
+      const STRINGS = {
+        en: {
+          title: "courier — sign in",
+          username: "Username",
+          password: "Password",
+          sign_in: "Sign in",
+          signing_in: "Signing in…",
+          refused: "Wrong username or password, or the account is locked.",
+          failed: "Could not reach the server.",
+        },
+        ka: {
+          title: "courier — შესვლა",
+          username: "მომხმარებელი",
+          password: "პაროლი",
+          sign_in: "შესვლა",
+          signing_in: "მიმდინარეობს შესვლა…",
+          refused: "მომხმარებელი ან პაროლი არასწორია, ან ანგარიში დაბლოკილია.",
+          failed: "სერვერთან დაკავშირება ვერ მოხერხდა.",
+        },
+      };
+      let lang = "en";
+      const t = (key) => (STRINGS[lang] && STRINGS[lang][key]) || STRINGS.en[key] || key;
+      function applyStrings() {
+        document.documentElement.lang = lang;
+        for (const node of document.querySelectorAll("[data-i18n]")) node.textContent = t(node.dataset.i18n);
+      }
+      document.getElementById("lang").addEventListener("change", (e) => {
+        lang = e.target.value;
+        applyStrings();
+      });
+      applyStrings();
+
+      // Only a same-server path, never a URL: see the comment at the top.
+      function nextPath() {
+        const next = new URLSearchParams(location.search).get("next") || "/replay";
+        return next.startsWith("/") && !next.startsWith("//") ? next : "/replay";
+      }
+
+      const form = document.getElementById("form");
+      const error = document.getElementById("error");
+      const submit = document.getElementById("submit");
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        error.textContent = "";
+        submit.disabled = true;
+        submit.textContent = t("signing_in");
+        try {
+          const response = await fetch("/auth/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              username: document.getElementById("username").value,
+              password: document.getElementById("password").value,
+            }),
+          });
+          if (response.ok) {
+            location.replace(nextPath());
+            return;
+          }
+          error.textContent = t("refused");
+        } catch (e) {
+          error.textContent = t("failed");
+        } finally {
+          submit.disabled = false;
+          submit.textContent = t("sign_in");
+        }
+      });
+    </script>
+  </body>
+</html>

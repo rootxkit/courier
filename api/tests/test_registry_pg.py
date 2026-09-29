@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from api.app import create_api_app
 from api.registry import FleetRegistry
+from api.tests.auth_fakes import ADMIN_HEADERS, api_kwargs
 from api.tests.conftest import migrate_relational
 from gateway.binding import BindingConflictError, BindingResolver
 from gateway.parsing import SourceId
@@ -57,9 +58,11 @@ async def client(
         projection=BindingResolver(engine=engine),
         live=live,
     )
-    app = create_api_app(registry)
+    app = create_api_app(registry, **api_kwargs())
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers=ADMIN_HEADERS,
     ) as http:
         yield http
     async with engine.begin() as connection:

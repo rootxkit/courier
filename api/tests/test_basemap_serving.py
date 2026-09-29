@@ -16,10 +16,13 @@ from api.assets import STATIC
 from api.telemetry_ws import create_app
 from tests.ports import free_tcp_port
 
+FEED_SECRET = b"test-feed-secret-0123456789abcdef0123"
+
 
 def app_with(basemap_dir: Path | None) -> FastAPI:
     return create_app(
         f"nats://127.0.0.1:{free_tcp_port()}",
+        feed_secret=FEED_SECRET,
         connect_timeout_s=0.5,
         basemap_dir=basemap_dir,
     )

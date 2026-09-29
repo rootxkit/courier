@@ -29,6 +29,8 @@ from api.telemetry_ws import (
 )
 from tests.ports import free_tcp_port
 
+FEED_SECRET = b"test-feed-secret-0123456789abcdef0123"
+
 
 def publish(hub: ConsoleHub, subject: str, **body: Any) -> None:
     hub.broadcast(subject, json.dumps(body).encode("utf-8"))
@@ -243,7 +245,7 @@ async def test_the_console_starts_when_the_bus_is_unreachable() -> None:
     own retry budget, which is the thing being ruled out.
     """
     # The production default deliberately, because the bound is the claim.
-    app = create_app(f"nats://127.0.0.1:{free_tcp_port()}")
+    app = create_app(f"nats://127.0.0.1:{free_tcp_port()}", feed_secret=FEED_SECRET)
 
     started = time.monotonic()
     async with app.router.lifespan_context(app):
@@ -263,7 +265,7 @@ async def test_a_console_can_attach_with_no_bus_and_is_simply_empty() -> None:
     A browser must still get a WebSocket, so the page loads and shows an empty
     fleet, instead of failing to connect and showing nothing at all.
     """
-    app = create_app(f"nats://127.0.0.1:{free_tcp_port()}")
+    app = create_app(f"nats://127.0.0.1:{free_tcp_port()}", feed_secret=FEED_SECRET)
 
     async with app.router.lifespan_context(app):
         queue = app.state.hub.attach()
@@ -274,7 +276,11 @@ async def test_a_console_can_attach_with_no_bus_and_is_simply_empty() -> None:
 
 async def test_health_reports_the_bus_as_disconnected_rather_than_lying() -> None:
     """An operator has to be able to see that the bus is the problem."""
-    app = create_app(f"nats://127.0.0.1:{free_tcp_port()}", connect_timeout_s=0.5)
+    app = create_app(
+        f"nats://127.0.0.1:{free_tcp_port()}",
+        feed_secret=FEED_SECRET,
+        connect_timeout_s=0.5,
+    )
 
     async with (
         app.router.lifespan_context(app),

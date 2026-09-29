@@ -27,6 +27,7 @@ from airspace.service import EventsAuditLog
 from api.app import create_api_app
 from api.registry import FleetRegistry
 from api.replay import ReplayStore
+from api.tests.auth_fakes import VIEWER_HEADERS, api_kwargs
 from gateway.binding import BindingResolver
 
 pytestmark = pytest.mark.postgres
@@ -78,9 +79,13 @@ async def client(
         projection=BindingResolver(engine=engine),
         live=NoLive(),
     )
-    app = create_api_app(registry, replay=store_for(engine, relational_engine))
+    app = create_api_app(
+        registry, replay=store_for(engine, relational_engine), **api_kwargs()
+    )
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers=VIEWER_HEADERS,
     ) as http:
         yield http
 
@@ -493,10 +498,14 @@ async def test_a_window_with_too_many_samples_is_refused_not_thinned(
         live=NoLive(),
     )
     app = create_api_app(
-        registry, replay=store_for(engine, relational_engine, max_samples=5)
+        registry,
+        replay=store_for(engine, relational_engine, max_samples=5),
+        **api_kwargs(),
     )
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers=VIEWER_HEADERS,
     ) as http:
         too_many = await http.get(
             f"/replay/drones/{drone_id}",

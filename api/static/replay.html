@@ -513,10 +513,21 @@
 
       const droneSelect = document.getElementById("drone");
 
+      // P6-08. Every API call needs a signed-in operator; without one the
+      // page goes to sign in and comes back here.
+      async function apiGet(path) {
+        const response = await fetch(path);
+        if (response.status === 401) {
+          location.replace(`/login?next=${encodeURIComponent(location.pathname + location.search)}`);
+          throw new Error("sign in required");
+        }
+        return response;
+      }
+
       async function loadDrones() {
         // The telemetry registry: every aircraft with a record to replay,
         // including ones never registered in the business registry.
-        const response = await fetch("/replay/drones");
+        const response = await apiGet("/replay/drones");
         drones = response.ok ? await response.json() : [];
         droneSelect.innerHTML = drones
           .map(
@@ -535,7 +546,7 @@
         flights = [];
         selectedFlight = null;
         if (droneSelect.value) {
-          const response = await fetch(`/replay/drones/${droneSelect.value}/flights`);
+          const response = await apiGet(`/replay/drones/${droneSelect.value}/flights`);
           flights = response.ok ? await response.json() : [];
         }
         renderFlights();
@@ -581,7 +592,7 @@
         const query = new URLSearchParams({ start: from, end: to });
         let response;
         try {
-          response = await fetch(`/replay/drones/${droneSelect.value}?${query}`);
+          response = await apiGet(`/replay/drones/${droneSelect.value}?${query}`);
         } catch (error) {
           message.textContent = fill(t("failed"), { why: String(error) });
           return;

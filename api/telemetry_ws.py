@@ -9,6 +9,15 @@ forty messages a second; served from a hypertable that would be forty queries a
 second, and a browser refresh would become a query storm. The database holds
 the flight record. The bus carries the present.
 
+## Who may watch (P6-08)
+
+Only a browser holding a feed ticket: a short-lived statement signed by the
+API when an operator signed in, carried in the `courier_feed` cookie and
+checked here with a shared secret, without a database. Without one, or when
+it runs out, the socket closes with 4401 and the page fetches a new ticket
+from the API, which checks the session. A revoked session therefore keeps
+the feed for at most one ticket's lifetime.
+
 ## What the console is told, and what it is not left to infer
 
 Every station message carries `data_is_lost` and `buffering` as explicit
@@ -31,7 +40,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -43,6 +52,7 @@ from nats.aio.client import Client as NatsClient
 from nats.aio.msg import Msg
 
 from api.assets import STATIC, mount_map_assets
+from api.auth import FEED_COOKIE, verify_feed_ticket, wall_clock_s
 from common import get_logger
 
 _log = get_logger(__name__)
@@ -82,6 +92,10 @@ SNAPSHOT_MAX_ENTRIES = 512
 # Bounding startup here leaves the client's own reconnect policy untouched for
 # the case that matters - a broker that goes away *after* a good connection.
 CONNECT_TIMEOUT_S = 5.0
+
+# P6-08. The feed closes with this when the browser has no valid ticket, or
+# its ticket has run out. In the 4000-4999 range reserved for applications.
+CLOSE_SIGN_IN_REQUIRED = 4401
 
 
 @dataclass
@@ -163,10 +177,16 @@ class ConsoleHub:
 def create_app(
     nats_url: str,
     *,
+    feed_secret: bytes,
     connect_timeout_s: float = CONNECT_TIMEOUT_S,
     basemap_dir: Path | None = None,
+    clock_s: Callable[[], float] = wall_clock_s,
 ) -> FastAPI:
     """Build the app. The NATS URL is injected so tests can point elsewhere.
+
+    `feed_secret` is required: the feed is served only to a browser holding
+    a ticket the API signed with it (P6-08). There is no way to build an
+    open one.
 
     `connect_timeout_s` is injected for the same reason: a test that only needs
     to prove the app serves without a bus should not pay the production
@@ -230,14 +250,56 @@ def create_app(
 
     @app.websocket("/ws/telemetry")
     async def telemetry(websocket: WebSocket) -> None:
+        # Accepted before it is checked, so a refusal is a close code the
+        # page can read (4401) rather than a failed handshake it cannot.
         await websocket.accept()
+        ticket = verify_feed_ticket(
+            feed_secret, websocket.cookies.get(FEED_COOKIE, ""), now_s=clock_s()
+        )
+        if ticket is None:
+            await websocket.close(code=CLOSE_SIGN_IN_REQUIRED, reason="sign in")
+            return
         queue = hub.attach()
+        # Watching for the browser leaving, alongside waiting for messages. A
+        # handler that only waits on the queue learns of a closed socket at
+        # its next send, which on an idle feed may never come: the
+        # connection, and whatever holds it open, would stay forever.
+        listener = asyncio.create_task(websocket.receive())
         try:
             while True:
-                await websocket.send_text(await queue.get())
+                remaining_s = ticket.expires_at_s - clock_s()
+                if remaining_s <= 0:
+                    # The page fetches a new ticket from the API, which checks
+                    # the session in the database, and reconnects. This is
+                    # what makes a revoked session lose the feed.
+                    await websocket.close(
+                        code=CLOSE_SIGN_IN_REQUIRED, reason="ticket expired"
+                    )
+                    return
+                getter = asyncio.create_task(queue.get())
+                done, _ = await asyncio.wait(
+                    {getter, listener},
+                    timeout=remaining_s,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if listener in done:
+                    getter.cancel()
+                    if (
+                        listener.exception() is not None
+                        or listener.result().get("type") == "websocket.disconnect"
+                    ):
+                        return
+                    # Anything a browser sends is ignored; keep listening.
+                    listener = asyncio.create_task(websocket.receive())
+                    continue
+                if getter in done:
+                    await websocket.send_text(getter.result())
+                else:
+                    getter.cancel()
         except WebSocketDisconnect:
             pass
         finally:
+            listener.cancel()
             hub.detach(queue)
 
     return app

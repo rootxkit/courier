@@ -196,6 +196,7 @@
           // Telemetry is arriving and the drone is bound, but the Gateway
           // could not read a label for it from known_drones.
           unnamed: "unnamed",
+          sign_in_required: "sign in required — open the API's /login, then /map",
         },
         ka: {
           live: "ცოცხალი რუკა",
@@ -237,6 +238,7 @@
           unnamed: "უსახელო",
           unplaced: "პოზიცია ჯერ არ არის",
           no_basemap: "საბაზისო რუკა არ არის დაყენებული — გაუშვით infra/basemap/fetch_basemap.sh",
+          sign_in_required: "საჭიროა შესვლა — გახსენით API-ის /login, შემდეგ /map",
         },
       };
 
@@ -655,16 +657,66 @@
       // --- feed ------------------------------------------------------------
       const link = document.getElementById("link");
 
-      function connect() {
+      // P6-08. The feed needs a ticket the API signs at sign-in. Served by
+      // the API (/map), this page can ask for a fresh one before connecting
+      // and whenever the feed closes with 4401; served by the console itself
+      // it cannot, and says to sign in instead.
+      const SIGN_IN_REQUIRED = 4401;
+      let feedUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/telemetry`;
+      let servedByApi = false;
+
+      async function loadConfig() {
+        try {
+          const response = await fetch("/config.json");
+          if (response.ok) {
+            const config = await response.json();
+            if (config.console_feed_url) {
+              feedUrl = config.console_feed_url;
+              servedByApi = true;
+            }
+          }
+        } catch (error) {
+          // Served by the console: the default above is right.
+        }
+      }
+
+      async function refreshTicket() {
+        if (!servedByApi) return true;
+        const response = await fetch("/auth/feed-ticket", {
+          method: "POST",
+          headers: { "X-Courier-Request": "1" },
+        });
+        if (response.status === 401) {
+          location.replace(`/login?next=${encodeURIComponent(location.pathname)}`);
+          return false;
+        }
+        return response.ok;
+      }
+
+      async function connect() {
         link.textContent = t("connecting");
-        const socket = new WebSocket(
-          `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/telemetry`
-        );
+        let ticketOk = false;
+        try {
+          ticketOk = await refreshTicket();
+        } catch (error) {
+          ticketOk = false;
+        }
+        if (!ticketOk) {
+          link.textContent = t("disconnected");
+          setTimeout(connect, 5000);
+          return;
+        }
+        const socket = new WebSocket(feedUrl);
 
         socket.onopen = () => (link.textContent = t("connected"));
-        socket.onclose = () => {
+        socket.onclose = (event) => {
+          if (event.code === SIGN_IN_REQUIRED && !servedByApi) {
+            link.textContent = t("sign_in_required");
+            return;
+          }
           link.textContent = t("disconnected");
-          setTimeout(connect, 2000);
+          // A ticket that ran out is renewed at once; anything else waits.
+          setTimeout(connect, event.code === SIGN_IN_REQUIRED ? 0 : 2000);
         };
         socket.onmessage = (event) => {
           const message = JSON.parse(event.data);
@@ -691,7 +743,7 @@
       }
 
       applyStaticStrings();
-      connect();
+      loadConfig().then(connect);
       // Link age has to tick even when nothing arrives: an aircraft that has
       // stopped transmitting is the case where the number matters most.
       setInterval(render, 1000);
