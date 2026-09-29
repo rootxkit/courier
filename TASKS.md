@@ -781,6 +781,22 @@ P5-08, P5-09, P5-16, P5-12, then P5-13 and P5-14. The strategic layer
       undeliverable message is shown at the centre.
       *Added* 2026-09-29 with the owner, from the tactical-layer discussion.
 
+- [ ] **P5-17** Evaluate OpenUTM (Flight Blender and Flight Spotlight,
+      Apache-2.0) against this system, before building more of the same.
+      The direction on 2026-09-29 is a monitoring system for every drone,
+      to be put to the Ministry of Defence and the civil aviation authority,
+      and to them an existing standards-compliant system is worth more than
+      a new one. OpenUTM claims network Remote ID (ASTM F3411), flight
+      authorisation (F3548), ED-269 geo-zones, conformance monitoring and
+      traffic aggregation, and is used by Swiss FOCA and the UK national
+      programme. Run it beside this stack, feed it the Gateway's
+      telemetry, and establish by running it - not from its README - what
+      it does, what it lacks, and where this system's parts (the relay and
+      Gateway, the airspace monitor, replay) would sit in or around it.
+      *Done when:* a written comparison, from what was run, and a decision
+      with the owner: adopt, integrate with, or continue alone.
+      *Added* 2026-09-29 with the owner.
+
 ---
 
 ## Phase 6 — Pilot console (2 weeks)
