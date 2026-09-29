@@ -24,7 +24,8 @@ from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from api.assets import STATIC, mount_map_assets
@@ -40,6 +41,7 @@ from api.registry import (
     RegistryError,
 )
 from api.replay import DroneNotFoundError, ReplayError, ReplayStore, WindowTooLargeError
+from api.zones import ZoneReader
 
 MAX_EVENTS_PER_PAGE = 1_000
 MAX_FLIGHTS_PER_PAGE = 200
@@ -122,6 +124,17 @@ class MaintenanceIn(BaseModel):
     in_maintenance: bool
 
 
+class ZoneOut(BaseModel):
+    id: UUID
+    name: str
+    # no_fly, restricted, corridor or base (migration 0001_fleet).
+    type: str
+    min_alt_amsl_m: float | None
+    max_alt_amsl_m: float | None
+    # A GeoJSON Polygon in WGS84, as PostGIS writes it.
+    geometry: dict[str, Any]
+
+
 class EventOut(BaseModel):
     id: int
     ts: datetime
@@ -168,6 +181,7 @@ def create_api_app(
     replay: ReplayStore | None = None,
     basemap_dir: Path | None = None,
     console_feed_url: str | None = None,
+    console_app_dir: Path | None = None,
 ) -> FastAPI:
     """The API. `auth` is required: there is no way to build it open.
 
@@ -294,6 +308,19 @@ def create_api_app(
         except RegistryError as error:
             raise _http(error) from error
 
+    # --- airspace (P6-01) ------------------------------------------------------
+
+    zone_reader = ZoneReader(engine=registry.engine) if registry is not None else None
+
+    @app.get("/airspace/zones", response_model=list[ZoneOut])
+    async def zones(
+        _: Annotated[Operator, Depends(viewer)],
+    ) -> list[dict[str, Any]]:
+        """Every zone, for drawing. The monitor alerts on no-fly and restricted."""
+        if zone_reader is None:
+            raise HTTPException(status_code=503, detail="no relational database")
+        return await zone_reader.zones()
+
     # --- audit (P2-06) --------------------------------------------------------
 
     @app.get("/events", response_model=list[EventOut])
@@ -325,6 +352,20 @@ def create_api_app(
         """The live map. Its feed comes from the console, with a ticket from
         here (P6-08)."""
         return (STATIC / "map.html").read_text(encoding="utf-8")
+
+    # P6-01. The operator console, built from web-pilot/. Absent until built;
+    # the minimal /map stays as the fallback.
+    has_console = (
+        console_app_dir is not None and (console_app_dir / "index.html").is_file()
+    )
+    if has_console:
+        app.mount(
+            "/app", StaticFiles(directory=console_app_dir, html=True), name="console"
+        )
+
+    @app.get("/", include_in_schema=False)
+    async def home() -> RedirectResponse:
+        return RedirectResponse("/app/" if has_console else "/map")
 
     @app.get("/config.json", include_in_schema=False)
     async def page_config() -> dict[str, Any]:

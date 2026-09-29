@@ -12,6 +12,7 @@ derivation and its wiring, and `gateway/tests/test_live_state.py` covers Redis.
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
@@ -402,3 +403,45 @@ async def test_the_audit_log_refuses_to_be_edited(
             )
         ).scalar_one()
     assert forged == 0
+
+
+# --- zones for the map (P6-01) --------------------------------------------------
+
+
+async def test_zones_come_back_as_geojson_as_the_monitor_sees_them(
+    client: AsyncClient, relational_engine: AsyncEngine
+) -> None:
+    name = f"map-zone-{uuid4().hex[:8]}"
+    ring = [
+        [44.80, 41.70],
+        [44.81, 41.70],
+        [44.81, 41.71],
+        [44.80, 41.71],
+        [44.80, 41.70],
+    ]
+    async with relational_engine.begin() as connection:
+        await connection.execute(
+            sa.text(
+                "INSERT INTO airspace_zones (name, type, geom, max_alt_amsl_m) "
+                "VALUES (:name, 'no_fly', "
+                "ST_SetSRID(ST_GeomFromGeoJSON(:geojson), 4326), 900)"
+            ),
+            {
+                "name": name,
+                "geojson": json.dumps({"type": "Polygon", "coordinates": [ring]}),
+            },
+        )
+
+    response = await client.get("/airspace/zones")
+
+    assert response.status_code == 200
+    (zone,) = [z for z in response.json() if z["name"] == name]
+    assert zone["type"] == "no_fly"
+    assert zone["max_alt_amsl_m"] == 900
+    assert zone["min_alt_amsl_m"] is None
+    assert zone["geometry"]["type"] == "Polygon"
+    assert zone["geometry"]["coordinates"][0][0] == [44.80, 41.70]
+    async with relational_engine.begin() as connection:
+        await connection.execute(
+            sa.text("DELETE FROM airspace_zones WHERE name = :name"), {"name": name}
+        )

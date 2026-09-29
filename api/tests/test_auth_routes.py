@@ -30,6 +30,7 @@ from api.tests.auth_fakes import (
 
 # Pages and files that carry no data. Everything else needs an operator.
 PUBLIC = {
+    "/",
     "/login",
     "/auth/login",
     "/auth/logout",
@@ -52,6 +53,7 @@ VIEWER_ROUTES = {
     ("GET", "/drones/{drone_id}"),
     ("GET", "/events"),
     ("GET", "/replay/drones"),
+    ("GET", "/airspace/zones"),
     ("GET", "/replay/drones/{drone_id}/flights"),
     ("GET", "/replay/drones/{drone_id}"),
 }
