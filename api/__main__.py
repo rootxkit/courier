@@ -1,7 +1,7 @@
 """Run the core API: `python -m api`. P2-05, P2-06.
 
 Loopback by default (`API_HOST`). Every route needs a signed-in operator
-(P6-08); create the first admin with `python -m api.operators create-admin`.
+(P6-08); create the first admin with `python tools/operators.py create-admin`.
 """
 
 from __future__ import annotations

@@ -1,15 +1,18 @@
 """Manage operator accounts from the command line. P6-08.
 
-    python -m api.operators create-admin <username> [--name "Display Name"]
-    python -m api.operators list
-    python -m api.operators set-password <username>
-    python -m api.operators enable <username>
+    python tools/operators.py create-admin <username> [--name "Display Name"]
+    python tools/operators.py list
+    python tools/operators.py set-password <username>
+    python tools/operators.py enable <username>
 
 `create-admin` is how the first account exists: the API refuses anonymous
 requests, including one to create an account. Passwords are read from the
 terminal without echo, never from the command line, where they would end up
 in shell history and process listings. Everything is recorded in `events`
 as done by the system actor, since no operator is signed in.
+
+In tools/ because it answers the person at the terminal - its output is the
+deliverable - and only tools/ and tests may print (tests/test_layout.py).
 """
 
 from __future__ import annotations
@@ -96,7 +99,7 @@ async def _run(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m api.operators")
+    parser = argparse.ArgumentParser(prog="python tools/operators.py")
     commands = parser.add_subparsers(dest="command", required=True)
     create = commands.add_parser("create-admin", help="create an admin account")
     create.add_argument("username")
