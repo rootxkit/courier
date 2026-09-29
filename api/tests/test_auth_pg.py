@@ -39,7 +39,10 @@ FEED_SECRET = b"auth-pg-test-feed-secret-0123456789ab"
 
 class Clock:
     def __init__(self) -> None:
-        self.now = datetime(2026, 9, 29, 9, 0, tzinfo=UTC)
+        # Now, not a fixed date: the login route sets the cookie's max-age
+        # from the store's expiry and the wall clock, so a fixed date turns
+        # every session cookie into an expired one an hour after it.
+        self.now = datetime.now(tz=UTC)
 
     def __call__(self) -> datetime:
         return self.now
