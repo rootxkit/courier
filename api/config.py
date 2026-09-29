@@ -3,15 +3,47 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Self
 
-from pydantic import Field
+from pydantic import Field, SecretStr, model_validator
 
 from common import NatsSettings, PostgresSettings, RedisSettings, ServiceSettings
-from common.config import TelemetryDatabaseSettings
+from common.config import Environment, TelemetryDatabaseSettings
+
+# The feed secret that ships in infra/.env.example. Refused outside dev.
+_EXAMPLE_FEED_SECRET_PREFIX = "dev-only-"
+
+
+class FeedTicketSettings(ServiceSettings):
+    """P6-08. Shared by the API, which signs console-feed tickets, and the
+    console, which checks them without a database."""
+
+    feed_ticket_secret: SecretStr = Field(
+        validation_alias="FEED_TICKET_SECRET", min_length=32
+    )
+    # How long a ticket lets a browser hold the console feed. Also the
+    # longest a revoked session keeps receiving it.
+    feed_ticket_ttl_s: float = Field(
+        default=600.0, gt=0, validation_alias="FEED_TICKET_TTL_S"
+    )
+
+    @model_validator(mode="after")
+    def _reject_example_secret_outside_dev(self) -> Self:
+        if (
+            self.env is not Environment.DEV
+            and self.feed_ticket_secret.get_secret_value().startswith(
+                _EXAMPLE_FEED_SECRET_PREFIX
+            )
+        ):
+            raise ValueError(
+                "FEED_TICKET_SECRET is the example value while "
+                f"COURIER_ENV={self.env.value}"
+            )
+        return self
 
 
 class ApiSettings(
-    ServiceSettings,
+    FeedTicketSettings,
     PostgresSettings,
     TelemetryDatabaseSettings,
     RedisSettings,
@@ -25,9 +57,35 @@ class ApiSettings(
 
     service_name: str = "api"
 
-    # Loopback by default: there is no operator authentication yet.
+    # Loopback by default. Operators sign in (P6-08), but the API is exposed
+    # to other machines only through the TLS front of P0-09.
     api_host: str = Field(default="127.0.0.1", validation_alias="API_HOST")
     api_port: int = Field(default=8010, ge=1, le=65535, validation_alias="API_PORT")
+
+    # P6-08. A session ends at the first of: this long after sign-in, this
+    # long unused, or being revoked.
+    session_ttl_s: float = Field(
+        default=12 * 3600.0, gt=0, validation_alias="SESSION_TTL_S"
+    )
+    session_idle_timeout_s: float = Field(
+        default=3600.0, gt=0, validation_alias="SESSION_IDLE_TIMEOUT_S"
+    )
+    # Failed sign-ins in a row before an account is locked, and for how long.
+    login_max_failures: int = Field(
+        default=5, ge=1, validation_alias="LOGIN_MAX_FAILURES"
+    )
+    login_lockout_s: float = Field(
+        default=900.0, gt=0, validation_alias="LOGIN_LOCKOUT_S"
+    )
+    # Secure cookies are sent only over HTTPS. Off only for plain-HTTP
+    # development on this machine.
+    cookie_secure: bool = Field(default=True, validation_alias="COOKIE_SECURE")
+    # Where a browser reaches the console feed. Behind the TLS front of
+    # P0-09 this is wss://<domain>/ws/telemetry.
+    console_feed_url: str = Field(
+        default="ws://127.0.0.1:8000/ws/telemetry",
+        validation_alias="CONSOLE_FEED_URL",
+    )
 
     # P10-03. The replay page draws the same base map as the console.
     basemap_dir: Path = Field(
@@ -56,7 +114,7 @@ class ApiSettings(
     )
 
 
-class ConsoleSettings(ServiceSettings, NatsSettings):
+class ConsoleSettings(FeedTicketSettings, NatsSettings):
     """The P1-08 console feed.
 
     Only the bus, deliberately. The console is a NATS subscriber and must not

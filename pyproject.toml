@@ -108,6 +108,9 @@ ignore = [
 # standard-library only so it runs on a machine with no venv. T201 only — every
 # other rule applies here as it does everywhere else.
 "tools/**" = ["T201"]
+# The account CLI answers the person at the terminal, who has just typed a
+# password into it; its output is the reply, not a log line.
+"api/operators.py" = ["T201"]
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "parents"
