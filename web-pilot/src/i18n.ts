@@ -75,7 +75,7 @@ const en = {
   queue: "queue {n}",
   gps_value: "fix type {fix} · {sats} satellites",
   select_hint: "Select an aircraft on the map or in the list.",
-  zones_unavailable: "zones unavailable",
+  zones_unavailable: "zones and bases unavailable — showing the last read",
 };
 
 type Key = keyof typeof en;
@@ -153,7 +153,7 @@ const ka: Partial<Record<Key, string>> = {
   queue: "რიგში {n}",
   gps_value: "fix ტიპი {fix} · {sats} თანამგზავრი",
   select_hint: "აირჩიეთ აპარატი რუკაზე ან სიაში.",
-  zones_unavailable: "ზონები მიუწვდომელია",
+  zones_unavailable: "ზონები და ბაზები მიუწვდომელია — ნაჩვენებია ბოლო წაკითხული",
 };
 
 export type Lang = "en" | "ka";

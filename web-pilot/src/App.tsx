@@ -14,6 +14,8 @@ import { type Base, type Layers, MapView, type Zone } from "./map/MapView";
 type Tab = "aircraft" | "alerts" | "stations" | "unclaimed";
 
 const LANG_KEY = "courier.lang";
+// How often zones and bases are re-read. A display choice, not flight data.
+const REGISTRY_REFRESH_MS = 30_000;
 
 function storedLang(): Lang {
   try {
@@ -88,17 +90,24 @@ export function App() {
     });
   }, []);
 
+  // Zones and bases change while the console is open (an admin adds a zone),
+  // so they are re-read. A failed read keeps what was drawn and says so.
   useEffect(() => {
     if (!me) return;
-    apiGet("/airspace/zones")
-      .then((z) => {
-        setZones(z);
-        setZonesFailed(false);
-      })
-      .catch(() => setZonesFailed(true));
-    apiGet("/bases")
-      .then(setBases)
-      .catch(() => setBases([]));
+    const load = () => {
+      apiGet("/airspace/zones")
+        .then((z) => {
+          setZones(z);
+          setZonesFailed(false);
+        })
+        .catch(() => setZonesFailed(true));
+      apiGet("/bases")
+        .then(setBases)
+        .catch(() => setZonesFailed(true));
+    };
+    load();
+    const timer = window.setInterval(load, REGISTRY_REFRESH_MS);
+    return () => window.clearInterval(timer);
   }, [me]);
 
   // Acknowledgements of alerts that have cleared are forgotten, so the same
