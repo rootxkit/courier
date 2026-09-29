@@ -260,6 +260,11 @@ def create_app(
             await websocket.close(code=CLOSE_SIGN_IN_REQUIRED, reason="sign in")
             return
         queue = hub.attach()
+        # Watching for the browser leaving, alongside waiting for messages. A
+        # handler that only waits on the queue learns of a closed socket at
+        # its next send, which on an idle feed may never come: the
+        # connection, and whatever holds it open, would stay forever.
+        listener = asyncio.create_task(websocket.receive())
         try:
             while True:
                 remaining_s = ticket.expires_at_s - clock_s()
@@ -271,14 +276,30 @@ def create_app(
                         code=CLOSE_SIGN_IN_REQUIRED, reason="ticket expired"
                     )
                     return
-                try:
-                    message = await asyncio.wait_for(queue.get(), timeout=remaining_s)
-                except TimeoutError:
+                getter = asyncio.create_task(queue.get())
+                done, _ = await asyncio.wait(
+                    {getter, listener},
+                    timeout=remaining_s,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if listener in done:
+                    getter.cancel()
+                    if (
+                        listener.exception() is not None
+                        or listener.result().get("type") == "websocket.disconnect"
+                    ):
+                        return
+                    # Anything a browser sends is ignored; keep listening.
+                    listener = asyncio.create_task(websocket.receive())
                     continue
-                await websocket.send_text(message)
+                if getter in done:
+                    await websocket.send_text(getter.result())
+                else:
+                    getter.cancel()
         except WebSocketDisconnect:
             pass
         finally:
+            listener.cancel()
             hub.detach(queue)
 
     return app

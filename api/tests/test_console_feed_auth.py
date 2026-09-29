@@ -125,3 +125,17 @@ async def test_the_feed_closes_when_the_ticket_runs_out() -> None:
 
     assert closed.value.rcvd is not None
     assert closed.value.rcvd.code == CLOSE_SIGN_IN_REQUIRED
+
+
+async def test_a_browser_that_leaves_an_idle_feed_is_let_go() -> None:
+    """With nothing to send, the handler must still notice the close, or the
+    connection is held until the next message, which may never come."""
+    async with serving(Clock(1000.0)) as (app, url):
+        async with connect(url, additional_headers=cookie(ticket(1000.0))):
+            await wait_until_attached(app)
+        for _ in range(500):
+            if not app.state.hub.clients:
+                break
+            await asyncio.sleep(0.01)
+
+        assert not app.state.hub.clients

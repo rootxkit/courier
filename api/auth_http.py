@@ -11,7 +11,11 @@ cross-site request. A bearer token is not sent by a browser on its own, so
 it needs no such proof.
 """
 
-from __future__ import annotations
+# No `from __future__ import annotations` here, deliberately: route
+# signatures use `Annotated[Operator, Depends(viewer)]` where `viewer` is a
+# local of the factory, and a postponed annotation is evaluated against
+# module globals, where it does not exist. FastAPI then silently treats the
+# parameter as a required query string called `_`.
 
 from collections.abc import Awaitable, Callable
 from datetime import datetime
