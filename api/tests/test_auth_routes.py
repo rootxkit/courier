@@ -13,7 +13,6 @@ from uuid import uuid4
 
 import pytest
 from fastapi import FastAPI
-from fastapi.routing import APIRoute
 from httpx import ASGITransport, AsyncClient
 
 from api.app import create_api_app
@@ -72,12 +71,20 @@ def build() -> FastAPI:
 
 
 def protected_routes(app: FastAPI) -> list[tuple[str, str]]:
+    """Every documented route but the public ones.
+
+    Read from the OpenAPI schema rather than `app.routes`: routes added with
+    `include_router` do not appear there as `APIRoute` in every FastAPI
+    version, and a walk that silently misses them passes for the wrong
+    reason. Undocumented routes are pages and files, all in PUBLIC.
+    """
     found = []
-    for route in app.routes:
-        if isinstance(route, APIRoute) and route.path not in PUBLIC:
-            for method in sorted(route.methods or ()):
-                found.append((method, route.path))
-    return found
+    for path, operations in app.openapi()["paths"].items():
+        if path in PUBLIC:
+            continue
+        for method in operations:
+            found.append((method.upper(), path))
+    return sorted(found)
 
 
 def concrete(path: str) -> str:
