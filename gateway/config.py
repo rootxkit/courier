@@ -68,3 +68,21 @@ class GatewaySettings(
     archive_max_gib_per_station: int = Field(
         default=250, ge=1, validation_alias="ARCHIVE_MAX_GIB_PER_STATION"
     )
+
+
+class RemoteIdSettings(ServiceSettings, NatsSettings):
+    """Remote ID ingest (P1-15): receiver datagrams in, telemetry out.
+
+    Needs only the bus. It does not touch either database.
+    """
+
+    service_name: str = "remote-id-ingest"
+    remote_id_bind_host: str = Field(
+        default="127.0.0.1", validation_alias="REMOTE_ID_BIND_HOST"
+    )
+    remote_id_bind_port: int = Field(
+        default=14600, ge=1, le=65535, validation_alias="REMOTE_ID_BIND_PORT"
+    )
+    # A geoid model file (EGM96). Without one, Remote ID aircraft have no AMSL
+    # altitude and the airspace monitor does not evaluate them.
+    geoid_path: Path | None = Field(default=None, validation_alias="GEOID_PATH")

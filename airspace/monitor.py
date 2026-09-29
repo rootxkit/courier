@@ -7,7 +7,8 @@ it can be tested without a bus or a database.
 
 ## What is considered
 
-Only **armed** aircraft with a position, an AMSL altitude and a velocity. An
+Only **armed** aircraft (or, for Remote ID, aircraft declared airborne) with
+a position, an AMSL altitude and a velocity. An
 aircraft on the ground at a base is routinely within metres of another, and
 alerting on it would teach operators to ignore the alert (P6-03). Armed is the
 nearest thing telemetry has to "flying"; erring towards armed-on-the-ground
@@ -100,6 +101,15 @@ def track_from_telemetry(message: dict[str, Any]) -> Track | None:
     )
 
 
+def _flying(message: dict[str, Any]) -> bool:
+    """Armed, for MAVLink telemetry; declared airborne, for Remote ID (P1-15).
+
+    Remote ID has no arming state and says `armed: None`; its `airborne` is
+    False only for a declared "ground" status.
+    """
+    return message.get("armed") is True or message.get("airborne") is True
+
+
 def conflict_key(a: UUID, b: UUID) -> str:
     first, second = sorted((str(a), str(b)))
     return f"conflict:{first}:{second}"
@@ -136,7 +146,7 @@ class AirspaceMonitor:
         """Take one telemetry message; return the alerts it raised or cleared."""
         drone_id = UUID(str(message["drone_id"]))
         self._labels[drone_id] = message.get("label")
-        track = track_from_telemetry(message) if message.get("armed") is True else None
+        track = track_from_telemetry(message) if _flying(message) else None
 
         raised: list[Alert] = []
         if track is None:
