@@ -64,6 +64,17 @@ be launched and observed. No real hardware.
       *Done when:* every service imports it and no service reads `os.environ`
       directly.
 
+- [ ] **P0-09** Staging server on the owner's DigitalOcean droplet: the dev
+      stack plus Gateway, API, console and airspace monitor under Docker
+      Compose, TLS on the owner's domain, SSH-key access only (no root
+      password), nightly backups of both databases, and nothing listening
+      publicly except HTTPS and the relay's WSS endpoint. The API and console
+      are exposed only after P6-08.
+      *Done when:* the console is reachable over HTTPS from another network,
+      a relay on the laptop delivers to it, and restoring last night's backup
+      into a scratch database succeeds.
+      *Added* 2026-09-29 with the owner, for the monitoring direction.
+
 ---
 
 ## Phase 1 — Telemetry pipeline (1-1.5 weeks)
@@ -404,6 +415,27 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
       how far behind. Not yet produced by a live overloaded Gateway.
       ADR-002's N >= 5 is still unruled and is not needed by this state.
 
+- [ ] **P1-15** Remote ID ingest: observations from Remote ID receivers
+      (ASTM F3411 / ASD-STAN EN 4709-002, decoded to Open Drone ID JSON)
+      become tracks on the same map and in the same airspace monitor as
+      MAVLink telemetry. Receiver-agnostic: an adapter per source (a
+      commercial receiver's MQTT or webhook output, an ESP32 or phone
+      receiver), one internal format. A Remote ID observation is marked as
+      broadcast and unauthenticated wherever it is shown, because it can be
+      spoofed. An aircraft seen both ways is one track, matched by serial.
+      *Done when:* a DJI or ArduRemoteID broadcast is received, shown, and
+      raises a conflict alert against a SITL aircraft.
+      *Added* 2026-09-29 with the owner, for the monitoring direction.
+
+- [ ] **P1-16** Manned traffic: ADS-B positions (an RTL-SDR receiver, or an
+      aggregator feed where licensing allows) on the map and in the airspace
+      monitor, so a drone converging on a helicopter or an aircraft is
+      alerted. Manned aircraft are never told to manoeuvre; the alert is to
+      the drone's operator and the control centre.
+      *Done when:* a replayed ADS-B track and a SITL aircraft on a converging
+      path raise an alert naming both.
+      *Added* 2026-09-29 with the owner, for the monitoring direction.
+
 ---
 
 ## Phase 2 — Data model and order lifecycle (1-1.5 weeks)
@@ -467,6 +499,14 @@ Goal: orders exist, move through states, and are fully auditable.
 
 - [ ] **P2-07** Pricing calculation: distance, weight, priority tier.
       *Done when:* quote endpoint returns price and ETA before order creation.
+
+- [ ] **P2-08** Registration check against the civil aviation authority's
+      register (uas.gov.ge): an aircraft whose broadcast or declared
+      registration number is not registered is flagged. Needs the
+      authority's agreement and an access method; nothing is scraped.
+      *Done when:* agreed access exists and an unregistered number raises a
+      warning.
+      *Added* 2026-09-29 with the owner, for the monitoring direction.
 
 ---
 
@@ -797,6 +837,21 @@ P5-08, P5-09, P5-16, P5-12, then P5-13 and P5-14. The strategic layer
       with the owner: adopt, integrate with, or continue alone.
       *Added* 2026-09-29 with the owner.
 
+- [ ] **P5-18** Official geo-zones: import zones in EUROCAE ED-269 format
+      from the authority's published data into `airspace_zones`, keeping the
+      source, version and validity period, instead of drawing them by hand.
+      *Done when:* an ED-269 file imports, its zones alert as P5-15 does, and
+      re-importing a new version replaces the old one with the change logged.
+      *Added* 2026-09-29 with the owner, for the monitoring direction.
+
+- [ ] **P5-19** Altitude limit: alert when an aircraft is above the open
+      category's height limit over the ground. The limit is configuration,
+      not code; the height needs terrain (P5-00), because telemetry carries
+      height above home, not above ground.
+      *Done when:* a SITL aircraft climbing over the limit above sloping
+      terrain raises the alert at the right point.
+      *Added* 2026-09-29 with the owner, for the monitoring direction.
+
 ---
 
 ## Phase 6 — Pilot console (2 weeks)
@@ -829,6 +884,19 @@ P5-08, P5-09, P5-16, P5-12, then P5-13 and P5-14. The strategic layer
       timestamp.
       *Phase done when:* a pilot can pause a SITL mission, fly manually, and
       resume, with the full sequence in the audit log.
+
+- [ ] **P6-08** Operator authentication and roles for the API and the console:
+      named accounts, no shared login; roles `viewer` (see everything),
+      `operator` (also acknowledge alerts), `admin` (also change the registry
+      and manage accounts). Passwords stored as scrypt hashes; server-side
+      sessions that can be revoked; every login, failed login and change
+      recorded in `events` against the operator's id. The console's feed,
+      which must not read the database, accepts a short-lived ticket signed
+      by the API instead.
+      *Done when:* every API route and the console feed refuse an anonymous
+      request, each role is refused what it may not do, a revoked session
+      stops working, and the audit log names who did what.
+      *Added* 2026-09-29 with the owner, for the monitoring direction.
 
 ---
 
