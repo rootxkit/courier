@@ -117,6 +117,35 @@ jobs:
             test -x "$f" || { echo "$f is not executable"; exit 1; }
           done
 
+  console:
+    name: Operator console
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web-pilot
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web-pilot/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      # Types come from the committed openapi.json; that it matches the API
+      # is checked by api/tests/test_openapi_export.py in the unit tests.
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint and format
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+
   database:
     name: Telemetry database and bus
     runs-on: ubuntu-latest
