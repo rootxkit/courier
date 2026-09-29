@@ -415,10 +415,15 @@
       }
       darkScheme.addEventListener("change", applyBasemapStyle);
 
+      // Set once a loaded track has been fitted; the base map then leaves the view alone.
+      let trackFitted = false;
+
       async function loadBasemap() {
         const notice = document.getElementById("basemap");
         try {
-          await new pmtiles.PMTiles(`${location.origin}${BASEMAP_URL}`).getHeader();
+          const header = await new pmtiles.PMTiles(
+            `${location.origin}${BASEMAP_URL}`,
+          ).getHeader();
           try {
             const response = await fetch("/basemap/SOURCE.json");
             basemapSource = response.ok ? await response.json() : null;
@@ -429,6 +434,19 @@
           notice.dataset.i18n = "";
           notice.textContent = "";
           applyBasemapStyle();
+          // Until a track is loaded, show the installed extract rather than
+          // the whole world: at world zoom the extract's copies repeat with
+          // empty bands between them, and the page looks broken. No
+          // coordinates in code (CLAUDE.md): the bounds are the extract's own.
+          if (!trackFitted) {
+            map.fitBounds(
+              [
+                [header.minLon, header.minLat],
+                [header.maxLon, header.maxLat],
+              ],
+              { padding: 20, animate: false },
+            );
+          }
         } catch (error) {
           basemapInstalled = false;
           notice.dataset.i18n = "no_basemap";
@@ -668,6 +686,7 @@
       function fitTrack() {
         const points = replay.samples.filter((s) => s.lat_deg !== null && s.lon_deg !== null);
         if (!points.length) return;
+        trackFitted = true;
         const lons = points.map((p) => p.lon_deg);
         const lats = points.map((p) => p.lat_deg);
         map.fitBounds(
