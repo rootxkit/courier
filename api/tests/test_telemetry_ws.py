@@ -30,6 +30,8 @@ from gateway.drone_state import DroneStateRow
 from gateway.publisher import TelemetryPublisher
 from gateway.station_state import LinkState
 
+FEED_SECRET = b"test-feed-secret-0123456789abcdef0123"
+
 pytestmark = pytest.mark.nats
 
 NOON = datetime(2026, 9, 23, 12, 0, tzinfo=UTC)
@@ -164,7 +166,7 @@ async def test_a_published_row_reaches_a_browser(bus: Any) -> None:
     uses, so a change to the subject scheme on either side fails here rather
     than showing an empty map.
     """
-    app = create_app(nats_url())
+    app = create_app(nats_url(), feed_secret=FEED_SECRET)
     received: list[dict[str, Any]] = []
 
     async with (
@@ -202,7 +204,7 @@ async def test_station_state_reaches_a_browser_with_the_distinction(
     bus: Any,
 ) -> None:
     """An unreachable station must not arrive looking like data loss."""
-    app = create_app(nats_url())
+    app = create_app(nats_url(), feed_secret=FEED_SECRET)
     received: list[dict[str, Any]] = []
 
     async with app.router.lifespan_context(app):
@@ -232,7 +234,7 @@ async def test_station_state_reaches_a_browser_with_the_distinction(
 
 
 async def test_the_map_page_is_served() -> None:
-    app = create_app(nats_url())
+    app = create_app(nats_url(), feed_secret=FEED_SECRET)
     async with (
         app.router.lifespan_context(app),
         AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client,
@@ -249,7 +251,7 @@ async def test_the_page_carries_both_languages() -> None:
     Checked rather than assumed, because "we will add i18n later" is how a
     page ends up with a hundred hardcoded strings.
     """
-    app = create_app(nats_url())
+    app = create_app(nats_url(), feed_secret=FEED_SECRET)
     async with (
         app.router.lifespan_context(app),
         AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client,
@@ -271,7 +273,7 @@ async def test_the_page_handles_only_the_console_message_kinds() -> None:
     against the page's own comment explaining that it does not render them,
     which measured the prose and not the behaviour.
     """
-    app = create_app(nats_url())
+    app = create_app(nats_url(), feed_secret=FEED_SECRET)
     async with (
         app.router.lifespan_context(app),
         AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client,

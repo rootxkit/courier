@@ -17,6 +17,7 @@ from api.app import create_api_app
 from api.assets import STATIC
 from api.registry import FleetRegistry
 from api.replay import ReplayStore
+from api.tests.auth_fakes import api_kwargs
 
 PAGE = STATIC / "replay.html"
 
@@ -36,6 +37,7 @@ def app_with(basemap_dir: Path | None, *, replay: bool = True) -> FastAPI:
         cast(FleetRegistry, unused),
         replay=store if replay else None,
         basemap_dir=basemap_dir,
+        **api_kwargs(),
     )
 
 
