@@ -1,0 +1,39 @@
+// Calls to the core API, typed from the generated schema (web-pilot/openapi.json
+// -> src/api/schema.d.ts, `npm run gen:api`). Never hand-write a response type.
+import type { paths } from "./schema";
+
+type JsonOf<T> = T extends { content: { "application/json": infer B } } ? B : never;
+
+export type GetResponse<P extends keyof paths> = paths[P] extends {
+  get: { responses: { 200: infer R } };
+}
+  ? JsonOf<R>
+  : never;
+
+export class SignInRequired extends Error {}
+
+function toSignIn(): never {
+  const next = location.pathname + location.search;
+  location.replace(`/login?next=${encodeURIComponent(next)}`);
+  throw new SignInRequired("sign in required");
+}
+
+export async function apiGet<P extends keyof paths>(path: P, query = ""): Promise<GetResponse<P>> {
+  const response = await fetch(`${String(path)}${query}`, { credentials: "same-origin" });
+  if (response.status === 401) toSignIn();
+  if (!response.ok) throw new Error(`${String(path)}: ${response.status}`);
+  return (await response.json()) as GetResponse<P>;
+}
+
+// State changes carry X-Courier-Request, which a form on another site cannot
+// send (api/auth.py). The API refuses a cookie-authenticated change without it.
+export async function apiPost(path: string, body?: unknown): Promise<Response> {
+  const response = await fetch(path, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json", "X-Courier-Request": "1" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (response.status === 401) toSignIn();
+  return response;
+}
