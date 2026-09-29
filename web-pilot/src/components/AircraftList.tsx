@@ -45,11 +45,22 @@ export function AircraftList({ aircraft, alerts, selected, now, onSelect }: Prop
                 <span className="muted mono small">{shortId(id)}</span>
               </div>
               <div className="row-body small">
-                <span className={`pill ${d.armed ? "armed" : ""}`}>
-                  {d.armed === null ? t("unknown") : d.armed ? t("armed") : t("disarmed")}
-                </span>
-                <span>{d.mode ?? "—"}</span>
-                <span title={t("battery")}>{num(d.batt_pct, 0, "%")}</span>
+                {d.source === "remote_id" ? (
+                  <>
+                    <span className="pill remote-id" title={t("remote_id_unverified")}>
+                      {t("remote_id")}
+                    </span>
+                    <span>{d.airborne ? t("airborne") : t("on_ground")}</span>
+                  </>
+                ) : (
+                  <>
+                    <span className={`pill ${d.armed ? "armed" : ""}`}>
+                      {d.armed === null ? t("unknown") : d.armed ? t("armed") : t("disarmed")}
+                    </span>
+                    <span>{d.mode ?? "—"}</span>
+                    <span title={t("battery")}>{num(d.batt_pct, 0, "%")}</span>
+                  </>
+                )}
                 <span title={t("altitude_home")}>{num(d.alt_above_home_m, 0, "m")}</span>
                 <span className="muted">
                   {t("seconds_ago", { n: ageSeconds(item.receivedAt, now) })}
