@@ -76,6 +76,17 @@ const en = {
   gps_value: "fix type {fix} · {sats} satellites",
   select_hint: "Select an aircraft on the map or in the list.",
   zones_unavailable: "zones and bases unavailable — showing the last read",
+  remote_id: "Remote ID",
+  remote_id_unverified: "Broadcast, not verified: anyone can transmit this identity and position.",
+  airborne: "airborne",
+  on_ground: "on the ground",
+  rid_ua_id: "Serial / ID",
+  rid_operator: "Operator ID",
+  rid_operator_position: "Operator position",
+  rid_receiver: "Heard by",
+  rid_signal: "Signal",
+  altitude_hae: "Altitude (ellipsoid)",
+  track: "Track",
 };
 
 type Key = keyof typeof en;
@@ -154,6 +165,18 @@ const ka: Partial<Record<Key, string>> = {
   gps_value: "fix ტიპი {fix} · {sats} თანამგზავრი",
   select_hint: "აირჩიეთ აპარატი რუკაზე ან სიაში.",
   zones_unavailable: "ზონები და ბაზები მიუწვდომელია — ნაჩვენებია ბოლო წაკითხული",
+  remote_id: "Remote ID",
+  remote_id_unverified:
+    "სამაუწყებლო, დაუდასტურებელი: ამ იდენტიფიკატორს და პოზიციას ნებისმიერს შეუძლია გადასცეს.",
+  airborne: "ჰაერშია",
+  on_ground: "მიწაზეა",
+  rid_ua_id: "სერიული / ID",
+  rid_operator: "ოპერატორის ID",
+  rid_operator_position: "ოპერატორის პოზიცია",
+  rid_receiver: "მიიღო",
+  rid_signal: "სიგნალი",
+  altitude_hae: "სიმაღლე (ელიფსოიდიდან)",
+  track: "მიმართულება",
 };
 
 export type Lang = "en" | "ka";
