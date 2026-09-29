@@ -163,6 +163,15 @@ class OperatorOut(BaseModel):
     locked_until: datetime | None
 
 
+class MeOut(BaseModel):
+    """Who is signed in, for the console header and its role checks."""
+
+    id: UUID
+    username: str
+    display_name: str
+    role: Role
+
+
 def _http(error: AuthError) -> HTTPException:
     status = {
         "invalid_credentials": 401,
@@ -236,7 +245,7 @@ def auth_router(
         response.delete_cookie(FEED_COOKIE)
         return {"ended": ended}
 
-    @router.get("/auth/me")
+    @router.get("/auth/me", response_model=MeOut)
     async def me(operator: Annotated[Operator, Depends(viewer)]) -> dict[str, Any]:
         return operator.as_dict()
 

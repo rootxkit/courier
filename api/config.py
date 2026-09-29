@@ -80,6 +80,11 @@ class ApiSettings(
     # Secure cookies are sent only over HTTPS. Off only for plain-HTTP
     # development on this machine.
     cookie_secure: bool = Field(default=True, validation_alias="COOKIE_SECURE")
+    # P6-01. The built operator console (`npm run build` in web-pilot/).
+    # Served at /app when present.
+    console_app_dir: Path = Field(
+        default=Path("web-pilot/dist"), validation_alias="CONSOLE_APP_DIR"
+    )
     # Where a browser reaches the console feed. Behind the TLS front of
     # P0-09 this is wss://<domain>/ws/telemetry.
     console_feed_url: str = Field(

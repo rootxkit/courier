@@ -69,6 +69,7 @@ def build_app(settings: ApiSettings) -> FastAPI:
         replay=replay,
         basemap_dir=settings.basemap_dir,
         console_feed_url=settings.console_feed_url,
+        console_app_dir=settings.console_app_dir,
     )
 
     @asynccontextmanager

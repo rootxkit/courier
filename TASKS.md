@@ -856,17 +856,30 @@ P5-08, P5-09, P5-16, P5-12, then P5-13 and P5-14. The strategic layer
 
 ## Phase 6 — Pilot console (2 weeks)
 
-- [ ] **P6-01** Map view: all active drones, routes, corridors, zones, bases.
+- [~] **P6-01** Map view: all active drones, routes, corridors, zones, bases.
       Layer toggles.
-- [ ] **P6-02** Per-drone detail panel: full telemetry, mission progress,
+      *Partial* 2026-09-29: `web-pilot/`, served by the API at `/app`. The
+      self-hosted basemap, zones (corridors among them) and bases re-read
+      every 30 s, every placed aircraft by heading, a line between the two
+      aircraft of each conflict, toggles for zones, bases and labels.
+      Checked against two SITL aircraft flying the head-on and zone-entry
+      scenario: both drawn, the zone warning and the critical conflict shown
+      and drawn, acknowledged, in `en` and `ka`. Routes wait for missions
+      (P3). There are no frontend tests yet.
+- [~] **P6-02** Per-drone detail panel: full telemetry, mission progress,
       battery trend, link quality.
+      *Partial* 2026-09-29: everything the feed carries, battery and
+      altitude trends since the console opened, link loss and heartbeat
+      gap, firmware, the aircraft's alerts, and a link to its replay.
+      Mission progress waits for missions (P3).
 - [~] **P6-03** Alert system with severity levels, audible cue for critical,
       acknowledge flow.
       *Partial* 2026-09-29: the console shows airspace alerts with severity,
       repeats a tone for an unacknowledged critical one, and replays active
       alerts to a console opened later. Acknowledgement is per console and
       not yet recorded (P6-07), and station and battery alerts are not yet on
-      this path.
+      this path. In the operator console (P6-01) only operators and admins
+      acknowledge; viewers see the alert and the tone.
       **Alert text must not imply loss that has not happened.** A station going
       unreachable means the ground station cannot be reached from here; the
       relay is almost certainly still receiving and buffering, and the record
