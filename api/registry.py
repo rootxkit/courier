@@ -43,14 +43,14 @@ import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from api.actors import SYSTEM, Actor
 from common import get_logger
 
 _log = get_logger(__name__)
 
-# Until operator authentication exists, every change is attributed to the API
-# itself. The column is there so that attribution is a data change, not a
-# schema change, when it does.
-ACTOR_TYPE = "api"
+# A change with no signed-in operator behind it is attributed to the API
+# itself (`api.actors.SYSTEM`). Through the HTTP API, since P6-08, every
+# change carries the operator who made it: each mutation takes an `actor`.
 
 
 class DroneStatus(StrEnum):
@@ -182,16 +182,19 @@ class FleetRegistry:
         entity_id: UUID,
         event_type: str,
         payload: Mapping[str, Any],
+        *,
+        actor: Actor,
     ) -> None:
         await connection.execute(
             sa.text(
                 "INSERT INTO events "
                 "(actor_type, actor_id, entity_type, entity_id, event_type, payload) "
-                "VALUES (:actor_type, NULL, :entity_type, :entity_id, :event_type, "
-                "        CAST(:payload AS jsonb))"
+                "VALUES (:actor_type, :actor_id, :entity_type, :entity_id, "
+                "        :event_type, CAST(:payload AS jsonb))"
             ),
             {
-                "actor_type": ACTOR_TYPE,
+                "actor_type": actor.actor_type,
+                "actor_id": actor.actor_id,
                 "entity_type": entity_type,
                 "entity_id": str(entity_id),
                 "event_type": event_type,
@@ -256,6 +259,7 @@ class FleetRegistry:
         elevation_amsl_m: float | None,
         capacity: int,
         charging_slots: int,
+        actor: Actor = SYSTEM,
     ) -> dict[str, Any]:
         try:
             async with self.engine.begin() as connection:
@@ -280,7 +284,9 @@ class FleetRegistry:
                     )
                 ).one()
                 base = _row(created)
-                await self._audit(connection, "base", base["id"], "created", base)
+                await self._audit(
+                    connection, "base", base["id"], "created", base, actor=actor
+                )
                 return base
         except IntegrityError as error:
             raise ConflictError(f"base {name!r} refused: {error.orig}") from error
@@ -295,7 +301,12 @@ class FleetRegistry:
     # --- pilots ---------------------------------------------------------------
 
     async def create_pilot(
-        self, *, name: str, license_ref: str | None, max_concurrent_drones: int
+        self,
+        *,
+        name: str,
+        license_ref: str | None,
+        max_concurrent_drones: int,
+        actor: Actor = SYSTEM,
     ) -> dict[str, Any]:
         try:
             async with self.engine.begin() as connection:
@@ -315,7 +326,9 @@ class FleetRegistry:
                     )
                 ).one()
                 pilot = _row(created)
-                await self._audit(connection, "pilot", pilot["id"], "created", pilot)
+                await self._audit(
+                    connection, "pilot", pilot["id"], "created", pilot, actor=actor
+                )
                 return pilot
         except IntegrityError as error:
             raise ConflictError(f"pilot {name!r} refused: {error.orig}") from error
@@ -328,7 +341,7 @@ class FleetRegistry:
             return [_row(row) for row in rows]
 
     async def set_pilot_status(
-        self, pilot_id: UUID, status: PilotStatus
+        self, pilot_id: UUID, status: PilotStatus, *, actor: Actor = SYSTEM
     ) -> dict[str, Any]:
         async with self.engine.begin() as connection:
             updated = (
@@ -344,7 +357,12 @@ class FleetRegistry:
                 raise NotFoundError(f"no pilot {pilot_id}")
             pilot = _row(updated)
             await self._audit(
-                connection, "pilot", pilot_id, "status_changed", {"status": status}
+                connection,
+                "pilot",
+                pilot_id,
+                "status_changed",
+                {"status": status},
+                actor=actor,
             )
             return pilot
 
@@ -359,6 +377,7 @@ class FleetRegistry:
         params: AirframeParams,
         home_base_id: UUID | None,
         current_pilot_id: UUID | None,
+        actor: Actor = SYSTEM,
     ) -> dict[str, Any]:
         """Register a drone here and make it bindable in the telemetry database."""
         try:
@@ -390,7 +409,9 @@ class FleetRegistry:
                     )
                 ).one()
                 drone = _row(created)
-                await self._audit(connection, "drone", drone["id"], "registered", drone)
+                await self._audit(
+                    connection, "drone", drone["id"], "registered", drone, actor=actor
+                )
                 # Last, and inside the transaction: see the module docstring.
                 await self.projection.register_drone(drone["id"], label)
         except IntegrityError as error:
@@ -424,7 +445,7 @@ class FleetRegistry:
         return [await self._with_status(drone) for drone in drones]
 
     async def set_maintenance(
-        self, drone_id: UUID, in_maintenance: bool
+        self, drone_id: UUID, in_maintenance: bool, *, actor: Actor = SYSTEM
     ) -> dict[str, Any]:
         async with self.engine.begin() as connection:
             updated = (
@@ -444,10 +465,13 @@ class FleetRegistry:
                 drone_id,
                 "maintenance_started" if in_maintenance else "maintenance_ended",
                 {},
+                actor=actor,
             )
         return await self._with_status(_row(updated))
 
-    async def retire_drone(self, drone_id: UUID) -> dict[str, Any]:
+    async def retire_drone(
+        self, drone_id: UUID, *, actor: Actor = SYSTEM
+    ) -> dict[str, Any]:
         """Retire, never delete: its past telemetry must stay attributable.
 
         The projection is marked retired and every open binding is closed, so
@@ -481,7 +505,12 @@ class FleetRegistry:
                 drone_id, drone["label"], retired_at=at
             )
             await self._audit(
-                connection, "drone", drone_id, "retired", {"bindings_closed": closed}
+                connection,
+                "drone",
+                drone_id,
+                "retired",
+                {"bindings_closed": closed},
+                actor=actor,
             )
         return await self._with_status(drone)
 
