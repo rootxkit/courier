@@ -885,7 +885,7 @@ P5-08, P5-09, P5-16, P5-12, then P5-13 and P5-14. The strategic layer
       *Phase done when:* a pilot can pause a SITL mission, fly manually, and
       resume, with the full sequence in the audit log.
 
-- [ ] **P6-08** Operator authentication and roles for the API and the console:
+- [x] **P6-08** Operator authentication and roles for the API and the console:
       named accounts, no shared login; roles `viewer` (see everything),
       `operator` (also acknowledge alerts), `admin` (also change the registry
       and manage accounts). Passwords stored as scrypt hashes; server-side
@@ -897,6 +897,13 @@ P5-08, P5-09, P5-16, P5-12, then P5-13 and P5-14. The strategic layer
       request, each role is refused what it may not do, a revoked session
       stops working, and the audit log names who did what.
       *Added* 2026-09-29 with the owner, for the monitoring direction.
+      *Closed* 2026-09-29. Checked live on the laptop against the running API
+      and console (`docs/runbooks/p6-08-operator-auth.md`): anonymous 401 and
+      feed close 4401, viewer 403 on admin routes, cookie state change
+      without `X-Courier-Request` 403, sign-out ends the session. Lockout,
+      expiry, idle timeout and revocation by role, password or disable are
+      checked against PostgreSQL; every documented route is walked
+      anonymously and as a viewer.
 
 ---
 
