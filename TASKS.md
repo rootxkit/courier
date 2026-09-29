@@ -415,7 +415,7 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
       how far behind. Not yet produced by a live overloaded Gateway.
       ADR-002's N >= 5 is still unruled and is not needed by this state.
 
-- [ ] **P1-15** Remote ID ingest: observations from Remote ID receivers
+- [~] **P1-15** Remote ID ingest: observations from Remote ID receivers
       (ASTM F3411 / ASD-STAN EN 4709-002, decoded to Open Drone ID JSON)
       become tracks on the same map and in the same airspace monitor as
       MAVLink telemetry. Receiver-agnostic: an adapter per source (a
@@ -426,6 +426,15 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
       *Done when:* a DJI or ArduRemoteID broadcast is received, shown, and
       raises a conflict alert against a SITL aircraft.
       *Added* 2026-09-29 with the owner, for the monitoring direction.
+      *Partial* 2026-09-29: Open Drone ID decoding checked against the
+      reference library, a receiver datagram ingest
+      (`python -m gateway.remote_id_ingest`), HAE to AMSL through EGM96, the
+      console marking, and a simulator. A simulated broadcast raised a
+      conflict against a hovering SITL aircraft
+      (`docs/runbooks/p1-15-remote-id.md`). Not yet: a real broadcast and
+      receiver, receiver authentication, storing Remote ID tracks, and
+      matching a broadcast serial to a registered aircraft, without which
+      one of ours that also broadcasts appears twice.
 
 - [ ] **P1-16** Manned traffic: ADS-B positions (an RTL-SDR receiver, or an
       aggregator feed where licensing allows) on the map and in the airspace
