@@ -55,7 +55,7 @@ def test_the_difference_is_dem_minus_flight_controller(tmp_path: Path) -> None:
 
     tallies = compare(root, terrain(tmp_path))
 
-    tally = tallies["sysid 201 / COP-DEM GLO-30"]
+    tally = tallies["sysid 201 / N41E044 / COP-DEM GLO-30"]
     assert tally.differences_m == pytest.approx([3.0, -3.0], abs=0.11)
     assert tally.summary()["compared"] == 2
 
@@ -77,3 +77,25 @@ def test_a_position_outside_the_dem_is_counted_apart(tmp_path: Path) -> None:
     root = archive_of(tmp_path, [terrain_report(202, 10.5, 10.5, 50.0, 10)])
 
     assert compare(root, terrain(tmp_path))["sysid 202 / -"].outside_dem == 1
+
+
+def test_one_sysid_in_two_cells_is_two_tallies(tmp_path: Path) -> None:
+    """The same SITL SYSID flies Tbilisi one day and the mountains the next."""
+    (tmp_path / "t").mkdir()
+    here = install(
+        tmp_path / "t",
+        {"N41E044": "COP-DEM GLO-30", "N42E044": "COP-DEM GLO-30"},
+        {"N41E044": tile_bytes(), "N42E044": tile_bytes(lat_first=43.0)},
+    )
+    root = archive_of(
+        tmp_path,
+        [
+            terrain_report(201, 42.0 - 2 * STEP, 44.0 + 3 * STEP, 420.0, 336),
+            terrain_report(201, 43.0 - 2 * STEP, 44.0 + 3 * STEP, 420.0, 336),
+        ],
+    )
+
+    tallies = compare(root, here)
+
+    assert tallies["sysid 201 / N41E044 / COP-DEM GLO-30"].summary()["compared"] == 1
+    assert tallies["sysid 201 / N42E044 / COP-DEM GLO-30"].summary()["compared"] == 1

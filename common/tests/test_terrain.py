@@ -29,6 +29,7 @@ def tile_bytes(
     dataset: str = "COP-DEM GLO-30",
     nodata_at: tuple[int, int] | None = None,
     offset: float = OFFSET_M,
+    lat_first: float = 42.0,
 ) -> bytes:
     samples = bytearray()
     for row in range(5):
@@ -42,7 +43,7 @@ def tile_bytes(
         "Dataset": dataset,
         "Offset": str(offset),
         "Scale": str(SCALE_M),
-        "LatFirst": "42.0",
+        "LatFirst": str(lat_first),
         "LonFirst": "44.0",
         "LatStep": str(STEP),
         "LonStep": str(STEP),

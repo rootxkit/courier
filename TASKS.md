@@ -673,7 +673,7 @@ P5-08, P5-09, P5-16, P5-12, then P5-13 and P5-14. The strategic layer
   the prescribed action rather than only "danger": the aircraft are on
   missions, so a pilot has to intervene by hand.
 
-- [ ] **P5-00** Terrain elevation source: ground elevation AMSL for a given
+- [x] **P5-00** Terrain elevation source: ground elevation AMSL for a given
       position, so that AGL becomes derivable at all.
       **A prerequisite for P5-01 and P5-03, not an optional extra.** There is
       currently no source for height above ground anywhere in the system:
@@ -716,22 +716,30 @@ P5-08, P5-09, P5-16, P5-12, then P5-13 and P5-14. The strategic layer
         value is not missing, it is confidently wrong, which is the failure this
         task exists to prevent. `TERRAIN_REPORT` may still be useful as a
         cross-check where tiles *are* loaded; it cannot be the source.
-      **Status 2026-09-30: the source exists; the comparison covers one cell.**
-      Copernicus DEM (GLO-30, and GLO-90 for the N41 E043-E046 strip the
-      public GLO-30 release withholds) is fetched by `tools.terrain_fetch`,
-      read by `common/terrain.py`, served at `GET /terrain`, and shown in the
-      console as ground elevation and approximate height above ground. It
-      works outside Georgia by fetching another box.
-      `tools.terrain_compare` over the archive gives DEM minus flight
-      controller as follows:
-      - stationary SITL: a constant -2.8 to -6.6 m;
-      - flying SITL: median -2.9 to -5.8 m, max |27.1| m;
-      - hexa-01: 11,520 reports, all `loaded=0`, so not compared.
-      All of it is the Tbilisi GLO-90 cell. **Remaining:** SITL runs from a
-      GLO-30 cell and from mountains, so that the disagreement is recorded
-      over the operating area and not one cell. Details:
-      `docs/runbooks/p5-00-terrain.md`. It also showed that `SITL_HOME` sat
-      155 m below the ground at home (450 m against 605 m); now 605.
+      **Done 2026-09-30.** Copernicus DEM (GLO-30, and GLO-90 for the
+      N41 E043-E046 strip the public GLO-30 release withholds) is fetched by
+      `tools.terrain_fetch`, read by `common/terrain.py`, served at
+      `GET /terrain`, and shown in the console as ground elevation and
+      approximate height above ground. Outside Georgia it works by fetching
+      another box. `tools.terrain_compare` gives DEM minus flight controller,
+      per cell, from SITL flights through the full pipeline:
+
+      | Cell | Terrain | DEM | Reports | Median | Stdev | p95 abs | Max abs |
+      |---|---|---|---|---|---|---|---|
+      | N42E042, Samtredia | plain | GLO-30 | 2,091 | +1.5 m | 1.8 m | 4.3 m | 6.4 m |
+      | N42E044, Kazbegi | mountain valley and slopes | GLO-30 | 3,027 | +0.4 m | 3.5 m | 6.9 m | 14.4 m |
+      | N41E044, Tbilisi | city, hills | GLO-90 | 15,693 | -2.9 m | 13.4 m | 27.1 m | 27.1 m |
+
+      The two GLO-30 cells used ArduPilot's own terrain files
+      (terrain.ardupilot.org `tilesdat3`, 100 m grid). The Tbilisi file was
+      filled on demand by a ground station during earlier runs; in the one
+      block checked it differs from `tilesdat3` by -22 to +15 m (mean -0.9 m).
+      Tbilisi's larger spread is therefore GLO-90 plus a different
+      flight-controller source, not the city alone. hexa-01 sent 11,520
+      reports, all `loaded=0`, and none were compared.
+      The work also showed that `SITL_HOME` sat 155 m below the ground at home
+      (450 m against 605 m); it is now 605 m. Details:
+      `docs/runbooks/p5-00-terrain.md`.
       *Done when:* ground elevation can be queried for any point in the
       operating area, the two sources have been compared over that area, and
       the disagreement between them is a recorded number rather than an
