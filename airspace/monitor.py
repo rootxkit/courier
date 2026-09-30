@@ -1,4 +1,5 @@
-"""From telemetry to alerts: conflicts between aircraft, and zone incursions.
+"""From telemetry to alerts: conflicts between aircraft, zone incursions, and
+aircraft above the height limit.
 
 Fed one telemetry message at a time (the Gateway's `telemetry.<drone_id>`
 payload). Returns what changed: alerts raised and alerts cleared. The caller
@@ -30,6 +31,20 @@ Silence is not evidence. A pair whose telemetry stops is not shown to be
 clear of each other, so its alert stays until the aircraft are dropped as
 stale, and is cleared then as "no longer tracked", not as "resolved".
 
+## Height above ground (P5-19)
+
+An aircraft is too high when its AMSL altitude minus the ground elevation
+under it (the DEM, `common/terrain.py`) exceeds `max_height_agl_m`. Telemetry
+cannot say this by itself: MAVLink gives height above home, which over a
+valley 150 m below home is 150 m short.
+
+Where the ground elevation is unknown (no terrain configured, or a cell that
+was never fetched) the limit is **not evaluated**. The monitor stays silent
+rather than guessing. The console shows the elevation as unknown there, and
+the service logs it at start-up. The DEM is a surface model accurate to a few
+metres (`docs/runbooks/p5-00-terrain.md`), so an aircraft near the limit over
+trees or roofs can be flagged a few metres early.
+
 ## Stage 0: an alert, not a resolution
 
 The alert names both aircraft, the time to closest approach and the distance.
@@ -41,12 +56,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID
 
 from airspace.cpa import Approach, SeparationPolicy, Track, closest_approach
 from airspace.neighbours import NeighbourIndex
 from airspace.zones import Zone, ZoneType
+from common.terrain import Elevation
 
 
 class Severity(StrEnum):
@@ -57,6 +73,13 @@ class Severity(StrEnum):
 class AlertKind(StrEnum):
     CONFLICT = "conflict"
     ZONE = "zone"
+    HEIGHT = "height"
+
+
+class GroundElevation(Protocol):
+    """`common.terrain.Terrain`, or anything that answers like it."""
+
+    def elevation(self, lat_deg: float, lon_deg: float) -> Elevation | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,10 +142,17 @@ def zone_key(drone_id: UUID, zone: Zone) -> str:
     return f"zone:{zone.zone_id}:{drone_id}"
 
 
+def height_key(drone_id: UUID) -> str:
+    return f"height:{drone_id}"
+
+
 @dataclass
 class AirspaceMonitor:
     policy: SeparationPolicy
     zones: list[Zone] = field(default_factory=list)
+    # Both needed for the height limit; with either missing it is not checked.
+    terrain: GroundElevation | None = None
+    max_height_agl_m: float | None = None
     stale_after_s: float = 15.0
     clear_after_s: float = 3.0
 
@@ -157,6 +187,7 @@ class AirspaceMonitor:
             self._last_seen_s[drone_id] = now_s
             raised.extend(self._check_conflicts(track, now_s))
             raised.extend(self._check_zones(track, now_s))
+            raised.extend(self._check_height(track, now_s))
             # Every active alert this aircraft is part of was just evaluated.
             # The ones not refreshed are false as of this message.
             for key, alert in self._active.items():
@@ -237,6 +268,36 @@ class AirspaceMonitor:
             if key not in self._active:
                 raised.append(alert)
             self._active[key] = alert
+        return raised
+
+    def _check_height(self, track: Track, now_s: float) -> list[Alert]:
+        if self.terrain is None or self.max_height_agl_m is None:
+            return []
+        ground = self.terrain.elevation(track.lat_deg, track.lon_deg)
+        if ground is None:
+            return []
+        height_agl_m = track.alt_amsl_m - ground.elevation_m
+        if height_agl_m <= self.max_height_agl_m:
+            return []
+        key = height_key(track.drone_id)
+        alert = Alert(
+            key=key,
+            kind=AlertKind.HEIGHT,
+            severity=Severity.WARNING,
+            drone_ids=(track.drone_id,),
+            labels=(self._labels.get(track.drone_id),),
+            detail={
+                "height_agl_m": round(height_agl_m, 1),
+                "max_height_agl_m": self.max_height_agl_m,
+                "alt_amsl_m": round(track.alt_amsl_m, 1),
+                "ground_elevation_m": round(ground.elevation_m, 1),
+                "dataset": ground.dataset,
+            },
+        )
+        self._last_true_s[key] = now_s
+        raised = [] if key in self._active else [alert]
+        # Refreshed either way: the height changes as the aircraft climbs.
+        self._active[key] = alert
         return raised
 
     # --- clearing --------------------------------------------------------------
