@@ -8,7 +8,7 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from airspace.policy import PolicyMissingError, load_policy
+from airspace.policy import PolicyMissingError, load_height_limit, load_policy
 from airspace.zones import ZoneType, load_zones
 
 pytestmark = pytest.mark.postgres
@@ -47,6 +47,33 @@ async def test_the_seeded_policy_is_the_stage_0_policy(
     ) == (60, 60, 20, 800)
 
 
+async def test_the_seeded_height_limit_is_120_m(
+    relational_engine: AsyncEngine,
+) -> None:
+    assert await load_height_limit(relational_engine) == 120.0
+
+
+async def test_the_height_limit_can_be_unset_but_not_zero(
+    relational_engine: AsyncEngine,
+) -> None:
+    try:
+        async with relational_engine.begin() as connection:
+            await connection.execute(
+                sa.text("UPDATE airspace_policy SET max_height_agl_m = NULL")
+            )
+        assert await load_height_limit(relational_engine) is None
+        with pytest.raises(sa.exc.IntegrityError):
+            async with relational_engine.begin() as connection:
+                await connection.execute(
+                    sa.text("UPDATE airspace_policy SET max_height_agl_m = 0")
+                )
+    finally:
+        async with relational_engine.begin() as connection:
+            await connection.execute(
+                sa.text("UPDATE airspace_policy SET max_height_agl_m = 120")
+            )
+
+
 async def test_a_second_policy_row_is_refused(relational_engine: AsyncEngine) -> None:
     with pytest.raises(sa.exc.IntegrityError):
         async with relational_engine.begin() as connection:
@@ -71,13 +98,15 @@ async def test_a_missing_policy_is_refused_rather_than_guessed(
     try:
         with pytest.raises(PolicyMissingError):
             await load_policy(relational_engine)
+        with pytest.raises(PolicyMissingError):
+            await load_height_limit(relational_engine)
     finally:
         async with relational_engine.begin() as connection:
             await connection.execute(
                 sa.text(
                     "INSERT INTO airspace_policy (id, t_cpa_max_s, d_horizontal_min_m, "
-                    "d_vertical_min_m, neighbour_radius_m) "
-                    "VALUES (:id, :t, :h, :v, :r)"
+                    "d_vertical_min_m, neighbour_radius_m, max_height_agl_m) "
+                    "VALUES (:id, :t, :h, :v, :r, :limit)"
                 ),
                 {
                     "id": saved.id,
@@ -85,6 +114,7 @@ async def test_a_missing_policy_is_refused_rather_than_guessed(
                     "h": saved.d_horizontal_min_m,
                     "v": saved.d_vertical_min_m,
                     "r": saved.neighbour_radius_m,
+                    "limit": saved.max_height_agl_m,
                 },
             )
 
