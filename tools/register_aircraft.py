@@ -75,6 +75,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="existing drone_id; a new one is generated if omitted",
     )
     parser.add_argument(
+        "--serial",
+        default=None,
+        help=(
+            "the serial its Remote ID module broadcasts (P1-15), so a broadcast "
+            "by this aircraft is matched to it rather than shown as a second one"
+        ),
+    )
+    parser.add_argument(
         "--from",
         dest="bound_from",
         default=None,
@@ -135,8 +143,11 @@ async def run(args: argparse.Namespace) -> int:
     try:
         if args.retire:
             return await retire(resolver, engine, args, address, bound_from)
-        await resolver.register_drone(drone_id, args.label)
-        print(f"known_drones: {drone_id}  {args.label}")
+        await resolver.register_drone(drone_id, args.label, serial=args.serial)
+        print(
+            f"known_drones: {drone_id}  {args.label}"
+            + (f"  serial {args.serial}" if args.serial else "")
+        )
 
         if args.rebind:
             closed = await resolver.close_binding(args.station, address, at=bound_from)
