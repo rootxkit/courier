@@ -128,6 +128,8 @@ show_error_codes = true
 # gateway, dispatch and airspace are safety-relevant: a type error there is a
 # build failure, not a warning. common is included because those three import
 # it, so a loose type in common defeats the point of checking them strictly.
+# api is included because it is the sign-in boundary and the only writer of
+# the fleet registry and its telemetry projection.
 #
 # `strict = true` is NOT used here. In mypy it is a global flag, and setting it
 # inside a per-module override silently turns strict on for every module —
@@ -151,6 +153,7 @@ module = [
     "airspace.*",
     "tools.*",
     "agent.*",
+    "api.*",
 ]
 disallow_any_generics = true
 disallow_subclassing_any = true
