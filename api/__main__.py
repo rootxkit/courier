@@ -24,6 +24,7 @@ from api.config import ApiSettings
 from api.registry import FleetRegistry
 from api.replay import ReplayStore
 from common import configure_logging, load_settings
+from common.terrain import Terrain
 from gateway.binding import BindingResolver
 from gateway.live_state import read_live_state
 
@@ -70,6 +71,7 @@ def build_app(settings: ApiSettings) -> FastAPI:
         basemap_dir=settings.basemap_dir,
         console_feed_url=settings.console_feed_url,
         console_app_dir=settings.console_app_dir,
+        terrain=Terrain(settings.terrain_dir) if settings.terrain_dir else None,
     )
 
     @asynccontextmanager

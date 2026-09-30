@@ -85,6 +85,9 @@ class ApiSettings(
     console_app_dir: Path = Field(
         default=Path("web-pilot/dist"), validation_alias="CONSOLE_APP_DIR"
     )
+    # P5-00. Terrain tiles from tools/terrain_fetch.py. Unset: /terrain
+    # answers 503 and no height above ground is shown.
+    terrain_dir: Path | None = Field(default=None, validation_alias="TERRAIN_DIR")
     # Where a browser reaches the console feed. Behind the TLS front of
     # P0-09 this is wss://<domain>/ws/telemetry.
     console_feed_url: str = Field(

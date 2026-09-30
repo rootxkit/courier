@@ -54,6 +54,7 @@ VIEWER_ROUTES = {
     ("GET", "/events"),
     ("GET", "/replay/drones"),
     ("GET", "/airspace/zones"),
+    ("GET", "/terrain"),
     ("GET", "/replay/drones/{drone_id}/flights"),
     ("GET", "/replay/drones/{drone_id}"),
 }
