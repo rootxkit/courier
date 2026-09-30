@@ -13,6 +13,16 @@
 - **Airspace alerts** from the business audit log (relational database,
   `events`), raised and cleared, as the airspace monitor wrote them (P5-15).
 
+## Remote ID aircraft
+
+An aircraft that was only ever heard broadcasting Remote ID (P1-15) is not in
+`known_drones` and has no `drone_state`. Its samples come from
+`remote_id_observations`, one per receiver that heard it, and the replay says
+`source: "remote_id"` and `authenticated: false`, as the live console does:
+the track is where the transmitter claimed to be. Receivers are not relays, so
+there is no relay evidence for them, and a hole in such a track is silence.
+Its "flights" are spans declared airborne, where ours are spans armed.
+
 ## Holes are shown, never drawn across
 
 TASKS.md P10-03: a smooth line through missing data invents evidence, which in
@@ -488,6 +498,46 @@ _SAMPLES = sa.text(
 
 _LABEL = sa.text("SELECT label FROM known_drones WHERE drone_id = :drone_id")
 
+SOURCE_MAVLINK = "mavlink"
+SOURCE_REMOTE_ID = "remote_id"
+
+# The latest identity it broadcast. The id is derived from that identity, so
+# every row agrees; the latest is taken rather than assumed.
+_RID_LABEL = sa.text(
+    """
+    SELECT ua_id FROM remote_id_observations
+    WHERE aircraft_id = :drone_id ORDER BY ts DESC LIMIT 1
+    """
+)
+
+_RID_AIRCRAFT = sa.text(
+    """
+    SELECT DISTINCT ON (aircraft_id) aircraft_id, ua_id
+    FROM remote_id_observations ORDER BY aircraft_id, ts DESC
+    """
+)
+
+# Heights: the AMSL height the monitor used (NULL without a geoid). There is
+# no height above home; `alt_above_takeoff_m` is the broadcast's own and is
+# shown in that place, because it is the same quantity.
+_RID_SAMPLES = sa.text(
+    """
+    SELECT ts, receiver_id AS station_id, ST_Y(geom) AS lat_deg,
+           ST_X(geom) AS lon_deg, alt_amsl_m,
+           alt_above_takeoff_m AS alt_above_home_m,
+           -- Remote ID reports the track, not where the nose points.
+           NULL::double precision AS heading_deg,
+           vx_ms, vy_ms, vz_ms, groundspeed_ms, climb_ms,
+           -- A broadcast carries none of these: NULL, never a default.
+           NULL::double precision AS batt_pct, NULL::text AS mode,
+           NULL::boolean AS armed
+    FROM remote_id_observations
+    WHERE aircraft_id = :drone_id AND ts >= :start AND ts <= :end
+    ORDER BY ts, receiver_id
+    LIMIT :limit
+    """
+)
+
 # Every aircraft whose telemetry can be resolved, retired or not. The
 # telemetry registry, not the business one: an aircraft registered only
 # there (SITL fleets, P1-13) still flew, and still has a record to replay.
@@ -564,6 +614,30 @@ _FLIGHTS = sa.text(
     """
 )
 
+# The same split for a broadcast aircraft, on declared status: every status
+# but "ground" (1) is airborne, as in gateway/remote_id.py.
+_RID_FLIGHTS = sa.text(
+    """
+    WITH armed AS (
+      SELECT ts FROM remote_id_observations
+      WHERE aircraft_id = :drone_id AND status IS DISTINCT FROM 1
+        AND ts >= :since AND ts < :until
+    ),
+    marked AS (
+      SELECT ts,
+        CASE WHEN lag(ts) OVER (ORDER BY ts) IS NULL
+               OR ts - lag(ts) OVER (ORDER BY ts) > make_interval(secs => :split_s)
+             THEN 1 ELSE 0 END AS starts_flight
+      FROM armed
+    ),
+    numbered AS (
+      SELECT ts, sum(starts_flight) OVER (ORDER BY ts) AS flight FROM marked
+    )
+    SELECT min(ts) AS start, max(ts) AS "end", count(*) AS armed_samples
+    FROM numbered GROUP BY flight ORDER BY start DESC LIMIT :limit
+    """
+)
+
 _ALERTS = sa.text(
     """
     SELECT id, ts, event_type, payload FROM events
@@ -591,34 +665,56 @@ class ReplayStore:
     async def drones(self) -> list[dict[str, Any]]:
         async with self.telemetry.connect() as connection:
             rows = (await connection.execute(_DRONES)).all()
-        return [
+            broadcast = (await connection.execute(_RID_AIRCRAFT)).all()
+        ours = [
             {
                 "drone_id": str(row.drone_id),
                 "label": row.label,
                 "retired": row.retired_at is not None,
+                "source": SOURCE_MAVLINK,
             }
             for row in rows
         ]
+        heard = [
+            {
+                "drone_id": str(row.aircraft_id),
+                "label": row.ua_id,
+                "retired": False,
+                "source": SOURCE_REMOTE_ID,
+            }
+            for row in sorted(broadcast, key=lambda r: (r.ua_id, str(r.aircraft_id)))
+        ]
+        return ours + heard
 
-    async def label(self, drone_id: UUID) -> str:
+    async def identify(self, drone_id: UUID) -> tuple[str, str]:
+        """Its label and where its record is: ours, or heard broadcasting."""
         async with self.telemetry.connect() as connection:
             label = (
                 await connection.execute(_LABEL, {"drone_id": drone_id})
             ).scalar_one_or_none()
-        if label is None:
-            raise DroneNotFoundError(f"no drone {drone_id} in the telemetry registry")
-        return str(label)
+            if label is not None:
+                return str(label), SOURCE_MAVLINK
+            ua_id = (
+                await connection.execute(_RID_LABEL, {"drone_id": drone_id})
+            ).scalar_one_or_none()
+        if ua_id is not None:
+            return str(ua_id), SOURCE_REMOTE_ID
+        raise DroneNotFoundError(
+            f"no drone {drone_id} in the telemetry registry or among Remote ID "
+            "aircraft heard"
+        )
 
     async def flights(
         self, drone_id: UUID, *, since: datetime, until: datetime, limit: int
     ) -> list[dict[str, Any]]:
         """Armed spans, newest first. A flight is armed telemetry with no
         silence longer than `flight_split_s` inside it."""
-        await self.label(drone_id)
+        _, source = await self.identify(drone_id)
+        query = _RID_FLIGHTS if source == SOURCE_REMOTE_ID else _FLIGHTS
         async with self.telemetry.connect() as connection:
             rows = (
                 await connection.execute(
-                    _FLIGHTS,
+                    query,
                     {
                         "drone_id": drone_id,
                         "since": since,
@@ -643,10 +739,16 @@ class ReplayStore:
     ) -> dict[str, Any]:
         if end <= start:
             raise ReplayError("the window must end after it starts")
-        label = await self.label(drone_id)
-        samples = await self._samples(drone_id, start, end)
+        label, source = await self.identify(drone_id)
+        samples = await self._samples(drone_id, start, end, source)
         stations = sorted({sample.station_id for sample in samples})
-        evidence = await self._evidence(stations, start, end)
+        # Receivers are not relays: a receiver named like a station must not
+        # pick up that station's gaps.
+        evidence = (
+            await self._evidence(stations, start, end)
+            if source == SOURCE_MAVLINK
+            else []
+        )
         replay = build_replay(
             samples,
             evidence,
@@ -657,6 +759,9 @@ class ReplayStore:
         return {
             "drone_id": str(drone_id),
             "label": label,
+            "source": source,
+            # A broadcast track is where the transmitter claimed to be.
+            "authenticated": source == SOURCE_MAVLINK,
             "start": start.isoformat(),
             "end": end.isoformat(),
             "gap_threshold_s": self.gap_threshold_s,
@@ -670,12 +775,13 @@ class ReplayStore:
         }
 
     async def _samples(
-        self, drone_id: UUID, start: datetime, end: datetime
+        self, drone_id: UUID, start: datetime, end: datetime, source: str
     ) -> list[Sample]:
+        query = _RID_SAMPLES if source == SOURCE_REMOTE_ID else _SAMPLES
         async with self.telemetry.connect() as connection:
             rows = (
                 await connection.execute(
-                    _SAMPLES,
+                    query,
                     {
                         "drone_id": drone_id,
                         "start": start,
