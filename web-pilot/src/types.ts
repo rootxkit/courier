@@ -14,31 +14,8 @@ export interface Firmware {
   git_hash: string | null;
 }
 
-// P1-15. What a Remote ID broadcast adds. A broadcast is not authenticated:
-// anyone can transmit one, so it is a claim, never a verified position.
-export interface RemoteIdInfo {
-  ua_id: string;
-  id_type: number;
-  ua_type: number;
-  status: number;
-  operator_id: string | null;
-  operator_lat_deg: number | null;
-  operator_lon_deg: number | null;
-  transmitter: string;
-  rssi_dbm: number | null;
-}
-
 export interface Telemetry {
   drone_id: string;
-  // Absent on MAVLink telemetry; "remote_id" on a broadcast (P1-15).
-  source?: "remote_id";
-  authenticated?: boolean;
-  // Remote ID reports track over the ground, not heading.
-  track_deg?: number | null;
-  // Height above the WGS-84 ellipsoid, as broadcast. Not AMSL.
-  alt_hae_m?: number | null;
-  airborne?: boolean;
-  remote_id?: RemoteIdInfo;
   label: string | null;
   link: LinkQuality | null;
   firmware: Firmware | null;

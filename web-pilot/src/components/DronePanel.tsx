@@ -45,28 +45,6 @@ export function DronePanel({ droneId, aircraft, alerts, now, onClose }: Props) {
         <p className="muted pad">{t("no_position")}</p>
       ) : (
         <>
-          {d.source === "remote_id" && d.remote_id && (
-            <section className="remote-id-box">
-              <strong>{t("remote_id")}</strong>
-              <p className="small">{t("remote_id_unverified")}</p>
-              <dl className="fields">
-                <Field label={t("rid_ua_id")} value={d.remote_id.ua_id} />
-                <Field label={t("rid_operator")} value={d.remote_id.operator_id ?? DASH} />
-                <Field
-                  label={t("rid_operator_position")}
-                  value={
-                    d.remote_id.operator_lat_deg === null || d.remote_id.operator_lon_deg === null
-                      ? DASH
-                      : `${d.remote_id.operator_lat_deg.toFixed(6)}, ${d.remote_id.operator_lon_deg.toFixed(6)}`
-                  }
-                />
-                <Field label={t("altitude_hae")} value={num(d.alt_hae_m, 1, "m")} />
-                <Field label={t("track")} value={num(d.track_deg, 0, "°")} />
-                <Field label={t("rid_receiver")} value={d.station_id} />
-                <Field label={t("rid_signal")} value={num(d.remote_id.rssi_dbm, 0, "dBm")} />
-              </dl>
-            </section>
-          )}
           {alerts.length > 0 && (
             <ul className="detail-alerts">
               {alerts.map((alert) => (
@@ -81,17 +59,15 @@ export function DronePanel({ droneId, aircraft, alerts, now, onClose }: Props) {
               ))}
             </ul>
           )}
-          {d.source !== "remote_id" && (
-            <section>
-              <h3>{t("battery_trend")}</h3>
-              <Sparkline
-                points={aircraft.history.map((h) => ({ t: h.t, value: h.batt }))}
-                min={0}
-                max={100}
-                label={t("battery_trend")}
-              />
-            </section>
-          )}
+          <section>
+            <h3>{t("battery_trend")}</h3>
+            <Sparkline
+              points={aircraft.history.map((h) => ({ t: h.t, value: h.batt }))}
+              min={0}
+              max={100}
+              label={t("battery_trend")}
+            />
+          </section>
           <dl className="fields">
             <Field
               label={t("last_seen")}

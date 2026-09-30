@@ -3,12 +3,10 @@
 // does when the condition is gone, and it is not yet recorded (P6-07).
 import { DASH, num, shortId } from "../format";
 import { useT } from "../i18n";
-import type { Aircraft, Alert } from "../types";
+import type { Alert } from "../types";
 
 interface Props {
   alerts: Map<string, Alert>;
-  // To mark an aircraft whose position is only a Remote ID broadcast (P1-15).
-  aircraft: Map<string, Aircraft>;
   acknowledged: Set<string>;
   canAcknowledge: boolean;
   onAcknowledge: (key: string) => void;
@@ -21,21 +19,12 @@ function name(alert: Alert, index: number): string {
 
 export function AlertsPanel({
   alerts,
-  aircraft,
   acknowledged,
   canAcknowledge,
   onAcknowledge,
   onSelect,
 }: Props) {
   const t = useT();
-  // A party known only from a Remote ID broadcast is marked where the alert
-  // names it: the alert is about a claimed position.
-  const broadcastOnly = (droneId: string | undefined) =>
-    droneId && aircraft.get(droneId)?.data.source === "remote_id" ? (
-      <span className="pill remote-id" title={t("remote_id_unverified")}>
-        {t("remote_id")}
-      </span>
-    ) : null;
   if (alerts.size === 0) return <p className="muted pad">{t("none")}</p>;
   const ordered = [...alerts.values()].sort(
     (a, b) => Number(b.severity === "critical") - Number(a.severity === "critical"),
@@ -61,7 +50,6 @@ export function AlertsPanel({
                   >
                     {name(alert, 0)}
                   </button>
-                  {broadcastOnly(alert.drone_ids[0])}
                   {" ↔ "}
                   <button
                     type="button"
@@ -70,7 +58,6 @@ export function AlertsPanel({
                   >
                     {name(alert, 1)}
                   </button>
-                  {broadcastOnly(alert.drone_ids[1])}
                 </div>
                 <div className="small muted">
                   {t("conflict_detail", {
@@ -90,7 +77,7 @@ export function AlertsPanel({
                   >
                     {name(alert, 0)}
                   </button>
-                  {broadcastOnly(alert.drone_ids[0])} {t("above_height_limit")}
+                  {t("above_height_limit")}
                 </div>
                 <div className="small muted">
                   {t("height_detail", {
@@ -111,7 +98,7 @@ export function AlertsPanel({
                   >
                     {name(alert, 0)}
                   </button>
-                  {broadcastOnly(alert.drone_ids[0])} {t("in_zone", { zone: d.zone_name ?? DASH })}
+                  {t("in_zone", { zone: d.zone_name ?? DASH })}
                 </div>
                 <div className="small muted">
                   {d.zone_type === "no_fly" ||

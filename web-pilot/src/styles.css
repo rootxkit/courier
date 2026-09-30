@@ -415,25 +415,3 @@ button.link {
     border-top: 1px solid var(--line);
   }
 }
-
-/* P1-15: a Remote ID aircraft is a claim, not a verified track. */
-.pill.remote-id {
-  background: #6a1b9a;
-  color: #fff;
-}
-.drone-marker[data-source="remote_id"] svg {
-  stroke-dasharray: 3 2;
-}
-/* Purple unless an alert colours it: the alert matters more. */
-.drone-marker[data-source="remote_id"][data-alert=""] svg {
-  fill: #8e24aa;
-}
-.remote-id-box {
-  margin: 8px 0;
-  padding: 8px;
-  border: 1px dashed #8e24aa;
-  border-radius: 4px;
-}
-.remote-id-box p {
-  margin: 4px 0;
-}

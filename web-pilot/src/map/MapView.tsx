@@ -349,10 +349,8 @@ export function MapView({ aircraft, alerts, zones, bases, layers, selected, onSe
       entry.marker.setLngLat(lngLat);
       // null heading means not reported: leave the arrow where it last was
       // rather than snapping north. 0 and "unknown" are different things.
-      // Remote ID has no heading, only the track over the ground (P1-15).
-      const pointing = item.data.heading_deg ?? item.data.track_deg ?? null;
+      const pointing = item.data.heading_deg;
       if (pointing !== null) entry.arrow.style.transform = `rotate(${pointing}deg)`;
-      entry.element.dataset.source = item.data.source ?? "mavlink";
       entry.label.textContent = layers.labels ? (item.data.label ?? id.slice(0, 8)) : "";
       entry.element.dataset.alert = inConflict.get(id) ?? "";
       entry.element.dataset.selected = String(id === selected);
