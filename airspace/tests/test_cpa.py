@@ -194,7 +194,7 @@ def test_a_diverging_pair_stays_a_conflict_until_it_is_past_the_minimum() -> Non
 
 
 def test_inside_horizontally_but_separated_vertically_is_not_a_conflict() -> None:
-    """The vertical minimum applies to the pair as it is now, as §6.1 wants."""
+    """The vertical minimum applies to the pair as it is now, as §7.1 wants."""
     stacked = closest_approach(
         at(A, 0, 0, alt_amsl_m=500), at(B, 30, 0, alt_amsl_m=530)
     )
