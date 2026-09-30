@@ -43,9 +43,9 @@ from pathlib import Path
 import nats
 
 from common import configure_logging, get_logger, load_settings
+from common.geoid import GeoidGrid
 from gateway import odid
 from gateway.config import RemoteIdSettings
-from gateway.geoid import GeoidGrid
 from gateway.publisher import Bus
 from gateway.remote_id import Frame, Geoid, RemoteIdTracker
 

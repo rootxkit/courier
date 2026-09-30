@@ -144,17 +144,24 @@ async def test_a_datagram_on_the_socket_reaches_the_bus() -> None:
 
 
 def test_without_a_geoid_path_there_is_no_geoid(
-    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from gateway.remote_id_ingest import load_geoid
+    from gateway import remote_id_ingest
 
-    assert load_geoid(None) is None
-    assert "no geoid model configured" in caplog.text
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        remote_id_ingest._log,
+        "warning",
+        lambda message, *a, **k: warnings.append(message),
+    )
+
+    assert remote_id_ingest.load_geoid(None) is None
+    assert any("no geoid model configured" in w for w in warnings)
 
 
 def test_a_geoid_path_loads_the_grid(tmp_path: Any) -> None:
+    from common.tests.test_geoid import pgm
     from gateway.remote_id_ingest import load_geoid
-    from gateway.tests.test_geoid import pgm
 
     path = tmp_path / "grid.pgm"
     path.write_bytes(pgm())

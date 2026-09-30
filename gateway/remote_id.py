@@ -30,11 +30,11 @@ position.
 ## Altitude
 
 The broadcast's altitude is height above the WGS-84 ellipsoid (HAE); the
-system's is above mean sea level. They differ by the geoid undulation (EGM96:
-14.7 m at Tbilisi, 20.9 m at Batumi), and CLAUDE.md forbids mixing them. `alt_amsl_m` is filled
-only through a geoid model. Without one it is None, and the airspace monitor,
+system's is above mean sea level. They differ by the geoid undulation
+(EGM2008: 15.9 m at Tbilisi, 22.5 m at Batumi), and CLAUDE.md forbids mixing
+them. `alt_amsl_m` is filled only through a geoid model. Without one it is None, and the airspace monitor,
 which needs an AMSL altitude, does not consider the aircraft: a separation
-computed on a 15 to 21 m error would be a confident wrong answer.
+computed on a 16 to 23 m error would be a confident wrong answer.
 
 ## Flying
 

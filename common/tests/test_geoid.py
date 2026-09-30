@@ -7,13 +7,14 @@ offset and scale, and that interpolation wraps in longitude.
 
 from __future__ import annotations
 
+import functools
 import math
 import os
 from pathlib import Path
 
 import pytest
 
-from gateway.geoid import GeoidFileError, GeoidGrid
+from common.geoid import GeoidFileError, GeoidGrid
 
 # 10-degree spacing: 36 columns (0..350 east), 19 rows (90 N .. 90 S).
 WIDTH, HEIGHT = 36, 19
@@ -107,10 +108,11 @@ def test_a_file_that_is_not_a_geoid_grid_is_refused(
 
 # --- the installed grid, against GeographicLib itself ----------------------------
 
-# Produced by GeographicLib's own Geoid class (bilinear, egm96-15) on
-# 2026-09-29, from the file infra/geoid/fetch_geoid.sh fetches. Over 5,005
-# random points the largest difference from this reader was 4e-13 m; these are
-# kept so the check can be repeated wherever the grid is installed.
+# Produced by GeographicLib's own Geoid class (bilinear) from the files
+# infra/geoid/fetch_geoid.sh fetches: egm96-15 on 2026-09-29, egm2008-2_5 on
+# 2026-09-30. Over about 5,000 random points each, the largest difference
+# from this reader was 5e-13 m; these are kept so the check can be repeated
+# wherever a grid is installed.
 GEOGRAPHICLIB_EGM96_15 = [
     (41.7151, 44.8271, 14.704748902079984),  # Tbilisi
     (41.6168, 41.6367, 20.907343384320001),  # Batumi
@@ -130,22 +132,52 @@ GEOGRAPHICLIB_EGM96_15 = [
 ]
 
 
+GEOGRAPHICLIB_EGM2008_2_5 = [
+    (41.7151, 44.8271, 15.91675223807998),  # Tbilisi
+    (41.6168, 41.6367, 22.490298647040021),  # Batumi
+    (42.2679, 42.7181, 19.525877673600021),  # Kutaisi
+    (0.0, 0.0, 17.225999999999999),
+    (90.0, 0.0, 14.897999999999996),
+    (-90.0, 0.0, -30.149999999999991),
+    (38.628155, 269.779155, -31.701901320000005),
+    (-14.621217, 305.021114, -3.2073588240000248),
+    (46.874319, 102.448729, -44.413105103999996),
+    (38.625473, 359.9995, 50.201216329343993),
+    (27.9881, 86.925, -28.426240800000045),
+    (51.5, -0.12, 46.067880000000002),
+    (-45.0, 170.0, 8.7060000000000031),
+    (64.1, -21.9, 66.489360000000005),
+    (10.0, -84.0, 14.409000000000006),
+]
+REFERENCE = {
+    "WGS84 EGM96, 15-minute grid": GEOGRAPHICLIB_EGM96_15,
+    "WGS84 EGM2008, 2.5-minute grid": GEOGRAPHICLIB_EGM2008_2_5,
+}
+
+
+@functools.cache
+def _load(path: str) -> GeoidGrid:
+    return GeoidGrid.load(Path(path))
+
+
 def installed_grid() -> GeoidGrid:
     path = os.environ.get("GEOID_PATH")
     if not path or not Path(path).is_file():
         pytest.skip(
             "GEOID_PATH is not set; infra/geoid/fetch_geoid.sh installs the grid"
         )
-    return GeoidGrid.load(Path(path))
+    return _load(path)
 
 
-@pytest.mark.parametrize(("lat", "lon", "undulation_m"), GEOGRAPHICLIB_EGM96_15)
-def test_the_installed_grid_agrees_with_geographiclib(
-    lat: float, lon: float, undulation_m: float
-) -> None:
-    assert installed_grid().undulation_m(lat, lon) == pytest.approx(
-        undulation_m, abs=1e-9
+@pytest.mark.parametrize("index", range(len(GEOGRAPHICLIB_EGM96_15)))
+def test_the_installed_grid_agrees_with_geographiclib(index: int) -> None:
+    grid = installed_grid()
+    assert grid.description in REFERENCE, (
+        f"no reference values for {grid.description!r}"
     )
+    lat, lon, undulation_m = REFERENCE[grid.description][index]
+
+    assert grid.undulation_m(lat, lon) == pytest.approx(undulation_m, abs=1e-9)
 
 
 def test_a_grid_loads_from_a_file(tmp_path: Path) -> None:

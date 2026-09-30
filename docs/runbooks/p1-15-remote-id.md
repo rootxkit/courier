@@ -8,7 +8,7 @@ airspace monitor as our MAVLink aircraft.
 receiver ──UDP JSON──▶ gateway.remote_id_ingest ──telemetry.<id>──▶ console, airspace monitor
  (ESP32, phone,          decode (gateway/odid.py)
   commercial unit)       join by transmitter (gateway/remote_id.py)
-                         HAE → AMSL (gateway/geoid.py)
+                         HAE → AMSL (common/geoid.py)
 ```
 
 ## What a receiver sends
@@ -29,8 +29,8 @@ arrive separately (Bluetooth 4).
 ## Run it
 
 ```
-infra/geoid/fetch_geoid.sh              # once: local/geoid/egm96-15.pgm
-GEOID_PATH=local/geoid/egm96-15.pgm python -m gateway.remote_id_ingest
+infra/geoid/fetch_geoid.sh              # once: local/geoid/egm2008-2_5.pgm
+GEOID_PATH=local/geoid/egm2008-2_5.pgm python -m gateway.remote_id_ingest
 ```
 
 Without `GEOID_PATH` the ingest runs and the aircraft are on the map, but
@@ -42,7 +42,7 @@ Test traffic, without a receiver:
 ```
 python tools/remote_id_sim.py --start-lat <lat> --start-lon <lon> \
     --alt-amsl-m <m> --track-deg <deg> --speed-ms <m/s> --duration-s 90 \
-    --geoid local/geoid/egm96-15.pgm
+    --geoid local/geoid/egm2008-2_5.pgm
 ```
 
 ## How to read it

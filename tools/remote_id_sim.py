@@ -2,7 +2,7 @@
 
     python tools/remote_id_sim.py --start-lat 41.7151 --start-lon 44.8221 \\
         --alt-amsl-m 480 --track-deg 90 --speed-ms 8 --duration-s 90 \\
-        --geoid infra/geoid/egm96-15.pgm
+        --geoid local/geoid/egm2008-2_5.pgm
 
 Flies a straight line from the start point at a constant AMSL altitude and
 sends, once a second, what a Bluetooth 5 or Wi-Fi Remote ID module would
@@ -29,8 +29,8 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+from common.geoid import GeoidGrid
 from gateway import odid
-from gateway.geoid import GeoidGrid
 
 EARTH_RADIUS_M = 6_371_000.0
 
