@@ -16,13 +16,14 @@ second decoder. Each completed observation is published as
 stored in `remote_id_observations` in the telemetry database, so replay has
 it (`gateway/remote_id_store.py`).
 
-## What this does not do yet
+## Receivers
 
-- **Receivers are not authenticated.** The socket binds to 127.0.0.1 by
-  default, so only a process on this host can feed it. Exposing it means
-  deciding how a receiver proves itself, as the relay does for stations
-  (relay-v1); until then a datagram is trusted as much as the broadcast it
-  claims to carry, which is not at all.
+With `REMOTE_ID_RECEIVER_KEYS` set, every datagram must be signed by a known
+receiver, recently, and only once (`gateway/remote_id_auth.py`). Without it
+the ingest accepts unsigned datagrams, and `gateway/config.py` then refuses to
+bind anywhere but loopback.
+
+## What this does not do yet
 - **An aircraft seen both ways is two tracks.** Matching a broadcast serial
   to a registered aircraft is the rest of P1-15.
 """
@@ -48,6 +49,12 @@ from gateway import odid
 from gateway.config import RemoteIdSettings
 from gateway.publisher import Bus
 from gateway.remote_id import Frame, RemoteIdTracker
+from gateway.remote_id_auth import (
+    AuthenticationError,
+    ReceiverAuthenticator,
+    load_keys,
+    split,
+)
 from gateway.remote_id_store import PendingRows, RemoteIdWriter, row_from_observation
 
 _log = get_logger(__name__)
@@ -105,16 +112,23 @@ class RemoteIdIngest:
     store: PendingRows | None = None
     # Which geoid turned HAE into AMSL, recorded with every stored height.
     geoid_model: str | None = None
+    # None: unsigned datagrams are accepted (loopback only, gateway/config.py).
+    authenticator: ReceiverAuthenticator | None = None
     clock_s: Callable[[], float] = time.monotonic
     wall: Callable[[], datetime] = wall_clock
     refused: int = field(default=0, init=False)
     published: int = field(default=0, init=False)
 
     async def on_datagram(self, data: bytes, source: str) -> None:
+        received_at = self.wall()
         try:
-            frame = parse_datagram(data, received_at=self.wall())
+            if self.authenticator is not None:
+                report = self.authenticator.check(data, now_s=received_at.timestamp())
+            else:
+                report, _ = split(data)
+            frame = parse_datagram(report, received_at=received_at)
             observation = self.tracker.take(frame, now_s=self.clock_s())
-        except (DatagramError, odid.DecodeError) as error:
+        except (AuthenticationError, DatagramError, odid.DecodeError) as error:
             self.refused += 1
             _log.warning(
                 "remote id datagram refused",
@@ -196,11 +210,18 @@ async def run(settings: RemoteIdSettings) -> None:
     engine = create_async_engine(str(settings.telemetry_database_url))
     store = PendingRows(writer=RemoteIdWriter(engine))
     geoid = load_geoid(settings.geoid_path)
+    authenticator = None
+    if settings.remote_id_receiver_keys is not None:
+        authenticator = ReceiverAuthenticator(
+            keys=load_keys(settings.remote_id_receiver_keys),
+            max_skew_s=settings.remote_id_max_skew_s,
+        )
     ingest = RemoteIdIngest(
         tracker=RemoteIdTracker(geoid=geoid),
         bus=bus,
         store=store,
         geoid_model=geoid_model(geoid, settings.geoid_path),
+        authenticator=authenticator,
     )
     transport = await listen(
         ingest, settings.remote_id_bind_host, settings.remote_id_bind_port
@@ -211,6 +232,9 @@ async def run(settings: RemoteIdSettings) -> None:
             "host": settings.remote_id_bind_host,
             "port": settings.remote_id_bind_port,
             "geoid": str(settings.geoid_path) if settings.geoid_path else None,
+            "receivers": (
+                sorted(authenticator.keys) if authenticator else "unauthenticated"
+            ),
         },
     )
     stop = asyncio.Event()

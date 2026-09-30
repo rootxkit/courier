@@ -237,3 +237,93 @@ def test_a_geoid_path_loads_the_grid(tmp_path: Any) -> None:
 
     assert geoid is not None
     assert geoid.undulation_m(0.0, 0.0) == pytest.approx(-100.0 + 0.01 * 1900)
+
+
+# --- receiver authentication ----------------------------------------------------
+
+
+def signed(payload: bytes, *, nonce: str = "n-1", key: bytes = bytes(32)) -> bytes:
+    from gateway.remote_id_auth import sign
+
+    report = {
+        "receiver_id": "rx-1",
+        "transmitter": "AA:BB:CC:00:00:01",
+        "payload_hex": payload.hex(),
+        "sent_at_ms": int(NOW.timestamp() * 1000),
+        "nonce": nonce,
+    }
+    return sign(json.dumps(report).encode(), key)
+
+
+def authenticated_ingest(bus: FakeBus) -> RemoteIdIngest:
+    from gateway.remote_id_auth import ReceiverAuthenticator
+
+    service = ingest(bus)
+    service.authenticator = ReceiverAuthenticator(keys={"rx-1": bytes(32)})
+    return service
+
+
+async def test_with_keys_a_signed_datagram_is_published() -> None:
+    bus = FakeBus()
+    service = authenticated_ingest(bus)
+
+    await service.on_datagram(signed(pack(basic(), location())), "10.0.0.7")
+
+    assert len(bus.sent) == 1
+    assert service.refused == 0
+
+
+async def test_with_keys_unsigned_and_forged_datagrams_are_refused() -> None:
+    bus = FakeBus()
+    service = authenticated_ingest(bus)
+
+    await service.on_datagram(datagram(pack(basic(), location())), "10.0.0.7")
+    await service.on_datagram(
+        signed(pack(basic(), location()), key=bytes([1]) * 32), "10.0.0.7"
+    )
+
+    assert bus.sent == []
+    assert service.refused == 2
+
+
+async def test_without_keys_a_signed_datagram_is_still_read() -> None:
+    """A receiver configured to sign keeps working on a loopback test ingest."""
+    bus = FakeBus()
+    await ingest(bus).on_datagram(signed(pack(basic(), location())), "127.0.0.1")
+    assert len(bus.sent) == 1
+
+
+@pytest.mark.parametrize(
+    ("host", "keys", "allowed"),
+    [
+        ("127.0.0.1", None, True),
+        ("::1", None, True),
+        ("localhost", None, True),
+        ("0.0.0.0", None, False),
+        ("10.0.0.5", None, False),
+        ("receiver-gw.local", None, False),
+        ("0.0.0.0", "keys", True),
+    ],
+)
+def test_an_unauthenticated_ingest_only_binds_to_loopback(
+    monkeypatch: pytest.MonkeyPatch, host: str, keys: str | None, allowed: bool
+) -> None:
+    from pydantic import ValidationError
+
+    from gateway.config import RemoteIdSettings
+
+    monkeypatch.setenv("REMOTE_ID_BIND_HOST", host)
+    monkeypatch.setenv("NATS_URL", "nats://127.0.0.1:4222")
+    monkeypatch.setenv(
+        "TELEMETRY_DATABASE_URL", "postgresql+asyncpg://u:p@127.0.0.1:5433/t"
+    )
+    if keys:
+        monkeypatch.setenv("REMOTE_ID_RECEIVER_KEYS", keys)
+    else:
+        monkeypatch.delenv("REMOTE_ID_RECEIVER_KEYS", raising=False)
+
+    if allowed:
+        assert RemoteIdSettings(_env_file=None).remote_id_bind_host == host  # type: ignore[call-arg]
+    else:
+        with pytest.raises(ValidationError, match="REMOTE_ID_RECEIVER_KEYS"):
+            RemoteIdSettings(_env_file=None)  # type: ignore[call-arg]
