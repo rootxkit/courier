@@ -81,7 +81,7 @@ export interface Station {
 export interface Alert {
   state: "raised" | "active" | "cleared";
   key: string;
-  kind: "conflict" | "zone";
+  kind: "conflict" | "zone" | "height";
   severity: "critical" | "warning";
   drone_ids: string[];
   labels: (string | null)[];
@@ -93,6 +93,10 @@ export interface Alert {
     zone_name?: string;
     zone_type?: string;
     alt_amsl_m?: number;
+    height_agl_m?: number;
+    max_height_agl_m?: number;
+    ground_elevation_m?: number;
+    dataset?: string;
   };
 }
 

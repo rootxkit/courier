@@ -80,6 +80,27 @@ export function AlertsPanel({
                   })}
                 </div>
               </>
+            ) : alert.kind === "height" ? (
+              <>
+                <div>
+                  <button
+                    type="button"
+                    className="link"
+                    onClick={() => onSelect(alert.drone_ids[0] ?? "")}
+                  >
+                    {name(alert, 0)}
+                  </button>
+                  {broadcastOnly(alert.drone_ids[0])} {t("above_height_limit")}
+                </div>
+                <div className="small muted">
+                  {t("height_detail", {
+                    h: num(d.height_agl_m, 0),
+                    limit: num(d.max_height_agl_m, 0),
+                    g: num(d.ground_elevation_m, 0),
+                    dataset: d.dataset ?? DASH,
+                  })}
+                </div>
+              </>
             ) : (
               <>
                 <div>
