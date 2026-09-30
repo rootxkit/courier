@@ -9,7 +9,13 @@ import pytest
 
 from gateway import odid
 from gateway.remote_id import RemoteIdTracker
-from gateway.remote_id_ingest import DatagramError, RemoteIdIngest, parse_datagram
+from gateway.remote_id_ingest import (
+    DatagramError,
+    RemoteIdIngest,
+    geoid_model,
+    parse_datagram,
+)
+from gateway.remote_id_store import PendingRows, RemoteIdRow
 from gateway.tests.rid_frames import NOW, FlatGeoid, basic, location, pack
 
 
@@ -35,10 +41,20 @@ def datagram(payload: bytes, **extra: Any) -> bytes:
     return json.dumps(report).encode()
 
 
-def ingest(bus: FakeBus) -> RemoteIdIngest:
+class Rows:
+    def __init__(self) -> None:
+        self.rows: list[RemoteIdRow] = []
+
+    async def write(self, rows: list[RemoteIdRow]) -> None:
+        self.rows.extend(rows)
+
+
+def ingest(bus: FakeBus, store: PendingRows | None = None) -> RemoteIdIngest:
     return RemoteIdIngest(
         tracker=RemoteIdTracker(geoid=FlatGeoid()),
         bus=bus,
+        store=store,
+        geoid_model="flat 20 m",
         clock_s=lambda: 0.0,
         wall=lambda: NOW,
     )
@@ -75,6 +91,58 @@ async def test_a_bus_failure_is_logged_not_raised() -> None:
     await service.on_datagram(datagram(pack(basic(), location())), "127.0.0.1")
 
     assert service.published == 0
+
+
+async def test_a_published_observation_is_also_stored() -> None:
+    rows = Rows()
+    store = PendingRows(writer=rows)
+    payload = pack(basic(), location())
+
+    await ingest(FakeBus(), store).on_datagram(datagram(payload), "127.0.0.1")
+    await store.flush()
+
+    assert len(rows.rows) == 1
+    row = rows.rows[0]
+    assert (row.ts, row.receiver_id, row.payload) == (NOW, "rx-1", payload)
+    assert row.geoid_model == "flat 20 m"
+
+
+async def test_a_bus_failure_does_not_lose_the_record() -> None:
+    rows = Rows()
+    store = PendingRows(writer=rows)
+
+    await ingest(FakeBus(fail=True), store).on_datagram(
+        datagram(pack(basic(), location())), "127.0.0.1"
+    )
+    await store.flush()
+
+    assert len(rows.rows) == 1
+
+
+async def test_refused_and_incomplete_datagrams_store_nothing() -> None:
+    rows = Rows()
+    store = PendingRows(writer=rows)
+    service = ingest(FakeBus(), store)
+
+    await service.on_datagram(b"not json", "127.0.0.1")
+    await service.on_datagram(datagram(location()), "127.0.0.1")
+    await store.flush()
+
+    assert rows.rows == []
+
+
+def test_the_geoid_is_named_by_its_description_or_its_file(tmp_path: Any) -> None:
+    from common.geoid import GeoidGrid
+    from common.tests.test_geoid import pgm
+
+    described = tmp_path / "described.pgm"
+    described.write_bytes(pgm())
+    unnamed = tmp_path / "unnamed.pgm"
+    unnamed.write_bytes(pgm().replace(b"# Description test grid\n", b""))
+
+    assert geoid_model(None, None) is None
+    assert geoid_model(GeoidGrid.load(described), described) == "test grid"
+    assert geoid_model(GeoidGrid.load(unnamed), unnamed) == "unnamed.pgm"
 
 
 async def test_an_incomplete_broadcast_waits_quietly() -> None:

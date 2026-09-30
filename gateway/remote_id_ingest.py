@@ -12,7 +12,9 @@ they hear, as JSON:
 serves every kind of receiver; an adapter for a receiver that decodes on its
 own (a commercial unit's MQTT, say) re-encodes to this rather than adding a
 second decoder. Each completed observation is published as
-`telemetry.<aircraft id>`, beside the Gateway's MAVLink telemetry.
+`telemetry.<aircraft id>`, beside the Gateway's MAVLink telemetry, and
+stored in `remote_id_observations` in the telemetry database, so replay has
+it (`gateway/remote_id_store.py`).
 
 ## What this does not do yet
 
@@ -21,9 +23,6 @@ second decoder. Each completed observation is published as
   deciding how a receiver proves itself, as the relay does for stations
   (relay-v1); until then a datagram is trusted as much as the broadcast it
   claims to carry, which is not at all.
-- **Nothing is stored.** Remote ID aircraft are on the map and in the
-  airspace monitor, and their alerts are in the audit log, but their tracks
-  are not in the telemetry database, so replay does not have them.
 - **An aircraft seen both ways is two tracks.** Matching a broadcast serial
   to a registered aircraft is the rest of P1-15.
 """
@@ -41,17 +40,20 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import nats
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from common import configure_logging, get_logger, load_settings
 from common.geoid import GeoidGrid
 from gateway import odid
 from gateway.config import RemoteIdSettings
 from gateway.publisher import Bus
-from gateway.remote_id import Frame, Geoid, RemoteIdTracker
+from gateway.remote_id import Frame, RemoteIdTracker
+from gateway.remote_id_store import PendingRows, RemoteIdWriter, row_from_observation
 
 _log = get_logger(__name__)
 
 MAX_DATAGRAM_BYTES = 4096
+FLUSH_INTERVAL_S = 0.5
 REQUIRED_FIELDS = ("receiver_id", "transmitter", "payload_hex")
 
 
@@ -99,6 +101,10 @@ def wall_clock() -> datetime:
 class RemoteIdIngest:
     tracker: RemoteIdTracker
     bus: Bus
+    # Where observations are kept; None only in tests that do not look.
+    store: PendingRows | None = None
+    # Which geoid turned HAE into AMSL, recorded with every stored height.
+    geoid_model: str | None = None
     clock_s: Callable[[], float] = time.monotonic
     wall: Callable[[], datetime] = wall_clock
     refused: int = field(default=0, init=False)
@@ -117,6 +123,16 @@ class RemoteIdIngest:
             return
         if observation is None:
             return
+        if self.store is not None:
+            # Before publishing: a bus failure must not lose the record too.
+            self.store.add(
+                row_from_observation(
+                    observation,
+                    ts=frame.received_at,
+                    payload=frame.payload,
+                    geoid_model=self.geoid_model,
+                )
+            )
         try:
             await self.bus.publish(
                 f"telemetry.{observation['drone_id']}",
@@ -152,7 +168,7 @@ async def listen(
     return transport
 
 
-def load_geoid(path: Path | None) -> Geoid | None:
+def load_geoid(path: Path | None) -> GeoidGrid | None:
     if path is None:
         _log.warning(
             "no geoid model configured; Remote ID aircraft will have no AMSL "
@@ -162,10 +178,29 @@ def load_geoid(path: Path | None) -> Geoid | None:
     return GeoidGrid.load(path)
 
 
+def geoid_model(geoid: GeoidGrid | None, path: Path | None) -> str | None:
+    if geoid is None or path is None:
+        return None
+    return geoid.description or path.name
+
+
+async def flush_periodically(store: PendingRows, stop: asyncio.Event) -> None:
+    while not stop.is_set():
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(stop.wait(), FLUSH_INTERVAL_S)
+        await store.flush()
+
+
 async def run(settings: RemoteIdSettings) -> None:
     bus = await nats.connect(str(settings.nats_url))
+    engine = create_async_engine(str(settings.telemetry_database_url))
+    store = PendingRows(writer=RemoteIdWriter(engine))
+    geoid = load_geoid(settings.geoid_path)
     ingest = RemoteIdIngest(
-        tracker=RemoteIdTracker(geoid=load_geoid(settings.geoid_path)), bus=bus
+        tracker=RemoteIdTracker(geoid=geoid),
+        bus=bus,
+        store=store,
+        geoid_model=geoid_model(geoid, settings.geoid_path),
     )
     transport = await listen(
         ingest, settings.remote_id_bind_host, settings.remote_id_bind_port
@@ -183,11 +218,21 @@ async def run(settings: RemoteIdSettings) -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(sig, stop.set)
+    flusher = asyncio.create_task(flush_periodically(store, stop))
     try:
         await stop.wait()
     finally:
         transport.close()
+        stop.set()
+        # The flusher's last pass writes what was still pending.
+        await flusher
+        if store.pending:
+            _log.error(
+                "remote id observations not stored at shutdown",
+                extra={"pending": store.pending},
+            )
         await bus.drain()
+        await engine.dispose()
 
 
 def main() -> None:
