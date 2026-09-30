@@ -1,7 +1,7 @@
 # common
 
-Shared logging and configuration. Every service imports this; nothing here
-imports a service.
+Shared logging and configuration, and the height references more than one
+service needs. Every service imports this; nothing here imports a service.
 
 ## Configuration
 
@@ -53,3 +53,19 @@ from common.startup import start_service
 
 settings, log = start_service(DispatchSettings)
 ```
+
+## Height references
+
+Two services need the same two grids, so they are here rather than in
+either:
+
+- `geoid.py`: geoid undulation (EGM2008 by default), turning a Remote ID
+  height above the ellipsoid into AMSL (P1-15; `gateway/remote_id_ingest.py`).
+- `terrain.py`: ground (surface) elevation from Copernicus DEM tiles, for
+  height above ground (P5-00; `GET /terrain`).
+
+Both read GeographicLib-style PGM files through `pgm.py`. The geoid grid
+covers the globe; terrain covers only the cells fetched, and answers
+"unknown" rather than 0 outside them. Fetching the files is
+`infra/geoid/fetch_geoid.sh` and `python -m tools.terrain_fetch`; see
+`docs/runbooks/p5-00-terrain.md`.
