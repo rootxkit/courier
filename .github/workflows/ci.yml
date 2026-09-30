@@ -306,7 +306,7 @@ jobs:
       SITL_INSTANCE_COUNT: "3"
       # CI test area. Real operating coordinates live in configuration, never
       # in the repository; this is a simulation fixture and nothing else.
-      SITL_HOME: "41.7151,44.8271,450,0"
+      SITL_HOME: "41.7151,44.8271,605,0"
       SITL_SYSID_BASE: "1"
       SITL_OUT_PORT_BASE: "14560"
       # No QGC in CI, so there is nothing to fan out to.
