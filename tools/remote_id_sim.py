@@ -15,6 +15,9 @@ requires, so the simulator needs the same geoid as the ingest to turn the
 AMSL altitude it is asked to fly into what it broadcasts. Without
 `--geoid`, give `--alt-hae-m` directly.
 
+With `--key-file`, datagrams are signed as an authenticated receiver signs
+them (`gateway/remote_id_auth.py`), with that file's key for `--receiver-id`.
+
 Nothing here is a flight instruction: it is test traffic for the monitor.
 """
 
@@ -23,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import secrets
 import socket
 import sys
 import time
@@ -31,6 +35,7 @@ from pathlib import Path
 
 from common.geoid import GeoidGrid
 from gateway import odid
+from gateway.remote_id_auth import load_keys, sign
 
 EARTH_RADIUS_M = 6_371_000.0
 
@@ -114,7 +119,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--speed-ms", type=float, required=True)
     parser.add_argument("--duration-s", type=float, required=True)
     parser.add_argument("--rate-hz", type=float, default=1.0)
+    parser.add_argument(
+        "--key-file", type=Path, help="sign as --receiver-id with this file's key"
+    )
     args = parser.parse_args(argv)
+
+    key = None
+    if args.key_file is not None:
+        keys = load_keys(args.key_file)
+        if args.receiver_id not in keys:
+            parser.error(f"{args.key_file} has no key for {args.receiver_id}")
+        key = keys[args.receiver_id]
 
     if args.alt_amsl_m is not None:
         if args.geoid is None:
@@ -154,7 +169,12 @@ def main(argv: list[str] | None = None) -> int:
                 "payload_hex": payload.hex(),
                 "rssi_dbm": -60,
             }
-            sock.sendto(json.dumps(report).encode(), (args.host, args.port))
+            datagram = json.dumps(report).encode()
+            if key is not None:
+                report["sent_at_ms"] = int(time.time() * 1000)
+                report["nonce"] = secrets.token_hex(8)
+                datagram = sign(json.dumps(report).encode(), key)
+            sock.sendto(datagram, (args.host, args.port))
             sent += 1
             time.sleep(max(0.0, started + sent * period_s - time.monotonic()))
     print(f"sent {sent} broadcasts as {args.ua_id}")
