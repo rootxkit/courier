@@ -47,6 +47,40 @@ python tools/remote_id_sim.py --start-lat <lat> --start-lon <lon> \
     --geoid local/geoid/egm2008-2_5.pgm
 ```
 
+## Signed receivers
+
+A receiver outside this host must prove who it is. Make it a key:
+
+```
+python -m tools.remote_id_keys new rx-tbilisi-1 --file local/remote-id-receivers.keys
+```
+
+This appends `rx-tbilisi-1: <base64>` to the file and prints the key once,
+for the receiver's configuration. Point the ingest at the file and open the
+port:
+
+```
+REMOTE_ID_RECEIVER_KEYS=local/remote-id-receivers.keys
+REMOTE_ID_BIND_HOST=0.0.0.0
+```
+
+The receiver adds `sent_at_ms` (its clock, ms since the epoch) and a unique
+`nonce` to its JSON report. It then appends a line
+`sig=<hex HMAC-SHA256 of the report bytes>`. The ingest refuses:
+
+- an unsigned datagram;
+- an unknown receiver;
+- a wrong signature;
+- a report more than `REMOTE_ID_MAX_SKEW_S` (30 s) from its own clock;
+- a repeated nonce.
+
+Receivers therefore need NTP. To revoke a receiver, delete its line and
+restart the ingest. `tools/remote_id_sim.py --key-file` signs the way a
+receiver does.
+
+Without keys the ingest accepts unsigned datagrams, and it refuses to start
+on anything but loopback.
+
 ## What is kept
 
 Every observation the ingest publishes is also a row of
@@ -106,12 +140,29 @@ they declared themselves airborne.
   - 700.0 m AMSL, through EGM2008;
   - battery, mode and armed all empty, never zero.
 
-## Not yet
+## Our own aircraft broadcasting
 
-- Receivers are not authenticated: keep the ingest on loopback until they
-  are.
-- One of our aircraft that also broadcasts Remote ID appears twice, and
-  would raise a conflict with itself. Matching the broadcast serial to the
-  registered aircraft is the rest of P1-15.
+Register the serial its Remote ID module broadcasts. Through the API,
+`drones.serial` is projected to `known_drones.serial`. The placeholder tool
+does the same:
+
+```
+python tools/register_aircraft.py --label hexa-01 --station tbilisi-base-1 \
+    --sysid 1 --serial 1581F5FKD229400B4X
+```
+
+The ingest matches a broadcast whose serial number (ID type 1 only) is a
+registered, unretired aircraft's. It re-reads the serials every minute.
+
+| The aircraft's MAVLink telemetry | What happens to the broadcast |
+|---|---|
+| Heard within the last 5 s | Stored with `matched_drone_id` and not published. The MAVLink track is the better one. |
+| Quiet | Published as that aircraft: its id and label, still marked as a broadcast. |
+
+Either way it stays one track: it never becomes a second aircraft, and it
+never conflicts with itself. If our link drops, the track stays on the map
+from the broadcast.
+
+## Not yet
 - No real receiver has been connected yet: the decoder is checked against
   the reference library's bytes, not yet against a broadcast in the air.

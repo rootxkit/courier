@@ -436,9 +436,14 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
       (telemetry database) and replays as an unverified broadcast. Rows are
       kept and retried while the database is down; checked by sending 40
       before the table existed.
-      Not yet: a real broadcast and receiver, receiver authentication, and
-      matching a broadcast serial to a registered aircraft, without which
-      one of ours that also broadcasts appears twice.
+      Receivers sign their datagrams with a per-receiver key
+      (HMAC-SHA256, with a time window and a nonce against replays). An
+      ingest without keys refuses to bind beyond loopback.
+      A broadcast whose serial number is one of our registered aircraft's
+      (`known_drones.serial`, projected from `drones.serial`) is withheld
+      while that aircraft's MAVLink telemetry is live, and published as that
+      aircraft when it is not: one track either way.
+      Not yet: a real broadcast and receiver (the done-when above).
 
 - [ ] **P1-16** Manned traffic: ADS-B positions (an RTL-SDR receiver, or an
       aggregator feed where licensing allows) on the map and in the airspace

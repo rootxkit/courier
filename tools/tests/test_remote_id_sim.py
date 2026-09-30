@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import math
+from pathlib import Path
 
 import pytest
 
@@ -46,3 +48,53 @@ def test_a_broadcast_decodes_to_what_was_flown() -> None:
     assert location.speed_horizontal_ms == 8.0
     assert location.status == odid.Status.AIRBORNE
     assert operator.operator_id == "OP-1"
+
+
+def test_with_a_key_file_every_datagram_is_signed_as_the_receiver(
+    tmp_path: Path,
+) -> None:
+    """The simulator's datagrams pass the ingest's own check."""
+    import base64
+    import socket
+    import time
+
+    from gateway.remote_id_auth import ReceiverAuthenticator, load_keys
+    from tools.remote_id_sim import main
+
+    keys = tmp_path / "keys"
+    keys.write_text(f"sim-receiver: {base64.b64encode(bytes(32)).decode()}\n")
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sink:
+        sink.bind(("127.0.0.1", 0))
+        sink.settimeout(2.0)
+        port = sink.getsockname()[1]
+        assert (
+            main(
+                [
+                    "--port",
+                    str(port),
+                    "--start-lat",
+                    "41.7",
+                    "--start-lon",
+                    "44.8",
+                    "--alt-hae-m",
+                    "500",
+                    "--track-deg",
+                    "90",
+                    "--speed-ms",
+                    "5",
+                    "--duration-s",
+                    "0.25",
+                    "--rate-hz",
+                    "10",
+                    "--key-file",
+                    str(keys),
+                ]
+            )
+            == 0
+        )
+        received = [sink.recv(4096) for _ in range(2)]
+
+    auth = ReceiverAuthenticator(keys=load_keys(keys))
+    for datagram in received:
+        report = json.loads(auth.check(datagram, now_s=time.time()))
+        assert report["receiver_id"] == "sim-receiver"

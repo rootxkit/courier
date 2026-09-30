@@ -159,18 +159,19 @@ async def test_an_unregistered_drone_is_not_bindable(engine: AsyncEngine) -> Non
         )
 
 
-async def test_the_projection_carries_the_label(
+async def test_the_projection_carries_the_label_and_the_serial(
     client: AsyncClient, engine: AsyncEngine
 ) -> None:
+    """The serial is what the Remote ID ingest matches broadcasts against."""
     drone = await a_drone(client)
     async with engine.connect() as connection:
-        label: str = (
+        row = (
             await connection.execute(
-                sa.text("SELECT label FROM known_drones WHERE drone_id = :d"),
+                sa.text("SELECT label, serial FROM known_drones WHERE drone_id = :d"),
                 {"d": drone["id"]},
             )
-        ).scalar_one()
-    assert label == drone["label"]
+        ).one()
+    assert (row.label, row.serial) == (drone["label"], drone["serial"])
 
 
 async def test_a_duplicate_label_is_refused_and_projects_nothing(
@@ -216,8 +217,16 @@ async def test_retiring_closes_bindings_and_marks_the_projection(
                 {"d": drone["id"]},
             )
         ).scalar_one()
+        serial: str | None = (
+            await connection.execute(
+                sa.text("SELECT serial FROM known_drones WHERE drone_id = :d"),
+                {"d": drone["id"]},
+            )
+        ).scalar_one()
     assert open_bindings == 0
     assert retired is not None
+    # Retiring keeps the serial: an old broadcast still names the airframe.
+    assert serial == drone["serial"]
 
     again = await client.post(f"/drones/{drone['id']}/retire")
     assert again.status_code == 409
