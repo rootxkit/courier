@@ -75,6 +75,7 @@ _drones = sa.table(
     "known_drones",
     sa.column("drone_id"),
     sa.column("label", sa.Text),
+    sa.column("serial", sa.Text),
     sa.column("registered_at", sa.DateTime(timezone=True)),
     sa.column("retired_at", sa.DateTime(timezone=True)),
 )
@@ -172,22 +173,30 @@ class BindingResolver:
         self._labels: dict[UUID, str] = {}
 
     async def register_drone(
-        self, drone_id: UUID, label: str, *, retired_at: datetime | None = None
+        self,
+        drone_id: UUID,
+        label: str,
+        *,
+        retired_at: datetime | None = None,
+        serial: str | None = None,
     ) -> None:
         """Record that the telemetry database may attribute telemetry here.
 
         A projection of the relational fleet registry, which the Gateway
         cannot reach. Keeping the two in step is the API's job.
+
+        `serial` is what the Remote ID ingest matches a broadcast against
+        (P1-15). None leaves a serial already projected as it is.
         """
+        values: dict[str, object] = {"label": label, "retired_at": retired_at}
+        if serial is not None:
+            values["serial"] = serial
         try:
             async with self.engine.begin() as connection:
                 await connection.execute(
                     pg_insert(_drones)
-                    .values(drone_id=drone_id, label=label, retired_at=retired_at)
-                    .on_conflict_do_update(
-                        index_elements=["drone_id"],
-                        set_={"label": label, "retired_at": retired_at},
-                    )
+                    .values(drone_id=drone_id, **values)
+                    .on_conflict_do_update(index_elements=["drone_id"], set_=values)
                 )
         except SQLAlchemyError as error:
             raise StoreError(f"could not register drone: {error}") from error

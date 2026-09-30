@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
@@ -96,3 +96,62 @@ async def test_a_repeat_is_one_row_and_a_second_receiver_is_another(
 async def test_an_amsl_height_must_name_its_geoid(engine: AsyncEngine) -> None:
     with pytest.raises(sa.exc.IntegrityError):
         await RemoteIdWriter(engine).write([replace(a_row(), geoid_model=None)])
+
+
+async def test_the_serials_of_our_active_aircraft_are_read_for_matching(
+    engine: AsyncEngine,
+) -> None:
+    from gateway.binding import BindingResolver
+    from gateway.remote_id_match import FleetSerials
+
+    resolver = BindingResolver(engine=engine)
+    active, retired, unnamed = uuid4(), uuid4(), uuid4()
+    serial = f"SN-{active.hex[:8]}"
+    await resolver.register_drone(active, f"a-{active.hex[:6]}", serial=serial)
+    await resolver.register_drone(
+        retired,
+        f"r-{retired.hex[:6]}",
+        serial=f"SN-{retired.hex[:8]}",
+        retired_at=NOW,
+    )
+    await resolver.register_drone(unnamed, f"u-{unnamed.hex[:6]}")
+    # Re-registering without a serial keeps the one projected.
+    await resolver.register_drone(active, f"a-{active.hex[:6]}")
+
+    fleet = FleetSerials()
+    await fleet.refresh(engine)
+
+    assert fleet.by_serial[serial].drone_id == active
+    assert f"SN-{retired.hex[:8]}" not in fleet.by_serial
+    assert unnamed not in {r.drone_id for r in fleet.by_serial.values()}
+
+
+async def test_two_aircraft_cannot_share_a_serial(engine: AsyncEngine) -> None:
+    from gateway.binding import BindingResolver
+    from gateway.ingest_store import StoreError
+
+    resolver = BindingResolver(engine=engine)
+    serial = f"SN-{uuid4().hex[:8]}"
+    await resolver.register_drone(uuid4(), f"x-{serial}", serial=serial)
+    with pytest.raises(StoreError):
+        await resolver.register_drone(uuid4(), f"y-{serial}", serial=serial)
+
+
+async def test_the_matched_aircraft_is_stored_with_the_observation(
+    engine: AsyncEngine,
+) -> None:
+    ours = uuid4()
+    row = replace(a_row(), matched_drone_id=ours)
+    await RemoteIdWriter(engine).write([row])
+
+    async with engine.connect() as connection:
+        matched: UUID | None = (
+            await connection.execute(
+                sa.text(
+                    "SELECT matched_drone_id FROM remote_id_observations "
+                    "WHERE aircraft_id = :id"
+                ),
+                {"id": row.aircraft_id},
+            )
+        ).scalar_one()
+    assert matched == ours

@@ -14,7 +14,8 @@ own (a commercial unit's MQTT, say) re-encodes to this rather than adding a
 second decoder. Each completed observation is published as
 `telemetry.<aircraft id>`, beside the Gateway's MAVLink telemetry, and
 stored in `remote_id_observations` in the telemetry database, so replay has
-it (`gateway/remote_id_store.py`).
+it (`gateway/remote_id_store.py`). A broadcast whose serial is one of our
+registered aircraft is not a second aircraft (`gateway/remote_id_match.py`).
 
 ## Receivers
 
@@ -22,10 +23,6 @@ With `REMOTE_ID_RECEIVER_KEYS` set, every datagram must be signed by a known
 receiver, recently, and only once (`gateway/remote_id_auth.py`). Without it
 the ingest accepts unsigned datagrams, and `gateway/config.py` then refuses to
 bind anywhere but loopback.
-
-## What this does not do yet
-- **An aircraft seen both ways is two tracks.** Matching a broadcast serial
-  to a registered aircraft is the rest of P1-15.
 """
 
 from __future__ import annotations
@@ -41,7 +38,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import nats
-from sqlalchemy.ext.asyncio import create_async_engine
+from nats.aio.msg import Msg
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from common import configure_logging, get_logger, load_settings
 from common.geoid import GeoidGrid
@@ -55,12 +54,16 @@ from gateway.remote_id_auth import (
     load_keys,
     split,
 )
+from gateway.remote_id_match import FleetSerials, LinkFreshness, as_registered
 from gateway.remote_id_store import PendingRows, RemoteIdWriter, row_from_observation
 
 _log = get_logger(__name__)
 
 MAX_DATAGRAM_BYTES = 4096
 FLUSH_INTERVAL_S = 0.5
+# How often the registered serials are re-read, so an aircraft registered
+# while the ingest runs is matched without a restart.
+SERIALS_REFRESH_S = 60.0
 REQUIRED_FIELDS = ("receiver_id", "transmitter", "payload_hex")
 
 
@@ -114,10 +117,16 @@ class RemoteIdIngest:
     geoid_model: str | None = None
     # None: unsigned datagrams are accepted (loopback only, gateway/config.py).
     authenticator: ReceiverAuthenticator | None = None
+    # Our aircraft's serials, and whether their own telemetry is live.
+    fleet: FleetSerials = field(default_factory=FleetSerials)
+    links: LinkFreshness = field(default_factory=LinkFreshness)
     clock_s: Callable[[], float] = time.monotonic
     wall: Callable[[], datetime] = wall_clock
     refused: int = field(default=0, init=False)
     published: int = field(default=0, init=False)
+    # Broadcasts by our own aircraft while their telemetry was live: stored,
+    # not published.
+    withheld: int = field(default=0, init=False)
 
     async def on_datagram(self, data: bytes, source: str) -> None:
         received_at = self.wall()
@@ -137,6 +146,7 @@ class RemoteIdIngest:
             return
         if observation is None:
             return
+        ours = self.fleet.match(observation)
         if self.store is not None:
             # Before publishing: a bus failure must not lose the record too.
             self.store.add(
@@ -145,8 +155,14 @@ class RemoteIdIngest:
                     ts=frame.received_at,
                     payload=frame.payload,
                     geoid_model=self.geoid_model,
+                    matched_drone_id=None if ours is None else ours.drone_id,
                 )
             )
+        if ours is not None:
+            if self.links.live(ours.drone_id, now_s=self.clock_s()):
+                self.withheld += 1
+                return
+            observation = as_registered(observation, ours)
         try:
             await self.bus.publish(
                 f"telemetry.{observation['drone_id']}",
@@ -205,6 +221,22 @@ async def flush_periodically(store: PendingRows, stop: asyncio.Event) -> None:
         await store.flush()
 
 
+async def refresh_serials_periodically(
+    fleet: FleetSerials, engine: AsyncEngine, stop: asyncio.Event
+) -> None:
+    while not stop.is_set():
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(stop.wait(), SERIALS_REFRESH_S)
+        if stop.is_set():
+            return
+        try:
+            await fleet.refresh(engine)
+        except (SQLAlchemyError, OSError) as error:
+            # Keep the serials we have: a database hiccup must not make our
+            # aircraft appear twice.
+            _log.error("could not re-read serials", extra={"error": repr(error)})
+
+
 async def run(settings: RemoteIdSettings) -> None:
     bus = await nats.connect(str(settings.nats_url))
     engine = create_async_engine(str(settings.telemetry_database_url))
@@ -216,13 +248,21 @@ async def run(settings: RemoteIdSettings) -> None:
             keys=load_keys(settings.remote_id_receiver_keys),
             max_skew_s=settings.remote_id_max_skew_s,
         )
+    fleet = FleetSerials()
+    await fleet.refresh(engine)
     ingest = RemoteIdIngest(
         tracker=RemoteIdTracker(geoid=geoid),
         bus=bus,
         store=store,
         geoid_model=geoid_model(geoid, settings.geoid_path),
         authenticator=authenticator,
+        fleet=fleet,
     )
+
+    async def on_telemetry(message: Msg) -> None:
+        ingest.links.on_telemetry(message.data, now_s=ingest.clock_s())
+
+    await bus.subscribe("telemetry.*", cb=on_telemetry)
     transport = await listen(
         ingest, settings.remote_id_bind_host, settings.remote_id_bind_port
     )
@@ -232,6 +272,7 @@ async def run(settings: RemoteIdSettings) -> None:
             "host": settings.remote_id_bind_host,
             "port": settings.remote_id_bind_port,
             "geoid": str(settings.geoid_path) if settings.geoid_path else None,
+            "serials_matched": len(fleet.by_serial),
             "receivers": (
                 sorted(authenticator.keys) if authenticator else "unauthenticated"
             ),
@@ -243,6 +284,7 @@ async def run(settings: RemoteIdSettings) -> None:
         with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(sig, stop.set)
     flusher = asyncio.create_task(flush_periodically(store, stop))
+    refresher = asyncio.create_task(refresh_serials_periodically(fleet, engine, stop))
     try:
         await stop.wait()
     finally:
@@ -250,6 +292,7 @@ async def run(settings: RemoteIdSettings) -> None:
         stop.set()
         # The flusher's last pass writes what was still pending.
         await flusher
+        await refresher
         if store.pending:
             _log.error(
                 "remote id observations not stored at shutdown",

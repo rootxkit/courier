@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from uuid import UUID
 
 import pytest
 
@@ -327,3 +328,87 @@ def test_an_unauthenticated_ingest_only_binds_to_loopback(
     else:
         with pytest.raises(ValidationError, match="REMOTE_ID_RECEIVER_KEYS"):
             RemoteIdSettings(_env_file=None)  # type: ignore[call-arg]
+
+
+# --- one of ours broadcasting (serial match) --------------------------------------
+
+
+def ours_ingest(bus: FakeBus, store: PendingRows | None = None) -> RemoteIdIngest:
+    from gateway.remote_id_match import FleetSerials, Registered
+
+    service = ingest(bus, store)
+    service.fleet = FleetSerials(
+        by_serial={"SN-RID-0001": Registered(drone_id=UUID(int=42), label="hexa-01")}
+    )
+    return service
+
+
+async def test_our_aircraft_broadcasting_while_its_link_is_live_is_not_a_second_track() -> (
+    None
+):
+    bus = FakeBus()
+    rows = Rows()
+    store = PendingRows(writer=rows)
+    service = ours_ingest(bus, store)
+    service.links.on_telemetry(
+        json.dumps({"drone_id": str(UUID(int=42))}).encode(), now_s=0.0
+    )
+
+    await service.on_datagram(datagram(pack(basic(), location())), "127.0.0.1")
+    await store.flush()
+
+    assert bus.sent == []
+    assert service.withheld == 1
+    assert rows.rows[0].matched_drone_id == UUID(int=42)
+
+
+async def test_when_its_link_is_quiet_the_broadcast_is_published_as_that_aircraft() -> (
+    None
+):
+    bus = FakeBus()
+    service = ours_ingest(bus)
+
+    await service.on_datagram(datagram(pack(basic(), location())), "127.0.0.1")
+
+    [(subject, message)] = bus.sent
+    assert subject == f"telemetry.{UUID(int=42)}"
+    assert (message["drone_id"], message["label"]) == (str(UUID(int=42)), "hexa-01")
+    assert message["source"] == "remote_id"
+    assert message["remote_id"]["matched"] is True
+
+
+async def test_a_stranger_stays_a_stranger() -> None:
+    bus = FakeBus()
+    rows = Rows()
+    store = PendingRows(writer=rows)
+    service = ours_ingest(bus, store)
+
+    await service.on_datagram(
+        datagram(pack(basic("SN-STRANGER"), location())), "127.0.0.1"
+    )
+    await store.flush()
+
+    [(_, message)] = bus.sent
+    assert message["drone_id"] != str(UUID(int=42))
+    assert "matched" not in message["remote_id"]
+    assert rows.rows[0].matched_drone_id is None
+
+
+async def test_the_broadcast_takes_over_once_the_link_has_been_quiet_long_enough() -> (
+    None
+):
+    bus = FakeBus()
+    service = ours_ingest(bus)
+    now = [0.0]
+    service.clock_s = lambda: now[0]
+    service.links.on_telemetry(
+        json.dumps({"drone_id": str(UUID(int=42))}).encode(), now_s=0.0
+    )
+
+    for now[0] in (1.0, 4.9):
+        await service.on_datagram(datagram(pack(basic(), location())), "127.0.0.1")
+    assert bus.sent == []
+
+    now[0] = 5.1
+    await service.on_datagram(datagram(pack(basic(), location())), "127.0.0.1")
+    assert [subject for subject, _ in bus.sent] == [f"telemetry.{UUID(int=42)}"]

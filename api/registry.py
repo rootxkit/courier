@@ -95,7 +95,12 @@ class TelemetryProjection(Protocol):
     """
 
     async def register_drone(
-        self, drone_id: UUID, label: str, *, retired_at: datetime | None = None
+        self,
+        drone_id: UUID,
+        label: str,
+        *,
+        retired_at: datetime | None = None,
+        serial: str | None = None,
     ) -> None: ...
 
     async def close_bindings_for_drone(
@@ -413,7 +418,9 @@ class FleetRegistry:
                     connection, "drone", drone["id"], "registered", drone, actor=actor
                 )
                 # Last, and inside the transaction: see the module docstring.
-                await self.projection.register_drone(drone["id"], label)
+                await self.projection.register_drone(
+                    drone["id"], label, serial=drone["serial"]
+                )
         except IntegrityError as error:
             raise ConflictError(f"drone {label!r} refused: {error.orig}") from error
         _log.info(

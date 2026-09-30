@@ -65,6 +65,8 @@ class RemoteIdRow:
     operator_lon_deg: float | None
     rssi_dbm: float | None
     payload: bytes
+    # Which of our aircraft the broadcast serial matched, if any (P1-15).
+    matched_drone_id: UUID | None = None
 
 
 def row_from_observation(
@@ -73,6 +75,7 @@ def row_from_observation(
     ts: datetime,
     payload: bytes,
     geoid_model: str | None,
+    matched_drone_id: UUID | None = None,
 ) -> RemoteIdRow:
     """The row for an observation as `gateway/remote_id.py` builds it."""
     rid = observation["remote_id"]
@@ -104,6 +107,7 @@ def row_from_observation(
         operator_lon_deg=rid["operator_lon_deg"],
         rssi_dbm=rid["rssi_dbm"],
         payload=payload,
+        matched_drone_id=matched_drone_id,
     )
 
 
@@ -120,7 +124,7 @@ _INSERT = sa.text(
         aircraft_id, ts, receiver_id, transmitter, ua_id, id_type, ua_type,
         status, geom, alt_hae_m, alt_amsl_m, geoid_model, alt_above_takeoff_m,
         track_deg, vx_ms, vy_ms, vz_ms, groundspeed_ms, climb_ms,
-        operator_id, operator_geom, rssi_dbm, payload
+        operator_id, operator_geom, rssi_dbm, payload, matched_drone_id
     ) VALUES (
         :aircraft_id, :ts, :receiver_id, :transmitter, :ua_id, :id_type,
         :ua_type, :status,
@@ -129,7 +133,7 @@ _INSERT = sa.text(
         :track_deg, :vx_ms, :vy_ms, :vz_ms, :groundspeed_ms, :climb_ms,
         :operator_id,
         ST_SetSRID(ST_MakePoint(:operator_lon_deg, :operator_lat_deg), 4326),
-        :rssi_dbm, :payload
+        :rssi_dbm, :payload, :matched_drone_id
     )
     ON CONFLICT (aircraft_id, ts, receiver_id) DO NOTHING
     """
@@ -174,6 +178,9 @@ def _parameters(row: RemoteIdRow) -> dict[str, object]:
         "operator_lon_deg": row.operator_lon_deg,
         "rssi_dbm": row.rssi_dbm,
         "payload": row.payload,
+        "matched_drone_id": (
+            None if row.matched_drone_id is None else str(row.matched_drone_id)
+        ),
     }
 
 
