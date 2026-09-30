@@ -6,8 +6,11 @@ difference is the geoid undulation N, so that
 
     alt_amsl_m = alt_hae_m - N(lat, lon)
 
-N comes from the EGM96 model, in the grid GeographicLib distributes
-(`egm96-15.pgm`: a 15-minute grid, fetched by `infra/geoid/fetch_geoid.sh`).
+N comes from EGM2008 (`egm2008-2_5.pgm`, a 2.5-minute grid, the default)
+or EGM96 (`egm96-15.pgm`), as GeographicLib distributes them and
+`infra/geoid/fetch_geoid.sh` fetches them. EGM2008 is the one the terrain
+(Copernicus DEM, P5-00) is on; over Georgia the two differ by -2.3 to
++4.7 m (1.2 m at Tbilisi).
 The file format and the interpolation are read from GeographicLib's own
 reader (`src/Geoid.cpp`, `include/GeographicLib/Geoid.hpp`), not from memory:
 
@@ -31,6 +34,9 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 
+from common import pgm
+from common.pgm import Pgm
+
 
 class GeoidFileError(ValueError):
     """A file that is not a geoid grid this reader understands."""
@@ -42,7 +48,7 @@ class GeoidGrid:
     height: int
     offset_m: float
     scale_m: float
-    samples: bytes  # width * height big-endian uint16
+    grid: Pgm
 
     @classmethod
     def load(cls, path: Path) -> GeoidGrid:
@@ -50,58 +56,25 @@ class GeoidGrid:
 
     @classmethod
     def parse(cls, data: bytes) -> GeoidGrid:
-        position = 0
-
-        def line() -> bytes:
-            nonlocal position
-            end = data.find(b"\n", position)
-            if end < 0:
-                raise GeoidFileError("header ends before the data")
-            text = data[position:end].strip()
-            position = end + 1
-            return text
-
-        if line() != b"P5":
-            raise GeoidFileError("not a binary PGM (P5)")
-        offset: float | None = None
-        scale: float | None = None
-        while True:
-            text = line()
-            if not text:
-                continue
-            if not text.startswith(b"#"):
-                break
-            words = text.split()
-            if len(words) >= 3 and words[1] == b"Offset":
-                offset = float(words[2])
-            elif len(words) >= 3 and words[1] == b"Scale":
-                scale = float(words[2])
         try:
-            width, height = (int(word) for word in text.split())
-            maxval = int(line())
-        except ValueError as error:
-            raise GeoidFileError(
-                f"unreadable raster size or maxval: {error}"
-            ) from error
-        if maxval != 0xFFFF:
-            raise GeoidFileError(f"maxval {maxval}, expected 65535")
-        if offset is None or scale is None:
-            raise GeoidFileError("no Offset or Scale in the header")
+            grid = pgm.parse(data)
+            offset, scale = grid.number("Offset"), grid.number("Scale")
+        except pgm.PgmError as error:
+            raise GeoidFileError(str(error)) from error
         if scale <= 0:
             raise GeoidFileError("Scale must be positive")
+        width, height = grid.width, grid.height
         if width < 2 or height < 2 or width % 2 or not height % 2:
             raise GeoidFileError(f"a {width} x {height} raster is not a geoid grid")
-        samples = data[position:]
-        if len(samples) != 2 * width * height:
-            raise GeoidFileError(
-                f"{len(samples)} bytes of samples, expected {2 * width * height}"
-            )
-        return cls(width, height, offset, scale, samples)
+        return cls(width, height, offset, scale, grid)
+
+    @property
+    def description(self) -> str:
+        """The grid's own `# Description` line, e.g. "WGS84 EGM2008, 2.5-minute grid"."""
+        return self.grid.header.get("Description", "")
 
     def _raw(self, ix: int, iy: int) -> int:
-        ix %= self.width
-        at = 2 * (iy * self.width + ix)
-        return (self.samples[at] << 8) | self.samples[at + 1]
+        return self.grid.raw(ix % self.width, iy)
 
     def undulation_m(self, lat_deg: float, lon_deg: float) -> float:
         if not (math.isfinite(lat_deg) and math.isfinite(lon_deg)):

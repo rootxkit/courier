@@ -42,6 +42,7 @@ from api.registry import (
 )
 from api.replay import DroneNotFoundError, ReplayError, ReplayStore, WindowTooLargeError
 from api.zones import ZoneReader
+from common.terrain import Terrain
 
 MAX_EVENTS_PER_PAGE = 1_000
 MAX_FLIGHTS_PER_PAGE = 200
@@ -135,6 +136,17 @@ class ZoneOut(BaseModel):
     geometry: dict[str, Any]
 
 
+class TerrainOut(BaseModel):
+    lat_deg: float
+    lon_deg: float
+    # Orthometric height of the surface (roofs, canopy) on EGM2008.
+    elevation_m: float
+    # "COP-DEM GLO-30", "COP-DEM GLO-90", or "sea".
+    dataset: str
+    spacing_m: float
+    vertical_datum: str
+
+
 class EventOut(BaseModel):
     id: int
     ts: datetime
@@ -182,6 +194,7 @@ def create_api_app(
     basemap_dir: Path | None = None,
     console_feed_url: str | None = None,
     console_app_dir: Path | None = None,
+    terrain: Terrain | None = None,
 ) -> FastAPI:
     """The API. `auth` is required: there is no way to build it open.
 
@@ -320,6 +333,29 @@ def create_api_app(
         if zone_reader is None:
             raise HTTPException(status_code=503, detail="no relational database")
         return await zone_reader.zones()
+
+    # --- terrain (P5-00) -------------------------------------------------------
+
+    @app.get("/terrain", response_model=TerrainOut)
+    async def terrain_at(
+        _: Annotated[Operator, Depends(viewer)],
+        lat_deg: float = Query(ge=-90.0, le=90.0),
+        lon_deg: float = Query(ge=-180.0, le=180.0),
+    ) -> dict[str, Any]:
+        """Surface elevation at a point: 404 where it is not known, never 0."""
+        if terrain is None:
+            raise HTTPException(status_code=503, detail="no terrain installed")
+        found = terrain.elevation(lat_deg, lon_deg)
+        if found is None:
+            raise HTTPException(status_code=404, detail="elevation not known here")
+        return {
+            "lat_deg": lat_deg,
+            "lon_deg": lon_deg,
+            "elevation_m": round(found.elevation_m, 1),
+            "dataset": found.dataset,
+            "spacing_m": round(found.spacing_m, 1),
+            "vertical_datum": "EGM2008",
+        }
 
     # --- audit (P2-06) --------------------------------------------------------
 
