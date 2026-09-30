@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import ipaddress
 from pathlib import Path
-from typing import Self
 
-from pydantic import Field, model_validator
+from pydantic import Field
 
 from common import (
     NatsSettings,
@@ -82,58 +80,3 @@ class GatewaySettings(
     retention_sweep_interval_s: float = Field(
         default=3600.0, gt=0.0, validation_alias="RETENTION_SWEEP_INTERVAL_S"
     )
-
-
-class RemoteIdSettings(ServiceSettings, NatsSettings, TelemetryDatabaseSettings):
-    """Remote ID ingest (P1-15): receiver datagrams in, telemetry out.
-
-    Needs the bus, and the telemetry database, where it keeps what it heard
-    (`remote_id_observations`). Never the relational one.
-    """
-
-    service_name: str = "remote-id-ingest"
-    remote_id_bind_host: str = Field(
-        default="127.0.0.1", validation_alias="REMOTE_ID_BIND_HOST"
-    )
-    # A file of `receiver_id: base64 key` lines (tools/remote_id_keys.py).
-    # Unset: unsigned datagrams are accepted, so the bind must be loopback.
-    remote_id_receiver_keys: Path | None = Field(
-        default=None, validation_alias="REMOTE_ID_RECEIVER_KEYS"
-    )
-    # How far a signed report's time may be from the ingest's before it is
-    # refused as a replay. Receivers need a clock set to within this (NTP).
-    remote_id_max_skew_s: float = Field(
-        default=30.0, gt=0, validation_alias="REMOTE_ID_MAX_SKEW_S"
-    )
-    remote_id_bind_port: int = Field(
-        default=14600, ge=1, le=65535, validation_alias="REMOTE_ID_BIND_PORT"
-    )
-    # A geoid model file (EGM2008 by default, infra/geoid/fetch_geoid.sh).
-    # Without one, Remote ID aircraft have no AMSL altitude and the airspace
-    # monitor does not evaluate them.
-    geoid_path: Path | None = Field(default=None, validation_alias="GEOID_PATH")
-
-    @model_validator(mode="after")
-    def unsigned_only_on_loopback(self) -> Self:
-        """Without receiver keys, anything that reaches the port can put an
-        aircraft on the map and in the airspace monitor. That is acceptable
-        only when nothing but this host can reach it."""
-        if self.remote_id_receiver_keys is None and not _is_loopback(
-            self.remote_id_bind_host
-        ):
-            raise ValueError(
-                f"REMOTE_ID_BIND_HOST={self.remote_id_bind_host} accepts "
-                "datagrams from other hosts; set REMOTE_ID_RECEIVER_KEYS so "
-                "they must be signed, or bind to 127.0.0.1"
-            )
-        return self
-
-
-def _is_loopback(host: str) -> bool:
-    if host == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        # A host name other than localhost may resolve anywhere.
-        return False
