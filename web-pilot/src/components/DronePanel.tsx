@@ -74,7 +74,9 @@ export function DronePanel({ droneId, aircraft, alerts, now, onClose }: Props) {
                   {t(alert.severity)} ·{" "}
                   {alert.kind === "conflict"
                     ? t("conflict")
-                    : t("in_zone", { zone: alert.detail.zone_name ?? DASH })}
+                    : alert.kind === "height"
+                      ? t("above_height_limit")
+                      : t("in_zone", { zone: alert.detail.zone_name ?? DASH })}
                 </li>
               ))}
             </ul>

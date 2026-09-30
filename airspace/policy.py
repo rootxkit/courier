@@ -1,4 +1,4 @@
-"""Separation policy from the database. P5-07.
+"""Separation policy and the height limit from the database. P5-07, P5-19.
 
 The thresholds are airspace policy, edited by operators and audited, so they
 live in the relational database (`airspace_policy`, one row) and never in
@@ -38,3 +38,17 @@ async def load_policy(engine: AsyncEngine) -> SeparationPolicy:
         d_vertical_min_m=float(row.d_vertical_min_m),
         neighbour_radius_m=float(row.neighbour_radius_m),
     )
+
+
+_HEIGHT_LIMIT = sa.text("SELECT max_height_agl_m FROM airspace_policy WHERE id = 1")
+
+
+async def load_height_limit(engine: AsyncEngine) -> float | None:
+    """The maximum height above ground, in metres; None when none is set."""
+    async with engine.connect() as connection:
+        row = (await connection.execute(_HEIGHT_LIMIT)).one_or_none()
+    if row is None:
+        raise PolicyMissingError(
+            "airspace_policy has no row; run the relational migrations"
+        )
+    return None if row.max_height_agl_m is None else float(row.max_height_agl_m)
