@@ -877,13 +877,25 @@ P5-08, P5-09, P5-16, P5-12, then P5-13 and P5-14. The strategic layer
       re-importing a new version replaces the old one with the change logged.
       *Added* 2026-09-29 with the owner, for the monitoring direction.
 
-- [ ] **P5-19** Altitude limit: alert when an aircraft is above the open
+- [x] **P5-19** Altitude limit: alert when an aircraft is above the open
       category's height limit over the ground. The limit is configuration,
       not code; the height needs terrain (P5-00), because telemetry carries
       height above home, not above ground.
       *Done when:* a SITL aircraft climbing over the limit above sloping
       terrain raises the alert at the right point.
       *Added* 2026-09-29 with the owner, for the monitoring direction.
+      **Done 2026-09-30.**
+      - The limit is `airspace_policy.max_height_agl_m`, seeded with 120 m,
+        the owner's figure. There is no minimum; the owner has none.
+      - The airspace monitor warns when AMSL altitude minus the DEM exceeds
+        the limit, for armed aircraft and for Remote ID aircraft declared
+        airborne. Where the ground is unknown, the limit is not evaluated.
+      - The console shows the height, the limit, the ground and the DEM.
+      - SITL at Kazbegi held 1,861 m AMSL over ground falling away. The
+        monitor raised the warning at 120.3 m above ground. The flight
+        controller's own terrain crossed 120 m 3 s later, and the warning
+        cleared on the way back.
+      - Details: `docs/runbooks/p5-airspace-monitor.md`.
 
 ---
 

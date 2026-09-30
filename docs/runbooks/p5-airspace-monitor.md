@@ -1,4 +1,4 @@
-# Airspace monitor: conflicts and zone incursions, live
+# Airspace monitor: conflicts, zone incursions and the height limit, live
 
 `python -m airspace` follows the Gateway's `telemetry.*`, and for **armed**
 aircraft raises:
@@ -7,10 +7,16 @@ aircraft raises:
   (`ARCHITECTURE.md` §7.2) is within `t_cpa_max_s`, closer than
   `d_horizontal_min_m` horizontally and `d_vertical_min_m` vertically;
 - a **zone** alert when an aircraft is inside a `no_fly` (critical) or
-  `restricted` (warning) zone of `airspace_zones`, within its AMSL band.
+  `restricted` (warning) zone of `airspace_zones`, within its AMSL band;
+- a **height** warning (P5-19) when an aircraft is more than
+  `max_height_agl_m` above the ground under it. Height above ground is its
+  AMSL altitude minus the DEM (P5-00). Where the ground elevation is unknown,
+  the limit is not evaluated.
 
 Thresholds are the single row of `airspace_policy` in the relational
-database, seeded with the Stage 0 values: 60 s, 60 m, 20 m, 800 m radius.
+database, seeded with the Stage 0 values: 60 s, 60 m, 20 m, 800 m radius,
+and a height limit of 120 m (the owner's figure; there is no minimum). Remote
+ID aircraft declared airborne are evaluated like armed ones.
 Each alert is published on `alert.<key>`, written to `events` when raised
 and when cleared, and republished every second while active so the console's
 numbers are current. The console lists active alerts, sounds a tone for an
@@ -24,7 +30,13 @@ python -m airspace               # needs DATABASE_URL, NATS_URL (.env)
 ```
 
 The Gateway and the console must be running for anything to reach it or be
-seen. Zones are re-read every minute.
+seen. `TERRAIN_DIR` (`docs/runbooks/p5-00-terrain.md`) is needed for the
+height limit. Without it, the service logs at start-up that the limit will
+not be evaluated. Zones and the height limit are re-read every minute:
+
+```sql
+UPDATE airspace_policy SET max_height_agl_m = 150;   -- NULL: no limit
+```
 
 ## Result, 2026-09-29
 
@@ -71,3 +83,23 @@ head-on alert with both labels and a critical badge.
   (that deceleration hid a real conflict); the record does not support it.
   The case where slowing *does* hide a conflict - an aircraft slowing to
   hover near another - is still worth a scenario of its own under P5-12.
+
+## Height limit, 2026-09-30
+
+One SITL aircraft at Kazbegi (`local\capacity\run\58-height-limit.bat`)
+held 100 m above home, 1,861 m AMSL, and flew 1 km north and back. Neither
+its altitude nor its height above home changed. Only the ground did: it
+falls from 1,761 m at home to about 1,720 m.
+
+| | Time (UTC) | Height above ground | Ground |
+|---|---|---|---|
+| Monitor raised the warning | 06:38:03 | 120.3 m | 1,740.2 m (COP-DEM GLO-30) |
+| Flight controller's own `TERRAIN_REPORT` crossed 120 m | 06:38:06 | 120.2 m | 1,740.4 m (ArduPilot terrain) |
+| Flight controller back under 120 m | 06:39:36 | 119.9 m | 1,741.2 m |
+| Monitor cleared the warning | 06:39:42 | | |
+
+The monitor raised the warning within 0.3 m of the limit. The flight
+controller, working from an independent terrain source, crossed the same
+line 3 s (about 30 m of flight) later. The warning cleared once the
+aircraft had been below the limit for longer than the hysteresis. Both
+transitions are in `events`.
