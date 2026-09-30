@@ -751,6 +751,44 @@
         "title": "RoleIn",
         "type": "object"
       },
+      "TerrainOut": {
+        "properties": {
+          "dataset": {
+            "title": "Dataset",
+            "type": "string"
+          },
+          "elevation_m": {
+            "title": "Elevation M",
+            "type": "number"
+          },
+          "lat_deg": {
+            "title": "Lat Deg",
+            "type": "number"
+          },
+          "lon_deg": {
+            "title": "Lon Deg",
+            "type": "number"
+          },
+          "spacing_m": {
+            "title": "Spacing M",
+            "type": "number"
+          },
+          "vertical_datum": {
+            "title": "Vertical Datum",
+            "type": "string"
+          }
+        },
+        "required": [
+          "lat_deg",
+          "lon_deg",
+          "elevation_m",
+          "dataset",
+          "spacing_m",
+          "vertical_datum"
+        ],
+        "title": "TerrainOut",
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -1895,6 +1933,59 @@
           }
         },
         "summary": "Flights"
+      }
+    },
+    "/terrain": {
+      "get": {
+        "description": "Surface elevation at a point: 404 where it is not known, never 0.",
+        "operationId": "terrain_at_terrain_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "lat_deg",
+            "required": true,
+            "schema": {
+              "maximum": 90.0,
+              "minimum": -90.0,
+              "title": "Lat Deg",
+              "type": "number"
+            }
+          },
+          {
+            "in": "query",
+            "name": "lon_deg",
+            "required": true,
+            "schema": {
+              "maximum": 180.0,
+              "minimum": -180.0,
+              "title": "Lon Deg",
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TerrainOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Terrain At"
       }
     }
   }

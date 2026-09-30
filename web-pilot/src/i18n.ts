@@ -87,6 +87,8 @@ const en = {
   rid_signal: "Signal",
   altitude_hae: "Altitude (ellipsoid)",
   track: "Track",
+  ground_elevation: "Ground elevation",
+  above_ground: "Above ground (approx.)",
 };
 
 type Key = keyof typeof en;
@@ -177,6 +179,8 @@ const ka: Partial<Record<Key, string>> = {
   rid_signal: "სიგნალი",
   altitude_hae: "სიმაღლე (ელიფსოიდიდან)",
   track: "მიმართულება",
+  ground_elevation: "მიწის სიმაღლე",
+  above_ground: "მიწიდან (მიახლ.)",
 };
 
 export type Lang = "en" | "ka";

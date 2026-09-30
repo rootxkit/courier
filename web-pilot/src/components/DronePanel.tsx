@@ -2,6 +2,7 @@
 // not here: there are no missions yet (P3).
 import { DASH, ageSeconds, num, shortId } from "../format";
 import { useT } from "../i18n";
+import { useTerrain } from "../terrain";
 import type { Aircraft, Alert } from "../types";
 import { Sparkline } from "./Sparkline";
 
@@ -25,6 +26,10 @@ function Field({ label, value }: { label: string; value: string }) {
 export function DronePanel({ droneId, aircraft, alerts, now, onClose }: Props) {
   const t = useT();
   const d = aircraft?.data;
+  const ground = useTerrain(d?.lat_deg ?? null, d?.lon_deg ?? null);
+  const groundKnown = typeof ground === "object";
+  const aboveGround =
+    groundKnown && d?.alt_amsl_m != null ? d.alt_amsl_m - ground.elevation_m : null;
   return (
     <aside className="detail">
       <header className="detail-head">
@@ -108,6 +113,17 @@ export function DronePanel({ droneId, aircraft, alerts, now, onClose }: Props) {
             />
             <Field label={t("altitude_amsl")} value={num(d.alt_amsl_m, 1, "m")} />
             <Field label={t("altitude_home")} value={num(d.alt_above_home_m, 1, "m")} />
+            <Field
+              label={t("ground_elevation")}
+              value={
+                groundKnown
+                  ? `${num(ground.elevation_m, 0, "m")} · ${ground.dataset}`
+                  : ground === "loading"
+                    ? "…"
+                    : t("unknown")
+              }
+            />
+            <Field label={t("above_ground")} value={num(aboveGround, 0, "m")} />
             <Field label={t("heading")} value={num(d.heading_deg, 0, "°")} />
             <Field label={t("speed")} value={num(d.groundspeed_ms, 1, "m/s")} />
             <Field label={t("climb")} value={num(d.climb_ms, 1, "m/s")} />
