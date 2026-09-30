@@ -428,11 +428,15 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
       *Added* 2026-09-29 with the owner, for the monitoring direction.
       *Partial* 2026-09-29: Open Drone ID decoding checked against the
       reference library, a receiver datagram ingest
-      (`python -m gateway.remote_id_ingest`), HAE to AMSL through EGM96, the
-      console marking, and a simulator. A simulated broadcast raised a
-      conflict against a hovering SITL aircraft
-      (`docs/runbooks/p1-15-remote-id.md`). Not yet: a real broadcast and
-      receiver, receiver authentication, storing Remote ID tracks, and
+      (`python -m gateway.remote_id_ingest`), HAE to AMSL through a geoid
+      (EGM2008 since 2026-09-30), the console marking, and a simulator. A
+      simulated broadcast raised a conflict against a hovering SITL aircraft
+      (`docs/runbooks/p1-15-remote-id.md`).
+      2026-09-30: every observation is stored in `remote_id_observations`
+      (telemetry database) and replays as an unverified broadcast. Rows are
+      kept and retried while the database is down; checked by sending 40
+      before the table existed.
+      Not yet: a real broadcast and receiver, receiver authentication, and
       matching a broadcast serial to a registered aircraft, without which
       one of ours that also broadcasts appears twice.
 

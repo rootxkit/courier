@@ -35,7 +35,9 @@ GEOID_PATH=local/geoid/egm2008-2_5.pgm python -m gateway.remote_id_ingest
 
 Without `GEOID_PATH` the ingest runs and the aircraft are on the map, but
 they have no AMSL altitude and the monitor does not evaluate them. It says
-so at start-up.
+so at start-up. `TELEMETRY_DATABASE_URL` is required: every observation is
+kept there (below). The table comes from the telemetry migrations
+(`0006_remote_id_observations`).
 
 Test traffic, without a receiver:
 
@@ -44,6 +46,27 @@ python tools/remote_id_sim.py --start-lat <lat> --start-lon <lon> \
     --alt-amsl-m <m> --track-deg <deg> --speed-ms <m/s> --duration-s 90 \
     --geoid local/geoid/egm2008-2_5.pgm
 ```
+
+## What is kept
+
+Every observation the ingest publishes is also a row of
+`remote_id_observations` in the telemetry database, written in batches every
+half second. A row holds:
+
+- the broadcast identity;
+- the claimed position;
+- both heights: the ellipsoid height as broadcast, and the AMSL height with
+  the geoid model that produced it;
+- the receiver and transmitter;
+- the raw frame, so the decode can be checked later.
+
+Remote ID has no raw archive, so if the database is down the rows are kept
+in memory and retried. Up to 50,000 are kept, about ten minutes of a busy
+sky. Past that the oldest are dropped, counted and logged.
+
+Replay lists these aircraft as "(Remote ID)". It replays them from the
+table, marked as an unverified broadcast. Their "flights" are the spans
+they declared themselves airborne.
 
 ## How to read it
 
@@ -71,12 +94,22 @@ python tools/remote_id_sim.py --start-lat <lat> --start-lon <lon> \
   console showed the Remote ID aircraft as broadcast and unverified, and the
   conflict line between the two.
 
+## Verified 2026-09-30: storage and replay
+
+- A simulated broadcast of 40 observations was sent before the table
+  existed. The ingest held all 40 and kept retrying, logging each failure.
+  When the migration ran it wrote them, and none was lost.
+- Replay listed the aircraft as Remote ID, found one 39 s flight, and
+  replayed all 40 samples:
+  - one segment, no holes, no relay evidence;
+  - `authenticated: false`;
+  - 700.0 m AMSL, through EGM2008;
+  - battery, mode and armed all empty, never zero.
+
 ## Not yet
 
 - Receivers are not authenticated: keep the ingest on loopback until they
   are.
-- Remote ID tracks are not stored, so replay does not show them. Their
-  alerts are in the audit log.
 - One of our aircraft that also broadcasts Remote ID appears twice, and
   would raise a conflict with itself. Matching the broadcast serial to the
   registered aircraft is the rest of P1-15.

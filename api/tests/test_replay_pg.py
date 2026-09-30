@@ -432,6 +432,7 @@ async def test_every_aircraft_in_the_telemetry_registry_is_listed(
         "drone_id": str(drone_id),
         "label": "R-11",
         "retired": False,
+        "source": "mavlink",
     }
 
 
@@ -459,6 +460,132 @@ async def test_flights_are_armed_spans_split_by_long_silence(
     assert [(f["start"], f["end"]) for f in flights] == [
         (at(600).isoformat(), at(620).isoformat()),
         (at(0).isoformat(), at(30).isoformat()),
+    ]
+
+
+# --- Remote ID aircraft (P1-15) -------------------------------------------------
+
+
+async def add_broadcast(
+    engine: AsyncEngine,
+    aircraft: UUID,
+    seconds: list[float],
+    *,
+    ua_id: str,
+    receiver: str,
+    status: int = 2,
+) -> None:
+    """Rows as gateway/remote_id_store.py writes them."""
+    async with engine.begin() as connection:
+        for s in seconds:
+            await connection.execute(
+                sa.text(
+                    "INSERT INTO remote_id_observations (aircraft_id, ts, "
+                    " receiver_id, transmitter, ua_id, id_type, status, geom, "
+                    " alt_hae_m, alt_amsl_m, geoid_model, vx_ms, vy_ms, vz_ms, "
+                    " payload) VALUES (:a, :ts, :r, 'AA:BB', :u, 1, :st, "
+                    " ST_SetSRID(ST_MakePoint(:lon, :lat), 4326), 540.0, 524.1, "
+                    " 'EGM2008', 0.0, 8.0, 0.0, '\\x00')"
+                ),
+                {
+                    "a": aircraft,
+                    "ts": at(s),
+                    "r": receiver,
+                    "u": ua_id,
+                    "st": status,
+                    "lat": 41.7,
+                    "lon": 44.8 + s * 1e-5,
+                },
+            )
+
+
+async def test_remote_id_aircraft_heard_are_listed_as_such(
+    client: AsyncClient, engine: AsyncEngine
+) -> None:
+    aircraft = uuid4()
+    await add_broadcast(engine, aircraft, [0.0], ua_id="SN-LIST-1", receiver="rx-l")
+
+    listed = {d["drone_id"]: d for d in (await client.get("/replay/drones")).json()}
+
+    assert listed[str(aircraft)] == {
+        "drone_id": str(aircraft),
+        "label": "SN-LIST-1",
+        "retired": False,
+        "source": "remote_id",
+    }
+
+
+async def test_a_remote_id_track_replays_as_an_unverified_broadcast(
+    client: AsyncClient, engine: AsyncEngine
+) -> None:
+    aircraft = uuid4()
+    receiver = f"rx-{uuid4().hex[:8]}"
+    # A 20 s silence in the middle, and a relay station that happens to share
+    # the receiver's name and has a link state logged inside that silence.
+    await add_broadcast(
+        engine,
+        aircraft,
+        every(0, 10) + every(30, 40),
+        ua_id="SN-R-1",
+        receiver=receiver,
+    )
+    await add_ingest_event(
+        engine, receiver, at(20), "link_state", {"state": "unreachable"}
+    )
+
+    replay = await get_replay(client, aircraft, -1, 41)
+
+    assert (replay["label"], replay["source"], replay["authenticated"]) == (
+        "SN-R-1",
+        "remote_id",
+        False,
+    )
+    assert replay["stations"] == [receiver]
+    first = replay["samples"][0]
+    assert first["alt_amsl_m"] == 524.1
+    assert (first["batt_pct"], first["mode"], first["armed"], first["heading_deg"]) == (
+        None,
+        None,
+        None,
+        None,
+    )
+    assert len(replay["segments"]) == 2
+    assert [hole["cause"] for hole in replay["holes"]] == ["no_telemetry"]
+    assert replay["evidence"] == []
+
+
+async def test_our_own_aircraft_replay_as_authenticated(
+    client: AsyncClient, engine: AsyncEngine
+) -> None:
+    drone_id = await add_drone(engine, "R-12")
+    await add_samples(engine, drone_id, every(0, 2), station="replay-own")
+
+    replay = await get_replay(client, drone_id, 0, 2)
+
+    assert (replay["source"], replay["authenticated"]) == ("mavlink", True)
+
+
+async def test_remote_id_flights_are_spans_declared_airborne(
+    client: AsyncClient, engine: AsyncEngine
+) -> None:
+    aircraft = uuid4()
+    await add_broadcast(engine, aircraft, every(0, 20), ua_id="SN-F-1", receiver="rx-f")
+    await add_broadcast(
+        engine, aircraft, every(21, 60), ua_id="SN-F-1", receiver="rx-f", status=1
+    )
+    await add_broadcast(
+        engine, aircraft, every(600, 610), ua_id="SN-F-1", receiver="rx-f"
+    )
+
+    response = await client.get(
+        f"/replay/drones/{aircraft}/flights",
+        params={"since": at(-100).isoformat(), "until": at(1000).isoformat()},
+    )
+
+    assert response.status_code == 200, response.text
+    assert [(f["start"], f["end"]) for f in response.json()] == [
+        (at(600).isoformat(), at(610).isoformat()),
+        (at(0).isoformat(), at(20).isoformat()),
     ]
 
 
