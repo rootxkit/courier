@@ -105,25 +105,53 @@ compares it with the DEM at the same position:
 python -m tools.terrain_compare --archive local/e2e/archive --terrain local/terrain --json local/terrain/compare-2026-09-30.json
 ```
 
-Measured 2026-09-30, DEM minus flight controller:
+Measured 2026-09-30 from SITL flights that went through the full pipeline
+(relay, Gateway, raw archive). The table gives DEM minus flight controller,
+per 1 x 1 degree cell:
 
-| Source | Reports | Median | Stdev | Max abs |
-|---|---|---|---|---|
-| hexa-01, the real aircraft (SYSID 1) | 11,520 | not compared: all `loaded=0` | | |
-| SITL, stationary (204-211) | 3,270-5,152 each | -2.8 to -6.6 m, constant per position | 0 | 2.8-6.6 m |
-| SITL, flying (201, 202) | 14,770 / 10,062 | -2.9 / -4.8 m | 13.7 m | 27.1 m |
-| SITL 203 | 6,003 | -5.8 m | 2.3 m | 24.2 m |
+| Cell | Terrain | DEM | Flight | Reports | Median | Stdev | p95 abs | Max abs |
+|---|---|---|---|---|---|---|---|---|
+| N42E042, Samtredia | plain | GLO-30 | 60 m, 1 km square | 2,091 | +1.5 m | 1.8 m | 4.3 m | 6.4 m |
+| N42E044, Kazbegi | valley and slopes, ground 1,674-1,842 m | GLO-30 | 250 m, 1.5 km N and 0.7 km W | 3,027 | +0.4 m | 3.5 m | 6.9 m | 14.4 m |
+| N41E044, Tbilisi | city, hills | GLO-90 | hovers and short legs, SYSID 201 | 15,693 | -2.9 m | 13.4 m | 27.1 m | 27.1 m |
+| - | - | - | hexa-01, the real aircraft | 11,520 | not compared: all `loaded=0` | | | |
+
+Stationary SITL aircraft in Tbilisi (SYSIDs 204-211) show a constant
+-2.8 to -6.6 m.
+
+Where the flight controller's terrain came from:
+
+- **Samtredia and Kazbegi** used ArduPilot's own terrain files, put in
+  `terrain/` beside the repository (the SITL working directory) from
+  `https://terrain.ardupilot.org/tilesdat3/<cell>.DAT.gz`, 100 m grid. These
+  are the files a real aircraft's SD card would hold.
+- **Tbilisi** used a file a ground station had filled block by block during
+  earlier runs. Only 9 blocks were filled. In the one block checked against
+  `tilesdat3`, it differs by -22 to +15 m, with a mean of -0.9 m.
 
 What this shows:
 
-- **On flat ground, a steady offset of 3-7 m.** ArduPilot's terrain is
-  SRTM-derived bare ground on its own vertical reference. The difference is
-  expected, not an error in either source.
-- **In motion, up to 27 m.** The two surfaces are sampled at different
-  resolutions and times on a slope, so they diverge there.
-- **One area only.** All of it is the Tbilisi GLO-90 cell, because that is
-  where SITL flies. No GLO-30 cell and no mountains have been compared yet.
-  SITL started elsewhere (`SITL_HOME`) would measure them.
+- **With GLO-30, the two sources agree to a few metres.** On the plain
+  95 % of reports agree within 4.3 m; in the mountains, within 6.9 m.
+  Neither source is the truth. ArduPilot's terrain is SRTM-derived bare
+  ground on a 100 m grid; Copernicus is the surface (roofs, trees).
+  Slopes widen the spread: the maximum is 14 m in the mountains against
+  6 m on the plain.
+- **Tbilisi's 27 m is the worst case, and it is not one cause.** Two
+  differences compound there: GLO-90 (90 m spacing) where the other cells
+  have 30 m, and a different flight-controller source. It is not evidence
+  that cities are worse.
+- **None of this helps the real aircraft.** It had no terrain loaded, so
+  the DEM is the only height-above-ground there is. Loading terrain onto it
+  would give the cross-check the SITL runs had.
+
+To repeat a run:
+
+1. Put the cell's `tilesdat3` file in `terrain/`.
+2. Start SITL with `SITL_HOME` in that cell.
+3. Fly the aircraft over ground that varies.
+4. Run `tools.terrain_compare` over the archive. It keeps each cell apart
+   even when one SYSID flew several.
 
 `SITL_HOME` was 450 m for years; the ground there is 605 m. The DEM exposed
 the gap, and the default is now 605 (`sim/sitl.env.example`, CI).
