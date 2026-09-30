@@ -6,7 +6,9 @@ P5-00 is done when the disagreement between the two sources is a measured
 number rather than an assumption. This reads every `TERRAIN_REPORT` in the
 archive (what a flight controller says the ground under it is, from its own
 terrain database), looks up the DEM at the same position, and reports the
-difference per aircraft and per DEM dataset.
+difference per aircraft, per 1 x 1 degree cell and per DEM dataset: the
+cell keeps a run in the mountains apart from one on the plain when the same
+SITL SYSID flew both.
 
 A report with `loaded == 0` is not an answer: the flight controller has no
 terrain data and says 0.0 m. Those are counted and left out, never compared
@@ -28,7 +30,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from common.terrain import Terrain
+from common.terrain import Terrain, cell_name
 from gateway.archive import RawArchive
 from gateway.parsing import parse_datagram
 
@@ -59,7 +61,8 @@ class Tally:
 
 
 def compare(archive_root: Path, terrain: Terrain) -> dict[str, Tally]:
-    """Tallies keyed by "sysid <n> / <dataset>" (dataset "-" if not compared)."""
+    """Tallies keyed by "sysid <n> / <cell> / <dataset>", or "sysid <n> / -"
+    for reports that were not compared."""
     archive = RawArchive(root=archive_root)
     tallies: dict[str, Tally] = defaultdict(Tally)
     for segment in sorted(archive_root.rglob("*.zst")):
@@ -78,7 +81,8 @@ def compare(archive_root: Path, terrain: Terrain) -> dict[str, Tally]:
                 if dem is None:
                     tallies[f"sysid {sysid} / -"].outside_dem += 1
                     continue
-                tallies[f"sysid {sysid} / {dem.dataset}"].differences_m.append(
+                key = f"sysid {sysid} / {cell_name(lat, lon)} / {dem.dataset}"
+                tallies[key].differences_m.append(
                     dem.elevation_m - float(report.terrain_height)
                 )
     return dict(tallies)
