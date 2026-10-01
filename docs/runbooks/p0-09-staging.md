@@ -18,7 +18,7 @@ Compose network with no published ports.
 /srv/utm                      a clone of the repository at the deployed commit
 /srv/utm/infra/deploy/.env    secrets, written once by make_env.sh (mode 600)
 /srv/utm/infra/deploy/secrets/gateway.tokens   station tokens (uid 10001, mode 400)
-/srv/utm/infra/deploy/data/   basemap, terrain tiles, geoid (read-only mounts)
+/srv/utm/infra/deploy/data/   basemap, terrain tiles (read-only mounts)
 /var/backups/utm/<date>/      nightly dumps, 14 days
 ```
 

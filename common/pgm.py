@@ -1,6 +1,6 @@
-"""16-bit binary PGM grids with named header values. P1-15, P5-00.
+"""16-bit binary PGM grids with named header values. P5-00.
 
-The geoid and the terrain tiles are stored the way GeographicLib stores its
+The terrain tiles are stored the way GeographicLib stores its
 geoid grids: a binary PGM ("P5") whose comment lines carry named values
 (`# Offset -108`), followed by big-endian unsigned 16-bit samples, row-major.
 A stored value v means Offset + Scale * v. Plain enough to read without a
