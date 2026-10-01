@@ -4,7 +4,7 @@ Every task has an ID, a deliverable, and an acceptance criterion. A task is done
 when the criterion is demonstrable, not when the code compiles. Reference the ID
 in the commit message.
 
-Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked
+Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked · `[-]` removed from scope
 
 ---
 
@@ -427,7 +427,7 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
       how far behind. Not yet produced by a live overloaded Gateway.
       ADR-002's N >= 5 is still unruled and is not needed by this state.
 
-- [~] **P1-15** Remote ID ingest: observations from Remote ID receivers
+- [-] **P1-15** Remote ID ingest: observations from Remote ID receivers
       (ASTM F3411 / ASD-STAN EN 4709-002, decoded to Open Drone ID JSON)
       become tracks on the same map and in the same airspace monitor as
       MAVLink telemetry. Receiver-agnostic: an adapter per source (a
@@ -456,6 +456,10 @@ Goal: telemetry from many vehicles reaches the database and a browser map.
       while that aircraft's MAVLink telemetry is live, and published as that
       aircraft when it is not: one track either way.
       Not yet: a real broadcast and receiver (the done-when above).
+      *Removed* 2026-10-01 from courier's scope: Remote ID ingest belongs to
+      the national UTM; courier reports its fleet to it. The code, the
+      runbook and `remote_id_observations` were removed (telemetry
+      migration 0009); the history above is kept as it was.
 
 - [ ] **P1-16** Manned traffic: ADS-B positions (an RTL-SDR receiver, or an
       aggregator feed where licensing allows) on the map and in the airspace
