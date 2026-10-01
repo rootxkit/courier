@@ -141,12 +141,6 @@ services:
     volumes:
       - ./data/terrain:/data/terrain:ro
 
-  remote-id:
-    <<: *app
-    command: ["python", "-m", "gateway.remote_id_ingest"]
-    volumes:
-      - ./data/geoid:/data/geoid:ro
-
   caddy:
     image: caddy:2-alpine
     ports:

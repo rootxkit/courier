@@ -75,7 +75,6 @@
       .clickable:hover { background: rgba(128, 128, 128, 0.12); }
       .selected { font-weight: 600; }
       .muted { opacity: 0.7; }
-      .unverified { color: var(--alert); font-weight: 600; margin: 4px 0; }
       .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
       .pill {
         display: inline-block;
@@ -130,7 +129,6 @@
       <label><span data-i18n="from_utc"></span> <input id="from" class="mono" size="24" /></label>
       <label><span data-i18n="to_utc"></span> <input id="to" class="mono" size="24" /></label>
       <button id="load" data-i18n="load"></button>
-      <div id="unverified" class="unverified" hidden></div>
       <div id="message" class="muted"></div>
       <h2 data-i18n="at_cursor"></h2>
       <div id="state" class="grid"></div>
@@ -235,8 +233,6 @@
           no_basemap: "no base map installed — run infra/basemap/fetch_basemap.sh",
           unnamed: "unnamed",
           retired: "retired",
-          remote_id: "Remote ID",
-          unverified: "Remote ID broadcast, not verified: the track is where the transmitter claimed to be.",
         },
         ka: {
           replay: "ფრენის ჩანაწერი",
@@ -303,8 +299,6 @@
           no_basemap: "საბაზისო რუკა არ არის დაყენებული — გაუშვით infra/basemap/fetch_basemap.sh",
           unnamed: "უსახელო",
           retired: "ამოღებულია",
-          remote_id: "Remote ID",
-          unverified: "Remote ID მაუწყებლობა, დაუდასტურებელი: ტრეკი იქაა, სადაც გადამცემი ამბობდა, რომ იყო.",
         },
       };
 
@@ -557,8 +551,7 @@
           .map(
             (d) =>
               `<option value="${escapeHtml(d.drone_id)}">${escapeHtml(d.label || t("unnamed"))}` +
-              `${d.retired ? ` (${escapeHtml(t("retired"))})` : ""}` +
-              `${d.source === "remote_id" ? ` (${escapeHtml(t("remote_id"))})` : ""}</option>`,
+              `${d.retired ? ` (${escapeHtml(t("retired"))})` : ""}</option>`,
           )
           .join("");
         const wanted = new URLSearchParams(location.search).get("drone");
@@ -633,9 +626,6 @@
           return;
         }
         replay = await response.json();
-        const unverified = document.getElementById("unverified");
-        unverified.hidden = replay.authenticated !== false;
-        unverified.textContent = replay.authenticated === false ? t("unverified") : "";
         times = replay.samples.map((s) => Date.parse(s.ts));
         windowStart = Date.parse(replay.start);
         windowEnd = Date.parse(replay.end);

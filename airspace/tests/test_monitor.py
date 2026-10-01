@@ -624,26 +624,26 @@ def test_per_source_state_is_bounded_however_many_station_ids_appear() -> None:
 
 
 def test_two_sources_for_one_aircraft_are_not_ordered_against_each_other() -> None:
-    """Relay and Remote ID both report the same aircraft; the relay's clock
-    is a minute fast. Neither source's samples are rejected as older than
+    """Two stations both relay the same aircraft; one station's clock is a
+    minute fast. Neither source's samples are rejected as older than
     the other's, so a resuming source does not go stale and re-raise."""
     monitor = AirspaceMonitor(policy=POLICY)
     monitor.observe(message(A, 0, at_s=60.0, rx_at_s=0.0, station="relay"), now_s=0.0)
     monitor.observe(message(A, 0, at_s=61.0, rx_at_s=1.0, station="relay"), now_s=1.0)
-    monitor.observe(message(A, 0, at_s=1.5, station="rid"), now_s=1.5)
+    monitor.observe(message(A, 0, at_s=1.5, station="relay-b"), now_s=1.5)
     monitor.observe(message(A, 0, at_s=62.0, rx_at_s=2.0, station="relay"), now_s=2.0)
-    monitor.observe(message(A, 0, at_s=2.5, station="rid"), now_s=2.5)
+    monitor.observe(message(A, 0, at_s=2.5, station="relay-b"), now_s=2.5)
 
     assert monitor.rejected == 0
     held = monitor.index.track(A)
-    assert held is not None and held.source == "rid"
+    assert held is not None and held.source == "relay-b"
     assert held.captured_at_s == pytest.approx(2.5)
     # Within one source the order still holds: an older record received no
     # later than the last one (the same batch) is out of order.
     monitor.observe(message(A, 500, at_s=61.5, rx_at_s=2.0, station="relay"), now_s=3.0)
     assert monitor.rejected_out_of_order == 1
     held = monitor.index.track(A)
-    assert held is not None and held.source == "rid"
+    assert held is not None and held.source == "relay-b"
 
 
 def test_a_sample_older_than_the_one_held_is_ignored(

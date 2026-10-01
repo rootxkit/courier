@@ -68,7 +68,6 @@ In `infra/.env`:
 
 ```
 TERRAIN_DIR=local/terrain
-GEOID_PATH=local/geoid/egm2008-2_5.pgm     # Remote ID; see p1-15-remote-id.md
 ```
 
 Restart the API. Without `TERRAIN_DIR`, `GET /terrain` answers 503 and the
@@ -88,10 +87,7 @@ console shows the elevation as unknown, never as 0.
   a city, canopy over a forest. Height above it errs low, which is the safe
   direction for clearance.
 - **Orthometric, on EGM2008.** Aircraft AMSL from MAVLink is compared
-  directly. Remote ID gives height above the ellipsoid, and
-  `common/geoid.py` converts it on the same EGM2008 grid. EGM96 would put
-  Georgia off by -2.3 to +4.7 m (Tbilisi 15.92 m on EGM2008 against
-  14.71 m on EGM96), which is why EGM2008 is the default.
+  directly.
 - **A few metres, and interpolated.** Accuracy is a few metres, bilinear
   between samples 30 or 90 m apart, so steep slopes add error. The console
   prints the dataset beside the number.
@@ -159,14 +155,8 @@ the gap, and the default is now 605 (`sim/sitl.env.example`, CI).
 ## Check it in the console
 
 `local\capacity\run\52-terrain-demo.bat` starts SITL hovering 30 m above
-home, plus a Remote ID aircraft flying east at 635 m AMSL. Select each
-aircraft:
+home. Select the aircraft:
 
 | Aircraft | Ground elevation | Above ground (approx.) |
 |---|---|---|
 | SITL-01 | 605 m · COP-DEM GLO-90 | 30 m, the same as "Above home" |
-| SIM-RID-0001 | rises to about 660 m | goes negative |
-
-SIM-RID-0001 goes negative because the ground rises 55 m within half a
-kilometre east of home, and the simulator flies a fixed altitude. The
-console shows that negative number as it is. Alerting on it is P5-19.

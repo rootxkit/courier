@@ -185,7 +185,6 @@ export function App() {
             {tab === "alerts" && (
               <AlertsPanel
                 alerts={state.alerts}
-                aircraft={state.aircraft}
                 acknowledged={activeAcks}
                 canAcknowledge={canAcknowledge}
                 onAcknowledge={acknowledge}

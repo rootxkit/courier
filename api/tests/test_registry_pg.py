@@ -178,7 +178,7 @@ async def test_an_unregistered_drone_is_not_bindable(engine: AsyncEngine) -> Non
 async def test_the_projection_carries_the_label_and_the_serial(
     client: AsyncClient, engine: AsyncEngine
 ) -> None:
-    """The serial is what the Remote ID ingest matches broadcasts against."""
+    """The serial is the one identifier of our airframe the telemetry side sees."""
     drone = await a_drone(client)
     async with engine.connect() as connection:
         row = (
@@ -269,7 +269,7 @@ async def test_retiring_closes_bindings_and_marks_the_projection(
         ).scalar_one()
     assert open_bindings == 0
     assert retired is not None
-    # Retiring keeps the serial: an old broadcast still names the airframe.
+    # Retiring keeps the serial: old telemetry still names the airframe.
     assert serial == drone["serial"]
 
     again = await client.post(f"/drones/{drone['id']}/retire")

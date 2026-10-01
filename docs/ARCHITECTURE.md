@@ -356,7 +356,8 @@ the command channel exists.
 - `AVOID_*` parameters plus proximity sensor if fitted.
 - 1 Hz peer broadcast over LoRa/ESP-NOW: `{sysid, lat, lon, alt, vx, vy, vz, ts}`.
   Fully independent of the server and the internet. The same transmitter can
-  serve Remote ID duty where that is mandated.
+  serve the aircraft's broadcast identification duty (ASTM F3411) where that
+  is mandated.
 
 ## 8. Mission delivery
 

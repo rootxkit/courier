@@ -78,8 +78,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--serial",
         default=None,
         help=(
-            "the serial its Remote ID module broadcasts (P1-15), so a broadcast "
-            "by this aircraft is matched to it rather than shown as a second one"
+            "the airframe's manufacturer serial, as the relational registry "
+            "holds it (drones.serial)"
         ),
     )
     parser.add_argument(

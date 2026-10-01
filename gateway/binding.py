@@ -185,8 +185,10 @@ class BindingResolver:
         A projection of the relational fleet registry, which the Gateway
         cannot reach. Keeping the two in step is the API's job.
 
-        `serial` is what the Remote ID ingest matches a broadcast against
-        (P1-15). None leaves a serial already projected as it is.
+        `serial` is the airframe's manufacturer serial, the projection of
+        the relational `drones.serial`: the one identifier of our own
+        airframe the telemetry side can see. None leaves a serial already
+        projected as it is.
         """
         values: dict[str, object] = {"label": label, "retired_at": retired_at}
         if serial is not None:
