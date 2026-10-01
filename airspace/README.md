@@ -14,18 +14,11 @@ unit tests alone.
 ## Time (S-11)
 
 Every telemetry message is evaluated at its capture time, `ts`, not when it
-arrived. What `ts` is depends on the path:
+arrived. `ts` is the ground PC's `recv_utc_ns`, the moment the relay
+received the frame. relay-v1 §9 says that clock may be wrong, drifting or
+stepped, and nothing corrects it upstream.
 
-- **Relay (MAVLink):** the ground PC's `recv_utc_ns`, the moment the relay
-  received the frame. relay-v1 §9 says that clock may be wrong, drifting or
-  stepped, and nothing corrects it upstream.
-- **Remote ID:** the Gateway's own receive time (`gateway/remote_id.py`).
-  The broadcast's `seconds_after_hour` is decoded (`gateway/odid.py`) but not
-  yet carried, so a Remote ID position is stamped when it reached the
-  Gateway, not when the aircraft measured it. Carrying the broadcast time is
-  a Gateway follow-up.
-
-Neither clock is trusted for placing an aircraft in time. Every message also
+That clock is not trusted for placing an aircraft in time. Every message also
 carries `rx_ts`, when the Gateway received the batch on its own clock;
 `captured_at`, where the Gateway placed the row on that clock (behind
 `rx_ts` by its spacing from the batch's newest record, so a draining

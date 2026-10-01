@@ -8,8 +8,7 @@ it can be tested without a bus or a database.
 
 ## What is considered
 
-Only **armed** aircraft (or, for Remote ID, aircraft declared airborne) with
-a position, an AMSL altitude and a velocity. An
+Only **armed** aircraft with a position, an AMSL altitude and a velocity. An
 aircraft on the ground at a base is routinely within metres of another, and
 alerting on it would teach operators to ignore the alert (P6-03). Armed is the
 nearest thing telemetry has to "flying"; erring towards armed-on-the-ground
@@ -23,10 +22,7 @@ state already says why (P1-05).
 
 Every message carries two times (`gateway/README.md`). `ts` is the clock of
 whoever captured it: on the relay path the ground PC's `recv_utc_ns`
-(relay-v1 §9: it may be wrong, drifting or stepped); on the Remote ID path
-the Gateway's own receive time, since the broadcast's `seconds_after_hour`
-is decoded but not yet carried, so a Remote ID position is stamped when it
-reached the Gateway, not when the aircraft measured it. `rx_ts` is when the
+(relay-v1 §9: it may be wrong, drifting or stepped). `rx_ts` is when the
 Gateway received the batch, on the Gateway's clock: one clock for every
 station. `captured_at` is where the Gateway placed the row on that clock:
 `rx_ts` less how far behind its batch's newest record it was captured, so a
@@ -169,8 +165,7 @@ class Change:
 
 
 def source_of(message: dict[str, Any]) -> str:
-    """Whose clock `ts` came from: the ground station (`station_id`) or, for
-    Remote ID, the receiver, which the Gateway also puts in `station_id`."""
+    """Whose clock `ts` came from: the ground station (`station_id`)."""
     for name in ("station_id", "source"):
         value = message.get(name)
         if value is not None and str(value):
@@ -255,12 +250,8 @@ def track_from_telemetry(
 
 
 def _flying(message: dict[str, Any]) -> bool:
-    """Armed, for MAVLink telemetry; declared airborne, for Remote ID (P1-15).
-
-    Remote ID has no arming state and says `armed: None`; its `airborne` is
-    False only for a declared "ground" status.
-    """
-    return message.get("armed") is True or message.get("airborne") is True
+    """Armed: the nearest thing MAVLink telemetry has to "flying"."""
+    return message.get("armed") is True
 
 
 def conflict_key(a: UUID, b: UUID) -> str:

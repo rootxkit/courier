@@ -210,12 +210,3 @@ def test_a_failing_check_does_not_clear_the_alert_it_could_not_evaluate() -> Non
         )
     cleared = m.observe(message(A, 0, alt_amsl_m=600.0, at_s=9.5), now_s=9.5).cleared
     assert [c.alert.key for c in cleared] == [height_key(A)]
-
-
-def test_a_remote_id_aircraft_declared_airborne_is_evaluated() -> None:
-    m = monitor()
-    broadcast = {**message(A, 0, alt_amsl_m=650.0, armed=None), "airborne": True}
-
-    raised = m.observe(broadcast, now_s=0.0).raised
-
-    assert [alert.kind for alert in raised] == [AlertKind.HEIGHT]

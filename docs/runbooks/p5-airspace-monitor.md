@@ -15,8 +15,7 @@ aircraft raises:
 
 Thresholds are the single row of `airspace_policy` in the relational
 database, seeded with the Stage 0 values: 60 s, 60 m, 20 m, 800 m radius,
-and a height limit of 120 m (the owner's figure; there is no minimum). Remote
-ID aircraft declared airborne are evaluated like armed ones.
+and a height limit of 120 m (the owner's figure; there is no minimum).
 Each alert is published on `alert.<key>`, written to `events` when raised
 and when cleared, and republished every second while active so the console's
 numbers are current. The console lists active alerts, sounds a tone for an

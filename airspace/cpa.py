@@ -67,8 +67,7 @@ class Track:
     # comparable at one instant, so the older is advanced to the newer
     # (`advance`) before the CPA.
     captured_at_s: float
-    # Who captured it: the ground station or Remote ID receiver whose clock
-    # `ts` came from. Samples are ordered only within a source.
+    # Who captured it: the ground station whose clock `ts` came from. Samples are ordered only within a source.
     source: str = "unknown"
     # The station's own capture clock (`ts`), for ordering within a source;
     # None when the message carried none. Never compared across sources.
