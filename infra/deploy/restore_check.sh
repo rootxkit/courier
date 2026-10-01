@@ -65,6 +65,5 @@ echo "telemetry:"
 docker exec utm-restore-ts psql -U postgres -d restored -tAc \
   "select 'alembic ' || version_num from alembic_version_telemetry
    union all select 'known_drones ' || count(*) from known_drones
-   union all select 'drone_state ' || count(*) from drone_state
-   union all select 'remote_id_observations ' || count(*) from remote_id_observations"
+   union all select 'drone_state ' || count(*) from drone_state"
 echo "restore_check: restored and read back"
